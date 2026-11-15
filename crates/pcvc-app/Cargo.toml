@@ -22,7 +22,9 @@ path = "src/main.rs"
 pcvc-protocol.workspace = true
 pcvc-audio.workspace = true
 pcvc-server.workspace = true
-iced = { version = "0.14", features = ["tokio", "svg"] }
+# Application icons are decoded by resvg/tiny-skia and handed to iced as
+# RGBA, so iced's image widget needs no codecs.
+iced = { version = "0.14", features = ["tokio", "svg", "image-without-codecs"] }
 resvg = { version = "0.45", default-features = false }
 tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "time"] }
 tracing.workspace = true

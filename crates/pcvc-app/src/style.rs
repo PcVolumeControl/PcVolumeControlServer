@@ -24,6 +24,8 @@ pub const LABEL_WIDTH: f32 = 140.0;
 pub const MUTE_WIDTH: f32 = 90.0;
 pub const PERCENT_WIDTH: f32 = 48.0;
 pub const STATUS_ICON: f32 = 64.0;
+/// Application icons in the Mixer.
+pub const APP_ICON: f32 = 24.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Button {

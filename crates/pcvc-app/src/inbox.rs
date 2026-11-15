@@ -9,6 +9,7 @@ use iced::futures::channel::mpsc;
 use iced::futures::stream::{self, BoxStream, StreamExt};
 use pcvc_audio::AudioState;
 
+use crate::app_icons::Resolved;
 use crate::server_ctl::ServerUpdate;
 use crate::tray::TrayAction;
 
@@ -19,6 +20,8 @@ pub enum Inbound {
     TrayFailed(String),
     Server(ServerUpdate),
     Audio(AudioState),
+    /// An application icon lookup finished.
+    AppIcon(Resolved),
     /// Another launch asked this instance to show its window.
     ShowRequested,
     /// The process was asked to terminate (Ctrl-C, SIGTERM).

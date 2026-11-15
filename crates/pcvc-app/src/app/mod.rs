@@ -11,12 +11,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, image, row, text};
 use iced::{Element, Length, Size, Subscription, Task, Theme, window};
 use pcvc_audio::{AudioBackend, AudioState};
 use pcvc_protocol::Command;
 use pcvc_server::{ClientInfo, MdnsStatus};
 
+use crate::app_icons::{IconCache, IconKey, IconWorker, Request, Resolver};
 use crate::audio::{self, CommandSender};
 use crate::config::{Config, WindowSize};
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
@@ -34,6 +35,9 @@ const MIN_SIZE: Size = Size::new(WindowSize::MIN.width, WindowSize::MIN.height);
 /// Longest wait for the server to stop on quit before exiting anyway.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Application icons remembered, found or not.
+const ICON_CACHE_CAPACITY: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Mixer,
@@ -48,6 +52,7 @@ pub enum Message {
     WindowCloseRequested(window::Id),
     WindowClosed(window::Id),
     WindowResized(window::Id, Size),
+    ScaleFactor(window::Id, f32),
     ShowPage(Page),
     ToggleServer,
     Mixer(MixerMessage),
@@ -64,6 +69,7 @@ pub struct Boot {
     pub config_path: Option<PathBuf>,
     pub show_window: bool,
     pub backend: Arc<dyn AudioBackend>,
+    pub icon_resolver: Arc<dyn Resolver>,
     pub inbox: Inbox,
     pub inbox_rx: InboxReceiver,
     pub logs: LogBuffer,
@@ -124,6 +130,10 @@ pub struct App {
     mdns: MdnsStatus,
     audio: Option<AudioState>,
     mixer: Mixer,
+    icon_worker: IconWorker,
+    icons: IconCache<IconKey, image::Handle>,
+    /// The window's scale factor, for rendering icons at physical size.
+    scale_factor: f32,
     /// When the pending mixer wake-up fires, if one is scheduled.
     mixer_timer: Option<std::time::Instant>,
     local_ips: Vec<Ipv4Addr>,
@@ -148,10 +158,12 @@ impl App {
             config_path,
             show_window,
             backend,
+            icon_resolver,
             inbox,
             inbox_rx,
             logs,
         } = boot;
+        let icon_worker = IconWorker::spawn(icon_resolver, inbox.clone());
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
         spawn_signal_handler(inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
@@ -177,6 +189,9 @@ impl App {
             mdns: MdnsStatus::Disabled,
             audio: None,
             mixer: Mixer::default(),
+            icon_worker,
+            icons: IconCache::new(ICON_CACHE_CAPACITY),
+            scale_factor: 1.0,
             mixer_timer: None,
             local_ips: Vec::new(),
             local_ips_error: None,
@@ -234,6 +249,11 @@ impl App {
             Message::Inbound(Inbound::Audio(state)) => {
                 self.mixer.on_state(&state);
                 self.audio = Some(state);
+                self.request_icons();
+                Task::none()
+            }
+            Message::Inbound(Inbound::AppIcon(resolved)) => {
+                self.icons.finish(resolved.key, resolved.icon);
                 Task::none()
             }
             Message::Inbound(Inbound::Server(update)) => self.server_update(update),
@@ -252,6 +272,13 @@ impl App {
                 {
                     self.config.window.width = size.width;
                     self.config.window.height = size.height;
+                }
+                Task::none()
+            }
+            Message::ScaleFactor(id, factor) => {
+                if self.window == Some(id) && factor.is_finite() && factor > 0.0 {
+                    self.scale_factor = factor;
+                    self.request_icons();
                 }
                 Task::none()
             }
@@ -370,7 +397,31 @@ impl App {
             ..Default::default()
         });
         self.window = Some(id);
-        opened.discard()
+        self.request_icons();
+        opened.then(|id| window::scale_factor(id).map(move |f| Message::ScaleFactor(id, f)))
+    }
+
+    /// Edge length of application icons in physical pixels.
+    fn icon_size(&self) -> u32 {
+        (style::APP_ICON * self.scale_factor.clamp(1.0, 4.0)).ceil() as u32
+    }
+
+    /// Starts lookups for the icons of the shown sessions that are not
+    /// known yet. Nothing is looked up while the window is closed.
+    fn request_icons(&mut self) {
+        if self.window.is_none() {
+            return;
+        }
+        let Some(device) = self.audio.as_ref().and_then(|a| a.default_device.as_ref()) else {
+            return;
+        };
+        let size = self.icon_size();
+        for session in &device.sessions {
+            let request = Request::new(session, size);
+            if self.icons.request(&request.key) {
+                self.icon_worker.request(request);
+            }
+        }
     }
 
     /// Closing the window hides the app to the tray, or quits without one.

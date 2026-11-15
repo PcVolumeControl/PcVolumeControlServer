@@ -39,6 +39,7 @@ impl Harness {
             config_path: None,
             show_window: false,
             backend: Arc::clone(&backend) as Arc<dyn AudioBackend>,
+            icon_resolver: Arc::new(crate::app_icons::NoIcons),
             inbox,
             inbox_rx,
             logs: LogBuffer::new(10),
