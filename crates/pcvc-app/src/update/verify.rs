@@ -3,13 +3,16 @@
 
 use minisign_verify::{PublicKey, Signature};
 
-/// The minisign public key (the base64 line of `minisign.pub`) that release
-/// checksums must be signed with. With `None`, installs rely on the checksum
-/// alone. See docs/RELEASING.md for making a key.
-const UPDATE_PUBLIC_KEY: Option<&str> = None;
+/// The minisign public key file (`minisign.pub`) that release checksums
+/// must be signed with. While it is empty, installs rely on the checksum
+/// alone. docs/RELEASING.md describes making a key; the release workflow
+/// reads the same file.
+const UPDATE_PUBLIC_KEY: &str = include_str!("../../assets/update-key.pub");
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VerifyError {
+    #[error("SHA256SUMS is not text")]
+    SumsNotText,
     #[error("SHA256SUMS is malformed (line {0})")]
     MalformedSums(usize),
     #[error("SHA256SUMS has no entry for {0}")]
@@ -28,9 +31,16 @@ pub enum VerifyError {
 
 /// The key installs must be signed with, if one is built in.
 pub fn signing_key() -> Result<Option<PublicKey>, VerifyError> {
-    UPDATE_PUBLIC_KEY
-        .map(|key| PublicKey::from_base64(key.trim()).map_err(|_| VerifyError::BadKey))
-        .transpose()
+    parse_key(UPDATE_PUBLIC_KEY)
+}
+
+fn parse_key(file: &str) -> Result<Option<PublicKey>, VerifyError> {
+    if file.trim().is_empty() {
+        return Ok(None);
+    }
+    PublicKey::decode(file.trim())
+        .map(Some)
+        .map_err(|_| VerifyError::BadKey)
 }
 
 /// The SHA-256 that `sums` (as written by `sha256sum`, text or binary mode)
@@ -208,7 +218,21 @@ pub mod tests {
     }
 
     #[test]
-    fn built_in_key_is_valid_if_set() {
-        assert!(signing_key().is_ok());
+    fn key_files() {
+        assert!(signing_key().is_ok(), "the built-in key file is valid");
+        assert!(matches!(parse_key(""), Ok(None)));
+        assert!(matches!(parse_key("\n"), Ok(None)));
+        let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let file = pair.pk.to_box().unwrap().to_string();
+        assert!(file.starts_with("untrusted comment:"), "{file}");
+        assert!(matches!(parse_key(&file), Ok(Some(_))));
+        assert_eq!(
+            parse_key(&format!("{file}\r\n")).map(|k| k.is_some()),
+            Ok(true)
+        );
+        assert!(matches!(
+            parse_key("untrusted comment: x\nnot base64"),
+            Err(VerifyError::BadKey)
+        ));
     }
 }

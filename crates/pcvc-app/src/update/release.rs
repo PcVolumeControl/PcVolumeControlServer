@@ -97,10 +97,10 @@ pub struct Release {
 }
 
 impl Release {
-    /// Whether everything an install needs is attached (the signature is
-    /// checked for when installing).
-    pub fn installable(&self) -> bool {
-        self.asset.is_some() && self.checksums.is_some()
+    /// Whether everything an install needs is attached: the asset, its
+    /// checksums and, when installs must be signed, their signature.
+    pub fn installable(&self, signed: bool) -> bool {
+        self.asset.is_some() && self.checksums.is_some() && (!signed || self.signature.is_some())
     }
 }
 
@@ -274,6 +274,8 @@ pub mod tests {
                 panic!("{kind:?}");
             };
             assert_eq!(release.page_url, format!("{base}/tag/v1.2.3"));
+            assert!(release.installable(false));
+            assert!(!release.installable(true), "unsigned");
             let asset = release.asset.unwrap();
             assert_eq!(asset.name, name);
             assert_eq!(asset.size, 1234);
@@ -301,7 +303,7 @@ pub mod tests {
         ) else {
             panic!()
         };
-        assert!(!release.installable());
+        assert!(!release.installable(false));
         assert_eq!((release.asset, release.checksums), (None, None));
 
         let mut value: serde_json::Value =

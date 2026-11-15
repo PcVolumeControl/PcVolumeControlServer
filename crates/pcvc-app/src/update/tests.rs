@@ -254,6 +254,21 @@ fn rate_limits() {
         check(&server, "1.0.0"),
         Err(CheckError::Http(HttpError::RateLimited))
     );
+    server.route(
+        "/repos/latest",
+        Reply {
+            headers: vec![
+                ("X-RateLimit-Remaining".into(), "40".into()),
+                ("Retry-After".into(), "60".into()),
+            ],
+            ..status(403)
+        },
+    );
+    assert_eq!(
+        check(&server, "1.0.0"),
+        Err(CheckError::Http(HttpError::RateLimited)),
+        "secondary rate limit"
+    );
     server.route("/repos/latest", status(429));
     assert_eq!(
         check(&server, "1.0.0"),
@@ -460,10 +475,7 @@ fn download_failures_leave_nothing() {
     publish(&server, b"installer");
     let release = available(&server);
     server.route(path, ok(b"installer and more".to_vec()));
-    assert!(matches!(
-        download(&server, &release),
-        DownloadError::Http(HttpError::TooLarge(_))
-    ));
+    assert_eq!(download(&server, &release), DownloadError::WrongSize);
     server.route(
         path,
         Reply {
@@ -471,10 +483,14 @@ fn download_failures_leave_nothing() {
             ..ok(b"installer and more".to_vec())
         },
     );
-    assert!(matches!(
+    assert_eq!(download(&server, &release), DownloadError::WrongSize);
+    // Not text.
+    server.route("/download/v1.2.3/SHA256SUMS", ok(vec![0xff, 0xfe]));
+    assert_eq!(
         download(&server, &release),
-        DownloadError::Http(HttpError::TooLarge(_))
-    ));
+        DownloadError::Verify(VerifyError::SumsNotText)
+    );
+    publish(&server, b"installer");
     // Shorter.
     server.route(
         path,
@@ -525,6 +541,23 @@ fn download_failures_leave_nothing() {
     let mut huge = release;
     huge.asset.as_mut().unwrap().size = 101 * 1024 * 1024;
     assert_eq!(download(&server, &huge), DownloadError::TooLarge);
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_failures_are_not_network_errors() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::start();
+    publish(&server, b"installer");
+    let release = available(&server);
+    let dir = tempfile::tempdir().unwrap();
+    let updates = dir.path().join("updates");
+    std::fs::create_dir(&updates).unwrap();
+    std::fs::set_permissions(&updates, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result =
+        download::download_and_verify(&server.client(), &release, None, &updates, &mut |_| {});
+    std::fs::set_permissions(&updates, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(result, Err(DownloadError::Io(_))), "{result:?}");
 }
 
 /// Publishes a signature for the checksums and returns the release as a

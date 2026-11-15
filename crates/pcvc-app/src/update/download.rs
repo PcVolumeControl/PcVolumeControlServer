@@ -57,19 +57,23 @@ pub enum Progress {
     Verifying,
 }
 
-/// A verified installer. Dropping it deletes its directory, which fails
-/// harmlessly on Windows while the installer runs; the next start clears
-/// what is left (see [`clear`]).
+/// A verified installer, held open so that until this is dropped the file
+/// cannot be changed, replaced or renamed (on Windows; elsewhere nothing
+/// runs it). Dropping it deletes its directory, which fails harmlessly on
+/// Windows while the installer runs; the next start clears what is left
+/// (see [`clear`]).
 #[derive(Debug)]
 pub struct Verified {
     dir: PathBuf,
     pub path: PathBuf,
     /// Whether a signature was checked as well as the checksum.
     pub signed: bool,
+    lock: Option<File>,
 }
 
 impl Drop for Verified {
     fn drop(&mut self) {
+        self.lock = None;
         remove_dir(&self.dir);
     }
 }
@@ -130,14 +134,13 @@ pub fn download_and_verify(
         };
         verify::verify_signature(key, &sums, &signature)?;
     }
-    let sums = std::str::from_utf8(&sums).map_err(|_| VerifyError::MalformedSums(0))?;
+    let sums = std::str::from_utf8(&sums).map_err(|_| VerifyError::SumsNotText)?;
     let expected = verify::digest_for(sums, &asset.name)?;
 
     let dir = create_private_dir(updates_dir)?;
     let mut guard = DirGuard(Some(dir.clone()));
     let path = dir.join(&asset.name);
     let mut file = File::options().write(true).create_new(true).open(&path)?;
-    let mut hasher = Sha256::new();
     let mut done = 0u64;
     let mut reported = None;
     progress(Progress::Downloading {
@@ -149,31 +152,35 @@ pub fn download_and_verify(
         max_bytes: asset.size,
         total: INSTALLER_TOTAL,
     };
-    let length = client.get(&asset.url, limits, &mut |chunk| {
-        hasher.update(chunk);
-        file.write_all(chunk)?;
-        done += chunk.len() as u64;
-        let percent = done * 100 / asset.size;
-        if reported != Some(percent) {
-            reported = Some(percent);
-            progress(Progress::Downloading {
-                done,
-                total: asset.size,
-            });
-        }
-        Ok(())
-    })?;
+    let length = client
+        .get(&asset.url, limits, &mut |chunk| {
+            file.write_all(chunk)?;
+            done += chunk.len() as u64;
+            let percent = done * 100 / asset.size;
+            if reported != Some(percent) {
+                reported = Some(percent);
+                progress(Progress::Downloading {
+                    done,
+                    total: asset.size,
+                });
+            }
+            Ok(())
+        })
+        .map_err(|e| match e {
+            HttpError::Sink(e) => DownloadError::Io(e),
+            HttpError::TooLarge(_) => DownloadError::WrongSize,
+            e => e.into(),
+        })?;
     file.sync_all()?;
     drop(file);
     progress(Progress::Verifying);
     if length != asset.size {
         return Err(DownloadError::WrongSize);
     }
-    if hasher.finalize().as_slice() != expected {
-        return Err(VerifyError::ChecksumMismatch.into());
-    }
-    // What is on disk, which is what will run, must match too.
-    if hash_file(&path)? != expected {
+    // Hashed through the handle that keeps the file as it is until it has
+    // run, so what runs is what was checked.
+    let mut lock = open_locked(&path)?;
+    if hash(&mut lock)? != expected {
         return Err(VerifyError::ChecksumMismatch.into());
     }
     guard.0 = None;
@@ -181,11 +188,28 @@ pub fn download_and_verify(
         dir,
         path,
         signed: key.is_some(),
+        lock: Some(lock),
     })
 }
 
-fn hash_file(path: &Path) -> std::io::Result<[u8; 32]> {
-    let mut file = File::open(path)?;
+/// Opens `path` for reading while denying others writing, deleting and
+/// renaming it. Running it is still allowed.
+#[cfg(target_os = "windows")]
+fn open_locked(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    File::options()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_locked(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+fn hash(file: &mut File) -> std::io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; 64 * 1024];
     loop {

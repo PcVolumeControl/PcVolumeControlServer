@@ -38,8 +38,9 @@ pub enum HttpError {
     Timeout,
     #[error("{0}")]
     Network(String),
+    /// The caller's sink failed, such as a disk write.
     #[error("{0}")]
-    Io(String),
+    Sink(String),
 }
 
 /// Where requests may go and how long they may take.
@@ -227,7 +228,11 @@ impl Client {
                 }
                 404 => return Err(HttpError::NotFound),
                 429 => return Err(HttpError::RateLimited),
-                403 if header("x-ratelimit-remaining").as_deref() == Some("0") => {
+                // The primary limit leaves none remaining; secondary limits
+                // say when to retry.
+                403 if header("x-ratelimit-remaining").as_deref() == Some("0")
+                    || header("retry-after").is_some() =>
+                {
                     return Err(HttpError::RateLimited);
                 }
                 _ => return Err(HttpError::Status(status)),
@@ -280,7 +285,7 @@ fn read_body(
         if total > max_bytes {
             return Err(HttpError::TooLarge(max_bytes));
         }
-        sink(&buffer[..n]).map_err(|e| HttpError::Io(e.to_string()))?;
+        sink(&buffer[..n]).map_err(|e| HttpError::Sink(e.to_string()))?;
     }
 }
 

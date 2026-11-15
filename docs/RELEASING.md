@@ -97,6 +97,48 @@ Windows (10 or 11):
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` are gone.
 - The portable zip runs from an arbitrary folder.
 
+## Signing updates (optional)
+
+The app verifies an installer it downloads against `SHA256SUMS` from the
+same release. That proves the download is intact, not who published it: an
+attacker able to upload release assets could replace both. A minisign
+signature over `SHA256SUMS` closes that gap. It is off until you create a
+key; once `crates/pcvc-app/assets/update-key.pub` holds a public key, builds
+refuse to install an update without a valid `SHA256SUMS.minisig`.
+
+1. Install minisign (`apt install minisign`, `brew install minisign` or
+   `scoop install minisign`) and create a key pair without a password (the
+   GitHub secret store protects it), somewhere outside the repository:
+
+   ```sh
+   minisign -G -W -p minisign.pub -s minisign.key
+   ```
+
+   Keep `minisign.key` offline as well, for example in a password manager.
+2. Add the secret key to the repository as an Actions secret named
+   `MINISIGN_SECRET_KEY` (Settings > Secrets and variables > Actions), with
+   the whole content of `minisign.key` as its value:
+
+   ```sh
+   gh secret set MINISIGN_SECRET_KEY < minisign.key
+   ```
+
+3. Copy `minisign.pub` over `crates/pcvc-app/assets/update-key.pub` and
+   commit it. Builds from that commit on require signed releases.
+
+The `publish` job signs `SHA256SUMS` when the secret is set, checks the
+signature against `update-key.pub` and attaches `SHA256SUMS.minisig` to the
+release. It fails when `update-key.pub` has a key but the secret is missing,
+since those builds could not install the release.
+
+Versions released before the key was added keep installing on checksums
+alone; the first signed release reaches them that way. Replacing the key is
+a manual job: the release that carries a new public key must still be signed
+with the old secret, which the workflow's check against `update-key.pub`
+does not allow, so that one release needs a one-off change to the workflow.
+If the secret key is lost, everyone on a version with its public key has to
+install the next release by hand.
+
 ## Icons
 
 `crates/pcvc-app/assets/app.svg` is the source. `packaging/linux/` holds a
