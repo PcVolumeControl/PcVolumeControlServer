@@ -24,6 +24,8 @@ mod server_ctl;
 mod style;
 mod tray;
 mod update;
+#[cfg(target_os = "windows")]
+mod win;
 
 use std::process::ExitCode;
 use std::sync::Mutex;

@@ -1,9 +1,12 @@
 //! Checks and installs on a background thread, one job at a time, with
 //! results posted to the inbox.
 
+use std::cell::Cell;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::process::{Child, ExitStatus};
 use std::sync::mpsc;
+use std::time::Duration;
 
 use minisign_verify::PublicKey;
 
@@ -14,6 +17,10 @@ use super::verify::VerifyError;
 use super::version::{self, ReleaseVersion};
 use crate::inbox::{Inbound, Inbox};
 
+/// Longest wait for the app to step aside before the installer starts
+/// anyway.
+const HAND_OVER_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[derive(Debug, Clone)]
 pub enum Event {
     Checked {
@@ -21,6 +28,9 @@ pub enum Event {
         result: Result<CheckOutcome, CheckError>,
     },
     Progress(Progress),
+    /// The installer is verified and about to run. The app steps aside
+    /// (see [`Worker::proceed`]) before it starts.
+    Verified,
     /// The installer is running. It stops this process to replace it, and
     /// starts the new version afterwards.
     Launched,
@@ -54,22 +64,36 @@ impl Context {
             updates_dir,
         }
     }
+
+    /// Whether installs need a signature; a broken built-in key counts, so
+    /// installs fail rather than skip it.
+    pub fn signature_required(&self) -> bool {
+        !matches!(self.key, Ok(None))
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct Worker(mpsc::Sender<Job>);
+pub struct Worker {
+    jobs: mpsc::Sender<Job>,
+    go: mpsc::Sender<bool>,
+}
 
 impl Worker {
     pub fn spawn(context: Context, inbox: Inbox) -> Self {
-        let (tx, rx) = mpsc::channel::<Job>();
+        let (jobs, rx) = mpsc::channel::<Job>();
+        let (go, go_rx) = mpsc::channel::<bool>();
         let spawned = std::thread::Builder::new()
             .name("updates".into())
             .spawn(move || {
-                if let Some(dir) = &context.updates_dir {
-                    download::clear(dir);
-                }
-                for job in rx {
+                for job in std::iter::once(None).chain(rx.into_iter().map(Some)) {
+                    // Also after starting, as the installer that started
+                    // this process may still have held its file.
+                    if let Some(dir) = &context.updates_dir {
+                        download::clear(dir);
+                    }
+                    let Some(job) = job else { continue };
                     let send = |event| inbox.send(Inbound::Update(event));
+                    let launched = Cell::new(false);
                     let ran = std::panic::catch_unwind(AssertUnwindSafe(|| match &job {
                         Job::Check { manual } => {
                             let result = release::check(
@@ -84,9 +108,7 @@ impl Worker {
                             });
                         }
                         Job::Install(release) => {
-                            if let Err(e) = install(&context, release, &send) {
-                                send(Event::InstallFailed(e));
-                            }
+                            install(&context, release, &go_rx, &send, &launched);
                         }
                     }));
                     if ran.is_err() {
@@ -96,6 +118,8 @@ impl Worker {
                                 manual,
                                 result: Err(CheckError::Malformed("internal error".into())),
                             },
+                            // A running installer still stops the app.
+                            Job::Install(_) if launched.get() => continue,
                             Job::Install(_) => Event::InstallFailed("internal error".into()),
                         };
                         if !send(event) {
@@ -107,40 +131,56 @@ impl Worker {
         if let Err(e) = spawned {
             tracing::error!("cannot start the update thread: {e}");
         }
-        Self(tx)
+        Self { jobs, go }
     }
 
     /// Returns false if the worker is not running.
     pub fn check(&self, manual: bool) -> bool {
-        self.0.send(Job::Check { manual }).is_ok()
+        self.jobs.send(Job::Check { manual }).is_ok()
     }
 
     pub fn install(&self, release: Release) -> bool {
-        self.0.send(Job::Install(Box::new(release))).is_ok()
+        self.jobs.send(Job::Install(Box::new(release))).is_ok()
+    }
+
+    /// Answers [`Event::Verified`]: `true` once the app has stepped aside,
+    /// `false` to abandon the install.
+    pub fn proceed(&self, go: bool) {
+        let _ = self.go.send(go);
     }
 }
 
-/// Downloads, verifies and starts the installer, then waits for it. The
-/// installer stops this process when it gets to replacing the files, so
-/// returning at all means it ended without installing.
+/// Downloads and verifies the installer, waits for the app to step aside,
+/// starts the installer and waits for it. The installer stops this process
+/// when it gets to replacing the files, so its ending at all means it
+/// ended without installing.
 fn install(
     context: &Context,
     release: &Release,
+    go: &mpsc::Receiver<bool>,
     send: &dyn Fn(Event) -> bool,
-) -> Result<(), String> {
+    launched: &Cell<bool>,
+) {
+    let fail = |message: String| {
+        send(Event::InstallFailed(message));
+    };
     if !context.kind.installs() {
-        return Err("this copy of the app cannot install updates".into());
+        return fail("this copy of the app cannot install updates".into());
     }
-    let key = context.key.as_ref().map_err(ToString::to_string)?;
-    let dir = context
-        .updates_dir
-        .as_ref()
-        .ok_or("there is no folder to download to")?;
+    let key = match &context.key {
+        Ok(key) => key,
+        Err(e) => return fail(e.to_string()),
+    };
+    let Some(dir) = &context.updates_dir else {
+        return fail("there is no folder to download to".into());
+    };
     let verified =
-        download::download_and_verify(&context.client, release, key.as_ref(), dir, &mut |p| {
+        match download::download_and_verify(&context.client, release, key.as_ref(), dir, &mut |p| {
             send(Event::Progress(p));
-        })
-        .map_err(|e| e.to_string())?;
+        }) {
+            Ok(verified) => verified,
+            Err(e) => return fail(e.to_string()),
+        };
     tracing::info!(
         "verified {} ({})",
         verified.path.display(),
@@ -150,13 +190,43 @@ fn install(
             "checksum"
         }
     );
-    let mut child = super::launch::start(&verified.path, context.kind)
-        .map_err(|e| format!("could not start the installer: {e}"))?;
+
+    while go.try_recv().is_ok() {}
+    send(Event::Verified);
+    match go.recv_timeout(HAND_OVER_TIMEOUT) {
+        Ok(true) => {}
+        Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            tracing::info!("install abandoned");
+            return;
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!("the app did not step aside in time; starting the installer anyway");
+        }
+    }
+    let mut child = match super::launch::start(&verified.path, context.kind) {
+        Ok(child) => child,
+        Err(e) => return fail(format!("could not start the installer: {e}")),
+    };
+    launched.set(true);
     send(Event::Launched);
-    let status = child.wait().map_err(|e| e.to_string())?;
+    let status = wait(&mut child);
     drop(verified);
-    Err(match status.code() {
+    fail(match status.code() {
         Some(code) => format!("the installer ended without updating (exit code {code})"),
         None => "the installer ended without updating".to_owned(),
-    })
+    });
+}
+
+/// Waits for the installer however long it takes: while it runs the app
+/// must stay aside, and the installer ends the app itself.
+fn wait(child: &mut Child) -> ExitStatus {
+    loop {
+        match child.wait() {
+            Ok(status) => return status,
+            Err(e) => {
+                tracing::warn!("waiting for the installer failed: {e}");
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
 }

@@ -77,23 +77,18 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 #[cfg(target_os = "windows")]
 mod registry {
     use std::ffi::OsString;
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::ffi::OsStringExt;
 
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
         HKEY, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
     };
 
+    use crate::win::wide;
+
     /// Inno Setup's uninstall entry for the installer's fixed AppId
     /// (packaging/windows/pcvolumecontrol.iss).
     const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{63ED99E8-31F1-4FA3-A5B5-DDAAF2F7463A}_is1";
-
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
 
     /// The entry's `InstallLocation` under `root`, in the 64-bit view
     /// where the 64-bit installer writes it.

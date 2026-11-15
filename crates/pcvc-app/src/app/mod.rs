@@ -230,14 +230,19 @@ impl App {
             update_state,
         } = boot;
         let icon_worker = IconWorker::spawn(icon_resolver, inbox.clone());
-        let update_kind = update_context
-            .as_ref()
-            .map_or_else(crate::update::detect_install_kind, |c| c.kind);
+        let (update_kind, update_signed) = match &update_context {
+            Some(c) => (c.kind, c.signature_required()),
+            None => (
+                crate::update::detect_install_kind(),
+                crate::update::signature_required(),
+            ),
+        };
         let updates = Updates::new(
             update_context.map(|c| crate::update::Worker::spawn(c, inbox.clone())),
             update_kind,
             update_state,
             crate::update::OFFICIAL_BUILD,
+            update_signed,
         );
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
         spawn_signal_handler(inbox.clone());
@@ -464,6 +469,7 @@ impl App {
                     self.refresh_local_ips();
                 }
                 self.server_status = status;
+                self.update_server_status();
             }
             ServerUpdate::Clients(clients) => self.clients = clients,
             ServerUpdate::Mdns(mdns) => self.mdns = mdns,
@@ -503,6 +509,12 @@ impl App {
     fn open_window(&mut self) -> Task<Message> {
         if let Some(id) = self.window {
             return window::gain_focus(id);
+        }
+        // Stays out of the installer's way: closing the window could
+        // quit, and the installer restarts only a running app.
+        if self.updates.handed_over.is_some() {
+            tracing::info!("not opening the window while the installer runs");
+            return Task::none();
         }
         tracing::debug!("opening the window");
         self.page = Page::Mixer;
@@ -623,6 +635,7 @@ impl App {
         }
         tracing::info!("quitting");
         self.quitting = true;
+        self.update_quitting();
         instance::shutting_down();
         self.server.shutdown();
         let close = match self.window {

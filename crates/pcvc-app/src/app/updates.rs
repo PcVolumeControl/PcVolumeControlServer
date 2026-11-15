@@ -10,6 +10,8 @@ use iced::widget::{button, column, container, progress_bar, row, text};
 use iced::{Center, Element, Fill, Subscription, Task};
 
 use super::{App, Message};
+use crate::mini::{CloseReason, Event as MiniEvent};
+use crate::server_ctl::ServerStatus;
 use crate::style::{self, Button};
 use crate::update::{
     self, Action, Event, Failure, InstallKind, Phase, Saved, Updater, Worker, schedule,
@@ -37,8 +39,16 @@ pub struct Updates {
     pub official: bool,
     /// Installs need a signature.
     pub signed: bool,
-    /// The installer runs and the app has stepped aside for it.
-    pub handed_over: bool,
+    /// Set while the app has stepped aside for the installer.
+    pub handed_over: Option<HandOver>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandOver {
+    /// Whether to start the server again if the installer gives up.
+    pub server_was_running: bool,
+    /// The installer starts once the server has stopped.
+    pub waiting_for_server: bool,
 }
 
 impl Updates {
@@ -47,6 +57,7 @@ impl Updates {
         kind: InstallKind,
         state_path: Option<PathBuf>,
         official: bool,
+        signed: bool,
     ) -> Self {
         let saved = state_path.as_deref().map(Saved::load).unwrap_or_default();
         Self {
@@ -56,8 +67,8 @@ impl Updates {
             state_path,
             started: Instant::now(),
             official,
-            signed: update::signature_required(),
-            handed_over: false,
+            signed,
+            handed_over: None,
         }
     }
 
@@ -82,6 +93,18 @@ impl Updates {
         }
         if !self.worker.as_ref().is_some_and(|w| w.check(manual)) {
             tracing::debug!("no update worker; the check stays pending");
+        }
+    }
+
+    /// Tells the worker whether to start the installer.
+    fn proceed(&mut self, go: bool) {
+        if let Some(hand_over) = &mut self.handed_over
+            && hand_over.waiting_for_server
+        {
+            hand_over.waiting_for_server = false;
+            if let Some(worker) = &self.worker {
+                worker.proceed(go);
+            }
         }
     }
 }
@@ -147,14 +170,12 @@ impl App {
                 }
             }
             Event::Progress(progress) => updater.progress(progress),
-            Event::Launched => {
-                updater.launched();
-                return self.hand_over_to_installer();
-            }
+            Event::Verified => return self.hand_over_to_installer(),
+            Event::Launched => updater.launched(),
             Event::InstallFailed(message) => {
                 updater.install_failed(message);
-                if self.updates.handed_over {
-                    return self.take_back_from_installer();
+                if let Some(hand_over) = self.updates.handed_over.take() {
+                    return self.take_back_from_installer(hand_over);
                 }
             }
         }
@@ -164,29 +185,64 @@ impl App {
     /// Does what quitting does (stops the server so mDNS withdraws the
     /// service, saves the config, closes the windows and removes the tray
     /// icon) but keeps the process, which holds the verified installer
-    /// locked, until the installer stops it to replace the executable.
+    /// locked, until the installer stops it to replace the executable. The
+    /// installer starts once the server has stopped.
     fn hand_over_to_installer(&mut self) -> Task<Message> {
-        tracing::info!("the installer is running; stopping the server until it replaces the app");
-        self.updates.handed_over = true;
-        self.server.stop();
+        if self.quitting || self.updates.handed_over.is_some() {
+            if let Some(worker) = &self.updates.worker {
+                worker.proceed(false);
+            }
+            return Task::none();
+        }
+        tracing::info!("stepping aside for the installer");
+        let server_was_running = matches!(
+            self.server_status,
+            ServerStatus::Running(_) | ServerStatus::Starting
+        );
+        self.updates.handed_over = Some(HandOver {
+            server_was_running,
+            waiting_for_server: true,
+        });
+        if server_was_running {
+            self.server.stop();
+        } else {
+            self.updates.proceed(true);
+        }
         let _ = self.persist_config();
         self.tray = None;
         let close = match self.window {
             Some(id) => self.close_window(id),
             None => Task::none(),
         };
-        let close_mini = self.mini_event(crate::mini::Event::Close(crate::mini::CloseReason::Quit));
+        let close_mini = self.mini_event(MiniEvent::Close(CloseReason::Quit));
         Task::batch([close, close_mini])
     }
 
-    /// The installer ended without replacing the app: runs again as before
-    /// and shows why on the Status page.
-    fn take_back_from_installer(&mut self) -> Task<Message> {
-        self.updates.handed_over = false;
+    /// Starts the installer once the server it waits for has stopped.
+    pub(super) fn update_server_status(&mut self) {
+        if matches!(
+            self.server_status,
+            ServerStatus::Stopped | ServerStatus::Failed(_)
+        ) {
+            self.updates.proceed(true);
+        }
+    }
+
+    /// Abandons an install that has not started its installer.
+    pub(super) fn update_quitting(&mut self) {
+        self.updates.proceed(false);
+    }
+
+    /// The installer did not replace the app: runs again as before and
+    /// shows why on the Status page.
+    fn take_back_from_installer(&mut self, hand_over: HandOver) -> Task<Message> {
         if self.quitting {
             return Task::none();
         }
-        self.server.start(self.config.server_config());
+        tracing::info!("the installer did not replace the app; running again");
+        if hand_over.server_was_running {
+            self.server.start(self.config.server_config());
+        }
         let open = self.open_window();
         self.page = super::Page::Status;
         Task::batch([Task::done(Message::CreateTray), open])

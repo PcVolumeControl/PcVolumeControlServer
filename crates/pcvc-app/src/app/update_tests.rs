@@ -179,12 +179,26 @@ fn installing_shows_progress_and_runs_once() {
         .find("Verifying the download\u{2026}")
         .unwrap();
 
-    // The app steps aside for the installer but keeps running.
-    event(&mut h, Event::Launched);
-    assert_eq!(h.app.updates.updater.phase(), &Phase::Launching);
-    assert!(h.app.updates.handed_over);
+    // Verified: the app steps aside for the installer but keeps running,
+    // and the installer starts once the server has stopped.
+    let running = ServerStatus::Running("0.0.0.0:3087".parse().unwrap());
+    h.run(vec![Message::Inbound(Inbound::Server(
+        ServerUpdate::Status(running),
+    ))]);
+    event(&mut h, Event::Verified);
+    let waiting = |h: &Harness| h.app.updates.handed_over.map(|o| o.waiting_for_server);
+    assert_eq!(waiting(&h), Some(true));
     assert!(h.app.window.is_none(), "the window closes");
     assert!(!h.app.quitting);
+    h.run(vec![Message::Inbound(Inbound::Server(
+        ServerUpdate::Status(ServerStatus::Stopped),
+    ))]);
+    assert_eq!(waiting(&h), Some(false));
+    h.run(vec![Message::Inbound(Inbound::ShowRequested)]);
+    assert!(h.app.window.is_none(), "stays out of the installer's way");
+
+    event(&mut h, Event::Launched);
+    assert_eq!(h.app.updates.updater.phase(), &Phase::Launching);
     simulator(h.app.status_view())
         .find("Checksum verified. The installer is running and restarts the app when it is done.")
         .unwrap();
@@ -194,7 +208,7 @@ fn installing_shows_progress_and_runs_once() {
         &mut h,
         Event::InstallFailed("the installer ended without updating (exit code 2)".into()),
     );
-    assert!(!h.app.updates.handed_over);
+    assert!(h.app.updates.handed_over.is_none());
     assert!(h.app.window.is_some(), "the window reopens");
     assert_eq!(h.app.page, Page::Status);
     assert!(matches!(
@@ -204,6 +218,44 @@ fn installing_shows_progress_and_runs_once() {
     simulator(h.app.status_view())
         .find("Could not install: the installer ended without updating (exit code 2)")
         .unwrap();
+}
+
+#[test]
+fn a_stopped_server_stays_stopped_after_a_failed_install() {
+    let mut h = harness(InstallKind::WindowsInstaller { all_users: true }, true);
+    h.run(vec![
+        Message::Update(UpdateMessage::CheckNow),
+        Message::Inbound(Inbound::Server(ServerUpdate::Status(ServerStatus::Stopped))),
+    ]);
+    event(&mut h, update::found("2.0.0"));
+    assert!(h.app.updates.updater.start_install().is_some());
+    event(&mut h, Event::Verified);
+    let hand_over = h.app.updates.handed_over.unwrap();
+    assert!(!hand_over.server_was_running);
+    assert!(!hand_over.waiting_for_server, "nothing to wait for");
+    event(&mut h, Event::InstallFailed("declined".into()));
+    assert!(h.app.updates.handed_over.is_none());
+    assert_eq!(h.app.server_status, ServerStatus::Stopped);
+}
+
+#[test]
+fn quitting_abandons_a_pending_install() {
+    let mut h = harness(InstallKind::WindowsInstaller { all_users: false }, true);
+    h.run(vec![Message::Update(UpdateMessage::CheckNow)]);
+    event(&mut h, update::found("2.0.0"));
+    assert!(h.app.updates.updater.start_install().is_some());
+    event(&mut h, Event::Verified);
+    assert_eq!(
+        h.app.updates.handed_over.map(|o| o.waiting_for_server),
+        Some(true)
+    );
+    // What `quit` calls; quitting for real would mark this whole test
+    // process as shutting down for the single-instance tests.
+    h.app.update_quitting();
+    assert_eq!(
+        h.app.updates.handed_over.map(|o| o.waiting_for_server),
+        Some(false)
+    );
 }
 
 #[test]

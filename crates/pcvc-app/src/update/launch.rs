@@ -1,4 +1,4 @@
-//! Starting a verified installer.
+//! Starting a verified installer, and opening release pages.
 
 use std::path::Path;
 use std::process::Child;
@@ -8,41 +8,33 @@ use super::release::InstallKind;
 /// The Inno Setup switches for an unattended upgrade (see
 /// packaging/windows/pcvolumecontrol.iss): the progress window only, no
 /// questions or message boxes, no reboot and no Cancel button (cancelling
-/// after the running app was stopped would leave nothing running), and
+/// after the installer stopped the app would leave nothing running), and
 /// the same install mode as the existing installation so it is upgraded in
 /// place. The installer restarts the app afterwards because it finds it
-/// running.
+/// running. No `/LOG`: an elevated installer would write the log wherever
+/// a path the user can change points.
 #[cfg(any(target_os = "windows", test))]
-pub fn installer_args(kind: InstallKind, log: Option<&Path>) -> Vec<String> {
-    let mut args: Vec<String> = [
+pub fn installer_args(kind: InstallKind) -> Vec<&'static str> {
+    let mut args = vec![
         "/SILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
         "/NOCANCEL",
         "/SP-",
-    ]
-    .map(str::to_owned)
-    .into();
+    ];
     if let InstallKind::WindowsInstaller { all_users } = kind {
-        args.push(
-            if all_users {
-                "/ALLUSERS"
-            } else {
-                "/CURRENTUSER"
-            }
-            .to_owned(),
-        );
-    }
-    if let Some(log) = log {
-        args.push(format!("/LOG={}", log.display()));
+        args.push(if all_users {
+            "/ALLUSERS"
+        } else {
+            "/CURRENTUSER"
+        });
     }
     args
 }
 
 #[cfg(target_os = "windows")]
 pub fn start(installer: &Path, kind: InstallKind) -> std::io::Result<Child> {
-    let log = crate::paths::log_dir().map(|dir| dir.join("update-install.log"));
-    let args = installer_args(kind, log.as_deref());
+    let args = installer_args(kind);
     tracing::info!("starting {} {}", installer.display(), args.join(" "));
     std::process::Command::new(installer).args(args).spawn()
 }
@@ -62,16 +54,11 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn open(url: &str) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    let wide = |s: &str| -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
+    use crate::win::wide;
+
     let (verb, target) = (wide("open"), wide(url));
     // SAFETY: both strings are NUL-terminated and outlive the call.
     let result = unsafe {
@@ -112,25 +99,28 @@ mod tests {
 
     #[test]
     fn upgrade_in_the_existing_install_mode() {
-        let user = installer_args(InstallKind::WindowsInstaller { all_users: false }, None);
-        assert_eq!(
-            user,
-            [
-                "/SILENT",
-                "/SUPPRESSMSGBOXES",
-                "/NORESTART",
-                "/NOCANCEL",
-                "/SP-",
-                "/CURRENTUSER"
-            ]
-        );
-        let all = installer_args(
-            InstallKind::WindowsInstaller { all_users: true },
-            Some(Path::new("C:\\Users\\A B\\update-install.log")),
-        );
-        assert_eq!(
-            &all[5..],
-            ["/ALLUSERS", "/LOG=C:\\Users\\A B\\update-install.log"]
-        );
+        let base = [
+            "/SILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/NOCANCEL",
+            "/SP-",
+        ];
+        let user = installer_args(InstallKind::WindowsInstaller { all_users: false });
+        assert_eq!(user, [&base[..], &["/CURRENTUSER"]].concat());
+        let all = installer_args(InstallKind::WindowsInstaller { all_users: true });
+        assert_eq!(all, [&base[..], &["/ALLUSERS"]].concat());
+    }
+
+    #[test]
+    fn opens_only_https_pages() {
+        for bad in [
+            "http://github.com/x",
+            "file:///etc/passwd",
+            "https://github.com/x\n--flag",
+            "-https://x",
+        ] {
+            assert!(open_url(bad).is_err(), "{bad}");
+        }
     }
 }
