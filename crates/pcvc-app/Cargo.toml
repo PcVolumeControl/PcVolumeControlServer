@@ -19,9 +19,9 @@ iced = { version = "0.14", features = ["tokio", "svg"] }
 resvg = { version = "0.45", default-features = false }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-subscriber = { workspace = true, features = ["env-filter", "chrono"] }
 tracing-appender = "0.2.5"
-time = { version = "0.3", features = ["local-offset"] }
+chrono = { version = "0.4.26", default-features = false, features = ["clock", "std"] }
 directories = "6"
 if-addrs = "0.15"
 

@@ -67,6 +67,8 @@ pub struct App {
     mdns: MdnsStatus,
     audio: Option<AudioState>,
     local_ips: Vec<Ipv4Addr>,
+    /// The last interface listing error, so a persistent one is logged once.
+    local_ips_error: Option<String>,
     tray: Option<Tray>,
     window: Option<window::Id>,
     config: Config,
@@ -100,7 +102,8 @@ impl App {
             clients: Vec::new(),
             mdns: MdnsStatus::Disabled,
             audio: None,
-            local_ips: model::local_ipv4s(),
+            local_ips: Vec::new(),
+            local_ips_error: None,
             tray: None,
             window: None,
             config,
@@ -108,6 +111,7 @@ impl App {
             logs,
             quitting: false,
         };
+        app.refresh_local_ips();
         let open = if show_window {
             app.open_window()
         } else {
@@ -179,7 +183,7 @@ impl App {
             }
             Message::Tick => {
                 if self.page == Page::Status {
-                    self.local_ips = model::local_ipv4s();
+                    self.refresh_local_ips();
                 }
                 Task::none()
             }
@@ -219,7 +223,7 @@ impl App {
         match update {
             ServerUpdate::Status(status) => {
                 if matches!(status, ServerStatus::Running(_)) {
-                    self.local_ips = model::local_ipv4s();
+                    self.refresh_local_ips();
                 }
                 self.server_status = status;
             }
@@ -230,6 +234,23 @@ impl App {
             ServerUpdate::ShutDown => return self.exit(),
         }
         Task::none()
+    }
+
+    fn refresh_local_ips(&mut self) {
+        match model::local_ipv4s() {
+            Ok(ips) => {
+                self.local_ips = ips;
+                self.local_ips_error = None;
+            }
+            Err(e) => {
+                let e = e.to_string();
+                if self.local_ips_error.as_ref() != Some(&e) {
+                    tracing::warn!("listing network interfaces failed: {e}");
+                    self.local_ips_error = Some(e);
+                }
+                self.local_ips.clear();
+            }
+        }
     }
 
     fn toggle_server(&mut self) {

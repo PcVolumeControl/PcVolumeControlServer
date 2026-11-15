@@ -9,7 +9,7 @@ use pcvc_server::MdnsStatus;
 
 use super::{App, Message};
 use crate::server_ctl::ServerStatus;
-use crate::{icons, logging, model};
+use crate::{icons, model};
 
 const LOG_LINES_SHOWN: usize = 8;
 
@@ -82,12 +82,7 @@ impl App {
                         text(c.addr.to_string())
                             .font(Font::MONOSPACE)
                             .width(FillPortion(3)),
-                        text(model::connected_since(
-                            c.connected_since,
-                            now,
-                            logging::local_offset()
-                        ))
-                        .width(FillPortion(2)),
+                        text(model::connected_since(c.connected_since, now)).width(FillPortion(2)),
                     ]
                     .into()
                 })),
@@ -113,7 +108,7 @@ impl App {
                 indicator,
                 section("Listening on", addresses),
                 section("mDNS", text(mdns)),
-                section("Connected phones", client_rows),
+                section("Connected clients", client_rows),
                 section(
                     "Recent log",
                     container(logs)

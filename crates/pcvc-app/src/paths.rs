@@ -10,5 +10,5 @@ fn project_dirs() -> Option<ProjectDirs> {
 
 /// Where the rolling log files are written.
 pub fn log_dir() -> Option<PathBuf> {
-    project_dirs().map(|d| d.data_dir().join("logs"))
+    project_dirs().map(|d| d.data_local_dir().join("logs"))
 }

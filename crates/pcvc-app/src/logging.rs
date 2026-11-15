@@ -4,31 +4,26 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use time::{OffsetDateTime, UtcOffset};
+use chrono::{DateTime, Local};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::filter::{self, LevelFilter};
+use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Layer, filter};
+use tracing_subscriber::{EnvFilter, Layer};
 
 const DEFAULT_FILTER: &str = "info,iced_winit=warn,iced_wgpu=warn,wgpu_core=error,wgpu_hal=error,naga=warn,sctk_adwaita=error";
-static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();
-
-/// The local UTC offset as read at startup (UTC if it could not be read).
-pub fn local_offset() -> UtcOffset {
-    LOCAL_OFFSET.get().copied().unwrap_or(UtcOffset::UTC)
-}
-
 const RING_CAPACITY: usize = 200;
 const LOG_FILES_KEPT: usize = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogLine {
-    pub time: OffsetDateTime,
+    pub time: DateTime<Local>,
     pub level: Level,
     pub message: String,
 }
@@ -36,8 +31,12 @@ pub struct LogLine {
 impl LogLine {
     /// For example "14:03:27 WARN mDNS registration failed".
     pub fn display(&self) -> String {
-        let (h, m, s) = self.time.to_hms();
-        format!("{h:02}:{m:02}:{s:02} {:<5} {}", self.level, self.message)
+        format!(
+            "{} {:<5} {}",
+            crate::model::clock(&self.time),
+            self.level,
+            self.message
+        )
     }
 }
 
@@ -57,8 +56,11 @@ impl LogBuffer {
     }
 
     pub fn push(&self, line: LogLine) {
+        if self.capacity == 0 {
+            return;
+        }
         let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
-        if lines.len() == self.capacity {
+        while lines.len() >= self.capacity {
             lines.pop_front();
         }
         lines.push_back(line);
@@ -77,17 +79,18 @@ impl LogBuffer {
 
 struct RingLayer {
     buffer: LogBuffer,
-    offset: UtcOffset,
 }
 
 impl<S: Subscriber> Layer<S> for RingLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
+        // One visual row per line in the Status view.
+        let message = visitor.finish().replace(['\r', '\n'], " ");
         self.buffer.push(LogLine {
-            time: OffsetDateTime::now_utc().to_offset(self.offset),
+            time: Local::now(),
             level: *event.metadata().level(),
-            message: visitor.finish(),
+            message,
         });
     }
 }
@@ -133,11 +136,9 @@ impl Visit for MessageVisitor {
 /// Keeps the file writer flushing until dropped at the end of `main`.
 pub struct LogGuard(#[allow(dead_code)] Option<WorkerGuard>);
 
-/// Installs the global subscriber. Must run before any other thread starts:
-/// the local UTC offset can only be read safely while single-threaded.
+/// Installs the global subscriber. Timestamps are local time with offset;
+/// log files still roll over at midnight UTC.
 pub fn init(log_dir: Option<&Path>) -> (LogBuffer, LogGuard) {
-    let offset =
-        *LOCAL_OFFSET.get_or_init(|| UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC));
     let buffer = LogBuffer::new(RING_CAPACITY);
     let env_filter =
         || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
@@ -145,18 +146,22 @@ pub fn init(log_dir: Option<&Path>) -> (LogBuffer, LogGuard) {
     // The ring buffer is for the user: only this app's own crates, info and up.
     let ring = RingLayer {
         buffer: buffer.clone(),
-        offset,
     }
-    .with_filter(filter::filter_fn(|meta| {
-        *meta.level() <= Level::INFO
-            && (meta.target().starts_with("pcvolumecontrol") || meta.target().starts_with("pcvc_"))
-    }));
+    .with_filter(
+        filter::filter_fn(|meta| {
+            *meta.level() <= Level::INFO
+                && (meta.target().starts_with("pcvolumecontrol")
+                    || meta.target().starts_with("pcvc_"))
+        })
+        .with_max_level_hint(LevelFilter::INFO),
+    );
 
     let mut file_error = None;
     let (file_layer, guard) = match log_dir.map(open_log_file) {
         Some(Ok(appender)) => {
             let (writer, guard) = tracing_appender::non_blocking(appender);
             let layer = tracing_subscriber::fmt::layer()
+                .with_timer(ChronoLocal::rfc_3339())
                 .with_ansi(false)
                 .with_writer(writer)
                 .with_filter(env_filter());
@@ -172,6 +177,7 @@ pub fn init(log_dir: Option<&Path>) -> (LogBuffer, LogGuard) {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
+                .with_timer(ChronoLocal::rfc_3339())
                 .with_writer(std::io::stderr)
                 .with_filter(env_filter()),
         )
@@ -201,7 +207,7 @@ mod tests {
 
     fn line(message: &str) -> LogLine {
         LogLine {
-            time: OffsetDateTime::UNIX_EPOCH,
+            time: Local::now(),
             level: Level::INFO,
             message: message.to_owned(),
         }
@@ -225,20 +231,28 @@ mod tests {
         let buffer = LogBuffer::new(10);
         let subscriber = tracing_subscriber::registry().with(RingLayer {
             buffer: buffer.clone(),
-            offset: UtcOffset::UTC,
         });
         tracing::subscriber::with_default(subscriber, || {
             tracing::warn!(addr = "1.2.3.4:5", "client connected");
             tracing::info!("plain");
+            tracing::info!("two\nlines");
         });
         let lines = buffer.recent(10);
         assert_eq!(lines[0].message, "client connected addr=1.2.3.4:5");
         assert_eq!(lines[0].level, Level::WARN);
         assert_eq!(lines[1].message, "plain");
+        assert_eq!(lines[2].message, "two lines");
+    }
+
+    #[test]
+    fn zero_capacity_keeps_nothing() {
+        let buffer = LogBuffer::new(0);
+        buffer.push(line("x"));
+        assert!(buffer.recent(10).is_empty());
     }
 
     #[test]
     fn display_format() {
-        assert_eq!(line("hello").display(), "00:00:00 INFO  hello");
+        assert!(line("hello").display().ends_with(" INFO  hello"));
     }
 }

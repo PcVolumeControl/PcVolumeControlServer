@@ -3,29 +3,23 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, SystemTime};
 
-use time::{OffsetDateTime, UtcOffset};
+use chrono::{DateTime, Local, TimeZone};
 
 use crate::server_ctl::ServerStatus;
 use crate::tray::TrayState;
 
 /// Non-loopback, non-link-local IPv4 addresses of this machine, likeliest
 /// home-LAN address first.
-pub fn local_ipv4s() -> Vec<Ipv4Addr> {
-    let mut addrs: Vec<Ipv4Addr> = match if_addrs::get_if_addrs() {
-        Ok(interfaces) => interfaces
-            .into_iter()
-            .filter_map(|i| match i.ip() {
-                IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_link_local() => Some(ip),
-                _ => None,
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!("listing network interfaces failed: {e}");
-            Vec::new()
-        }
-    };
+pub fn local_ipv4s() -> std::io::Result<Vec<Ipv4Addr>> {
+    let mut addrs: Vec<Ipv4Addr> = if_addrs::get_if_addrs()?
+        .into_iter()
+        .filter_map(|i| match i.ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_link_local() => Some(ip),
+            _ => None,
+        })
+        .collect();
     sort_by_preference(&mut addrs);
-    addrs
+    Ok(addrs)
 }
 
 /// Orders 192.168/16 before 10/8 before 172.16/12 (where container bridges
@@ -101,12 +95,27 @@ pub fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
+/// Wall-clock time as "HH:MM:SS".
+pub fn clock<Tz: TimeZone>(time: &DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    time.format("%H:%M:%S").to_string()
+}
+
 /// Local wall-clock time of `since` and how long ago it was, for example
 /// "14:03:27 (3m 05s ago)".
-pub fn connected_since(since: SystemTime, now: SystemTime, offset: UtcOffset) -> String {
-    let (h, m, s) = OffsetDateTime::from(since).to_offset(offset).to_hms();
+pub fn connected_since(since: SystemTime, now: SystemTime) -> String {
+    connected_since_in(since, now, &Local)
+}
+
+fn connected_since_in<Tz: TimeZone>(since: SystemTime, now: SystemTime, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let local = DateTime::<chrono::Utc>::from(since).with_timezone(tz);
     let ago = now.duration_since(since).unwrap_or_default();
-    format!("{h:02}:{m:02}:{s:02} ({} ago)", format_elapsed(ago))
+    format!("{} ({} ago)", clock(&local), format_elapsed(ago))
 }
 
 #[cfg(test)]
@@ -182,13 +191,13 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_secs(185)), "3m 05s");
         assert_eq!(format_elapsed(Duration::from_secs(7620)), "2h 07m");
         let since = SystemTime::UNIX_EPOCH + Duration::from_secs(14 * 3600 + 3 * 60 + 27);
-        let offset = UtcOffset::from_hms(2, 0, 0).unwrap();
+        let plus_two = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
         assert_eq!(
-            connected_since(since, since + Duration::from_secs(185), offset),
+            connected_since_in(since, since + Duration::from_secs(185), &plus_two),
             "16:03:27 (3m 05s ago)"
         );
         assert_eq!(
-            connected_since(since, SystemTime::UNIX_EPOCH, UtcOffset::UTC),
+            connected_since_in(since, SystemTime::UNIX_EPOCH, &chrono::Utc),
             "14:03:27 (0s ago)"
         );
     }
