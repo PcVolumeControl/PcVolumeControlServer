@@ -1,13 +1,45 @@
 //! Pure mapping from PulseAudio introspection data to [`AudioState`], and the
 //! diff that turns two states into [`AudioEvent`]s.
+//!
+//! # Sessions
+//!
+//! A session is a group of user streams (sink-inputs) on one sink that would
+//! be displayed identically and belong to the same application instance
+//! (see [`group_streams`]). Streams group when they have
+//!
+//! - the same sink,
+//! - the same name ([`RawSinkInput::display_name`]),
+//! - the same detail ([`RawSinkInput::detail`]; two streams without one
+//!   count as the same), whether or not details are sent, and
+//! - the same owner: the process id when known, otherwise the client. A
+//!   stream with neither is never grouped.
+//!
+//! Firefox, for one, opens a stream per audio source in a page (a video
+//! element, a Web Audio context), each named after the tab, and usually only
+//! one of them carries the sound.
+//!
+//! The session takes its id, name, detail, app hints, volume and mute from
+//! its representative, the stream with the lowest index, so a group of one
+//! has the id `"{sink name}|{sink-input index}"` and a group keeps its id
+//! while its oldest stream lives. An id naming any stream of a group
+//! addresses the whole group, and setting a session sets every stream of it
+//! (see [`StreamGroup::changes`]).
+//!
+//! Streams joining or leaving a group change no session unless the
+//! representative changes. When it goes away, the group continues under the
+//! next stream's id: one diff then reports [`AudioEvent::SessionRemoved`] for
+//! the old id and [`AudioEvent::SessionAdded`] for the new one, and the state
+//! published with them holds the one session.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
-use libpulse_binding::volume::Volume;
+use libpulse_binding::volume::{ChannelVolumes, Volume};
 use pcvc_protocol::{clamp_volume, session_detail};
 
+use super::conn::uniform_volume;
 use crate::{AppHint, AudioEvent, AudioState, Device, DeviceInfo, Session};
 
 /// `PA_VOLUME_NORM`, reported as 100 %.
@@ -200,6 +232,128 @@ impl RawSinkInput {
             100.0
         }
     }
+
+    /// The application instance the stream belongs to, if it is known.
+    fn owner(&self, client: Option<&AppProps>) -> Option<Owner> {
+        self.app
+            .process_id
+            .or_else(|| client.and_then(|c| c.process_id))
+            .map(Owner::Process)
+            .or(self.client.map(Owner::Client))
+    }
+
+    /// A volume with every channel at `value`, if the stream's volume can be
+    /// set.
+    fn settable_volume(&self, value: u32) -> Option<ChannelVolumes> {
+        uniform_volume(self.volume.len(), value).filter(|_| self.has_volume && self.volume_writable)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Owner {
+    Process(u32),
+    Client(u32),
+}
+
+fn client_of<'a>(
+    clients: &'a HashMap<u32, AppProps>,
+    input: &RawSinkInput,
+) -> Option<&'a AppProps> {
+    input.client.and_then(|c| clients.get(&c))
+}
+
+/// Streams shown as one session.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct StreamGroup<'a> {
+    pub name: String,
+    pub detail: Option<String>,
+    /// By index, so the representative is first. Never empty.
+    pub members: Vec<&'a RawSinkInput>,
+}
+
+/// What setting a session changes on one of its streams.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct StreamChange {
+    pub index: u32,
+    /// The raw value of every channel, and the volume to send.
+    pub volume: Option<(u32, ChannelVolumes)>,
+    pub muted: Option<bool>,
+}
+
+impl StreamGroup<'_> {
+    pub fn representative(&self) -> &RawSinkInput {
+        self.members[0]
+    }
+
+    /// The changes that set every stream of the group to `volume` and
+    /// `muted`, leaving out streams with nothing to change. A stream whose
+    /// volume matches (see [`volume_matches`]) keeps it, and so does one
+    /// whose volume cannot be set. If no stream that needs a new volume can
+    /// take one, the request is refused (`None`), as it is for a single
+    /// stream.
+    pub fn changes(&self, volume: f32, muted: bool) -> Option<Vec<StreamChange>> {
+        let target = percent_to_volume(volume);
+        let mut needs_volume = false;
+        let mut volume_set = false;
+        let changes: Vec<StreamChange> = self
+            .members
+            .iter()
+            .map(|input| {
+                let volume = if volume_matches(volume, input.percent()) {
+                    None
+                } else {
+                    needs_volume = true;
+                    input.settable_volume(target).map(|cv| (target, cv))
+                };
+                volume_set |= volume.is_some();
+                StreamChange {
+                    index: input.index,
+                    volume,
+                    muted: (muted != input.muted).then_some(muted),
+                }
+            })
+            .filter(|c| c.volume.is_some() || c.muted.is_some())
+            .collect();
+        (volume_set || !needs_volume).then_some(changes)
+    }
+}
+
+/// Splits `streams` into the sessions they are shown as (see the module
+/// docs), in the order of each group's first stream in `streams`.
+pub(super) fn group_streams<'a>(
+    streams: impl IntoIterator<Item = &'a RawSinkInput>,
+    clients: &HashMap<u32, AppProps>,
+) -> Vec<StreamGroup<'a>> {
+    let mut groups: Vec<StreamGroup<'a>> = Vec::new();
+    let mut by_key: HashMap<_, usize> = HashMap::new();
+    for input in streams {
+        let client = client_of(clients, input);
+        let name = input.display_name(client);
+        let detail = input.detail(&name);
+        let key = input
+            .owner(client)
+            .map(|owner| (input.sink, name.clone(), detail.clone(), owner));
+        if let Some(key) = key {
+            match by_key.entry(key) {
+                Entry::Occupied(at) => {
+                    groups[*at.get()].members.push(input);
+                    continue;
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(groups.len());
+                }
+            }
+        }
+        groups.push(StreamGroup {
+            name,
+            detail,
+            members: vec![input],
+        });
+    }
+    for group in &mut groups {
+        group.members.sort_by_key(|i| i.index);
+    }
+    groups
 }
 
 fn is_generic_media_name(name: &str) -> bool {
@@ -284,16 +438,24 @@ impl RawState {
             .filter(move |i| i.sink == index && i.is_user_stream())
     }
 
-    /// The session `id` refers to, if it is currently a session on the
-    /// default sink.
-    pub fn default_session(&self, id: &str) -> Option<(&RawSink, &RawSinkInput)> {
+    /// The sessions on `sink`.
+    pub fn groups_on(&self, sink: &RawSink) -> Vec<StreamGroup<'_>> {
+        group_streams(self.sessions_on(sink), &self.clients)
+    }
+
+    /// The session on the default sink with a stream that `id` names. Any
+    /// of its streams will do, not only the representative, so a client
+    /// holding the id of a stream that has since joined a group still
+    /// reaches it.
+    pub fn default_group(&self, id: &str) -> Option<StreamGroup<'_>> {
         let (sink_id, index) = parse_session_id(id)?;
         let sink = self.default_sink()?;
         if sink.id() != sink_id {
             return None;
         }
-        let input = self.sessions_on(sink).find(|i| i.index == index)?;
-        Some((sink, input))
+        self.groups_on(sink)
+            .into_iter()
+            .find(|g| g.members.iter().any(|i| i.index == index))
     }
 
     /// The state, with session details only if `details` is set.
@@ -312,17 +474,17 @@ impl RawState {
                 volume: volume_to_percent(&sink.volume),
                 muted: sink.muted,
                 sessions: self
-                    .sessions_on(sink)
-                    .map(|i| {
-                        let client = i.client.and_then(|c| self.clients.get(&c));
-                        let name = i.display_name(client);
+                    .groups_on(sink)
+                    .into_iter()
+                    .map(|group| {
+                        let rep = group.representative();
                         Session {
-                            id: session_id(&id, i.index),
-                            detail: if details { i.detail(&name) } else { None },
-                            name,
-                            volume: i.percent(),
-                            muted: i.muted,
-                            app: i.app_hint(client),
+                            id: session_id(&id, rep.index),
+                            volume: rep.percent(),
+                            muted: rep.muted,
+                            app: rep.app_hint(client_of(&self.clients, rep)),
+                            name: group.name,
+                            detail: group.detail.filter(|_| details),
                         }
                     })
                     .collect(),
@@ -834,18 +996,338 @@ mod tests {
     }
 
     #[test]
-    fn default_session_lookup() {
-        let raw = raw();
-        assert_eq!(raw.default_session("speakers|10").unwrap().1.index, 10);
-        assert!(raw.default_session("speakers|12").is_none(), "event stream");
-        assert!(
-            raw.default_session("speakers|13").is_none(),
-            "module stream"
+    fn default_group_lookup() {
+        let mut raw = raw();
+        raw.inputs.push(radio(31));
+        raw.inputs.push(radio(30));
+        let found = |id: &str| {
+            raw.default_group(id)
+                .map(|g| g.members.iter().map(|i| i.index).collect::<Vec<_>>())
+        };
+        assert_eq!(found("speakers|10"), Some(vec![10]));
+        assert_eq!(found("speakers|30"), Some(vec![30, 31]));
+        assert_eq!(
+            found("speakers|31"),
+            Some(vec![30, 31]),
+            "not the representative"
         );
-        assert!(raw.default_session("hdmi|11").is_none(), "not default");
-        assert!(raw.default_session("speakers|11").is_none(), "wrong sink");
-        assert!(raw.default_session("speakers|99").is_none());
-        assert!(raw.default_session("nonsense").is_none());
+        assert_eq!(found("speakers|12"), None, "event stream");
+        assert_eq!(found("speakers|13"), None, "module stream");
+        assert_eq!(found("hdmi|11"), None, "not default");
+        assert_eq!(found("hdmi|31"), None, "not default");
+        assert_eq!(found("speakers|11"), None, "wrong sink");
+        assert_eq!(found("speakers|99"), None);
+        assert_eq!(found("nonsense"), None);
+    }
+
+    /// A Firefox stream of process 500 playing a tab titled "Radio".
+    fn radio(index: u32) -> RawSinkInput {
+        stream(index, 1, Some(500), Some(9), Some("Radio"))
+    }
+
+    fn stream(
+        index: u32,
+        sink: u32,
+        pid: Option<u32>,
+        client: Option<u32>,
+        title: Option<&str>,
+    ) -> RawSinkInput {
+        RawSinkInput {
+            client,
+            media_name: title.map(str::to_owned),
+            app: AppProps {
+                name: Some("Firefox".into()),
+                process_id: pid,
+                ..AppProps::default()
+            },
+            ..input(index, sink, "Firefox")
+        }
+    }
+
+    fn grouped(streams: &[RawSinkInput], clients: &HashMap<u32, AppProps>) -> Vec<Vec<u32>> {
+        group_streams(streams, clients)
+            .iter()
+            .map(|g| g.members.iter().map(|i| i.index).collect())
+            .collect()
+    }
+
+    #[test]
+    fn groups_streams_that_look_the_same() {
+        let none = HashMap::new();
+        let group = |streams: &[RawSinkInput]| grouped(streams, &none);
+        let tab = "The Best Reactions in Always Sunny - YouTube";
+        let firefox = |index, title| stream(index, 1, Some(22766), Some(91), Some(title));
+
+        // Firefox opens a stream per audio source in a page.
+        let streams = [
+            firefox(961, "Ukraine's Starlink Workaround - YouTube"),
+            firefox(6622, tab),
+            firefox(6663, tab),
+        ];
+        assert_eq!(group(&streams), [vec![961], vec![6622, 6663]]);
+        let groups = group_streams(&streams, &none);
+        assert_eq!(
+            (groups[1].name.as_str(), groups[1].detail.as_deref()),
+            ("Firefox", Some(tab))
+        );
+
+        // Same title, different processes.
+        let other = stream(2, 1, Some(4242), Some(91), Some(tab));
+        assert_eq!(group(&[firefox(1, tab), other]), [vec![1], vec![2]]);
+
+        // Same process, different titles.
+        assert_eq!(
+            group(&[firefox(1, tab), firefox(2, "Radio")]),
+            [vec![1], vec![2]]
+        );
+
+        // Same process, neither has a detail.
+        let plain = |index, title| stream(index, 1, Some(7), Some(3), title);
+        assert_eq!(
+            group(&[
+                plain(1, None),
+                plain(2, Some("AudioStream")),
+                plain(3, None)
+            ]),
+            [vec![1, 2, 3]]
+        );
+        assert_eq!(
+            group(&[plain(1, None), plain(2, Some("Radio"))]),
+            [vec![1], vec![2]]
+        );
+
+        // Different sinks.
+        assert_eq!(
+            group(&[
+                firefox(1, tab),
+                stream(2, 2, Some(22766), Some(91), Some(tab))
+            ]),
+            [vec![1], vec![2]]
+        );
+
+        // Different names.
+        let mpv = RawSinkInput {
+            app: AppProps {
+                name: Some("mpv".into()),
+                process_id: Some(22766),
+                ..AppProps::default()
+            },
+            ..firefox(2, tab)
+        };
+        assert_eq!(group(&[firefox(1, tab), mpv]), [vec![1], vec![2]]);
+
+        // Without a process id the client is the owner.
+        let by_client = |index, client| stream(index, 1, None, client, Some(tab));
+        assert_eq!(
+            group(&[
+                by_client(1, Some(5)),
+                by_client(2, Some(5)),
+                by_client(3, Some(6))
+            ]),
+            [vec![1, 2], vec![3]]
+        );
+
+        // A stream with no owner at all is never grouped.
+        assert_eq!(
+            group(&[by_client(1, None), by_client(2, None)]),
+            [vec![1], vec![2]]
+        );
+
+        // Members are ordered by index, groups by their first stream.
+        assert_eq!(
+            group(&[firefox(9, tab), firefox(3, "Radio"), firefox(4, tab)]),
+            [vec![4, 9], vec![3]]
+        );
+    }
+
+    #[test]
+    fn grouping_uses_client_props() {
+        // The pid and the name may come from the client alone.
+        let unnamed = |index, client| RawSinkInput {
+            app: AppProps::default(),
+            media_name: Some("cpal-playback-1".into()),
+            ..stream(index, 1, None, Some(client), None)
+        };
+        let app = |pid: &str| {
+            props(&[
+                ("application.name", "flaxative"),
+                ("application.process.id", pid),
+            ])
+        };
+        let clients = HashMap::from([(5, app("100")), (6, app("100")), (7, app("200"))]);
+        assert_eq!(
+            grouped(&[unnamed(1, 5), unnamed(2, 6), unnamed(3, 7)], &clients),
+            [vec![1, 2], vec![3]]
+        );
+    }
+
+    #[test]
+    fn a_group_is_shown_as_its_representative() {
+        let mut r = raw();
+        r.inputs.push(RawSinkInput {
+            volume: vec![NORMAL / 4; 2],
+            ..radio(31)
+        });
+        r.inputs.push(RawSinkInput {
+            muted: true,
+            volume: vec![NORMAL; 2],
+            app: AppProps {
+                icon_name: Some("firefox".into()),
+                ..radio(30).app
+            },
+            ..radio(30)
+        });
+        let sessions = r.to_audio_state(true).default_device.unwrap().sessions;
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["speakers|10", "speakers|14", "speakers|30"]);
+        let session = &sessions[2];
+        assert_eq!(
+            (session.name.as_str(), session.detail.as_deref()),
+            ("Firefox", Some("Radio"))
+        );
+        assert_eq!((session.volume, session.muted), (100.0, true));
+        assert_eq!(session.app.icon_name.as_deref(), Some("firefox"));
+        assert_eq!(session.app.process_id, Some(500));
+
+        // Grouping does not depend on whether details are sent.
+        r.inputs
+            .push(stream(32, 1, Some(500), Some(9), Some("Mail")));
+        let sessions = r.to_audio_state(false).default_device.unwrap().sessions;
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["speakers|10", "speakers|14", "speakers|30", "speakers|32"]
+        );
+        assert!(sessions.iter().all(|s| s.detail.is_none()));
+    }
+
+    #[test]
+    fn setting_a_group_sets_every_stream() {
+        let streams = [
+            RawSinkInput {
+                muted: true,
+                volume: vec![NORMAL; 2],
+                ..radio(30)
+            },
+            RawSinkInput {
+                volume: vec![NORMAL / 4; 2],
+                ..radio(31)
+            },
+            RawSinkInput {
+                has_volume: false,
+                volume: vec![],
+                ..radio(32)
+            },
+            RawSinkInput {
+                volume: vec![NORMAL / 2; 2],
+                ..radio(33)
+            },
+            RawSinkInput {
+                volume_writable: false,
+                ..radio(34)
+            },
+        ];
+        let groups = group_streams(&streams, &HashMap::new());
+        assert_eq!(groups.len(), 1);
+        let summary = |changes: Vec<StreamChange>| {
+            changes
+                .into_iter()
+                .map(|c| (c.index, c.volume.map(|(raw, _)| raw), c.muted))
+                .collect::<Vec<_>>()
+        };
+        // 32 and 34 cannot take a volume; 33 is already within the echo
+        // tolerance.
+        let target = percent_to_volume(50.3);
+        assert_eq!(
+            summary(groups[0].changes(50.3, false).unwrap()),
+            [(30, Some(target), Some(false)), (31, Some(target), None)]
+        );
+        assert_eq!(
+            summary(groups[0].changes(100.0, true).unwrap()),
+            [
+                (31, Some(NORMAL), Some(true)),
+                (32, None, Some(true)),
+                (33, Some(NORMAL), Some(true)),
+                (34, None, Some(true)),
+            ]
+        );
+        let (raw, cv) = groups[0].changes(20.0, true).unwrap()[0].volume.unwrap();
+        assert_eq!(raw, percent_to_volume(20.0));
+        assert_eq!(cv.get(), [Volume(raw); 2]);
+
+        // Refused only when no stream that needs a new volume can take one.
+        let unsettable = group_streams(&streams[2..3], &HashMap::new());
+        assert_eq!(unsettable[0].changes(50.0, true), None);
+        assert_eq!(
+            summary(unsettable[0].changes(100.0, true).unwrap()),
+            [(32, None, Some(true))]
+        );
+        // 33 and 34 are at 50 already, 32 needs a volume and cannot take it.
+        let mixed = group_streams(&streams[2..], &HashMap::new());
+        assert_eq!(mixed[0].changes(50.0, false), None);
+        let target = percent_to_volume(10.0);
+        assert_eq!(
+            summary(mixed[0].changes(10.0, false).unwrap()),
+            [(33, Some(target), None)]
+        );
+    }
+
+    #[test]
+    fn diff_follows_groups() {
+        let mut r = raw();
+        r.inputs.push(radio(30));
+        r.inputs.push(radio(31));
+        let base = r.to_audio_state(true);
+
+        // A stream joining or leaving the group, whatever its volume.
+        let mut joined = r.clone();
+        joined.inputs.push(RawSinkInput {
+            volume: vec![NORMAL / 8; 2],
+            ..radio(32)
+        });
+        assert!(diff(&base, &joined.to_audio_state(true)).is_empty());
+        let mut left = r.clone();
+        left.inputs.retain(|i| i.index != 31);
+        assert!(diff(&base, &left.to_audio_state(true)).is_empty());
+
+        // The representative leaving: the group continues as one row under
+        // the next stream's id.
+        let mut moved = r.clone();
+        moved.inputs.retain(|i| i.index != 30);
+        let after = moved.to_audio_state(true);
+        assert_eq!(
+            diff(&base, &after),
+            vec![
+                AudioEvent::SessionRemoved {
+                    id: "speakers|30".into()
+                },
+                AudioEvent::SessionAdded {
+                    id: "speakers|31".into()
+                },
+            ]
+        );
+        let radios: Vec<&str> = after
+            .default_device
+            .as_ref()
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|s| s.detail.as_deref() == Some("Radio"))
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(radios, ["speakers|31"]);
+
+        // The representative's volume is the group's.
+        let mut louder = r.clone();
+        louder.input_mut(31).unwrap().volume.fill(NORMAL / 8);
+        assert!(diff(&base, &louder.to_audio_state(true)).is_empty());
+        louder.input_mut(30).unwrap().volume.fill(NORMAL / 8);
+        assert_eq!(
+            diff(&base, &louder.to_audio_state(true)),
+            vec![AudioEvent::SessionChanged {
+                id: "speakers|30".into()
+            }]
+        );
     }
 
     #[test]

@@ -15,7 +15,9 @@ use libpulse_binding::mainloop::standard::Mainloop;
 use pcvc_protocol::Command;
 
 use super::conn::{self, Connection, OpError};
-use super::model::{RawState, diff, percent_to_volume, volume_matches, volume_to_percent};
+use super::model::{
+    RawState, StreamChange, diff, percent_to_volume, volume_matches, volume_to_percent,
+};
 use super::{Request, Shared, backend_error};
 use crate::AudioError;
 
@@ -390,10 +392,14 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Sets volume and mute of a session on the default sink. A matching
-    /// volume is left alone as in [`Self::set_master`]; a volume change on a
-    /// stream whose volume cannot be set is refused without changing
-    /// anything.
+    /// Sets volume and mute of every stream of a session on the default sink
+    /// (see [`StreamGroup::changes`](super::model::StreamGroup::changes) for
+    /// the streams left alone and when the request is refused).
+    ///
+    /// The server may reject a stream; the others are still set and the
+    /// first rejection is returned. A stream that went away meanwhile is
+    /// skipped, unless every stream did, which reports the session as
+    /// unknown. A timeout or a lost connection stops at once.
     fn set_session(
         &mut self,
         session_id: &str,
@@ -401,38 +407,44 @@ impl Ctx<'_> {
         muted: bool,
     ) -> Result<(), AudioError> {
         let unknown = || AudioError::UnknownSession(session_id.to_owned());
-        let (_, input) = self.raw.default_session(session_id).ok_or_else(unknown)?;
-        let index = input.index;
-        let new_volume = if volume_matches(volume, input.percent()) {
-            None
-        } else {
-            let target = percent_to_volume(volume);
-            let cv = conn::uniform_volume(input.volume.len(), target)
-                .filter(|_| input.has_volume && input.volume_writable)
-                .ok_or_else(|| backend_error("the volume of this stream cannot be changed"))?;
-            Some((target, cv))
-        };
-        let new_mute = (muted != input.muted).then_some(muted);
-        // The stream can go away between the lookup and the request.
-        let map = |e: OpError| {
-            if e.is_no_entity() {
-                unknown()
-            } else {
-                backend_error(e)
-            }
-        };
-        if let Some((target, cv)) = new_volume {
-            self.conn
-                .set_sink_input_volume(self.mainloop, self.deadline, index, &cv)
-                .map_err(map)?;
-            if let Some(input) = self.raw.input_mut(index) {
-                input.volume.fill(target);
+        let changes = self
+            .raw
+            .default_group(session_id)
+            .ok_or_else(unknown)?
+            .changes(volume, muted)
+            .ok_or_else(|| backend_error("the volume of this session cannot be changed"))?;
+        let mut gone = 0;
+        let mut rejected = None;
+        for change in &changes {
+            match self.set_stream(change) {
+                Ok(()) => {}
+                Err(e) if e.is_no_entity() => gone += 1,
+                Err(e @ OpError::Failed(_)) => {
+                    rejected.get_or_insert(e);
+                }
+                Err(e) => return Err(backend_error(e)),
             }
         }
-        if let Some(muted) = new_mute {
+        if gone > 0 && gone == changes.len() {
+            return Err(unknown());
+        }
+        rejected.map_or(Ok(()), |e| Err(backend_error(e)))
+    }
+
+    /// Applies one stream's part of [`Self::set_session`] and records it in
+    /// the cache.
+    fn set_stream(&mut self, change: &StreamChange) -> Result<(), OpError> {
+        let index = change.index;
+        if let Some((target, cv)) = &change.volume {
             self.conn
-                .set_sink_input_mute(self.mainloop, self.deadline, index, muted)
-                .map_err(map)?;
+                .set_sink_input_volume(self.mainloop, self.deadline, index, cv)?;
+            if let Some(input) = self.raw.input_mut(index) {
+                input.volume.fill(*target);
+            }
+        }
+        if let Some(muted) = change.muted {
+            self.conn
+                .set_sink_input_mute(self.mainloop, self.deadline, index, muted)?;
             if let Some(input) = self.raw.input_mut(index) {
                 input.muted = muted;
             }
