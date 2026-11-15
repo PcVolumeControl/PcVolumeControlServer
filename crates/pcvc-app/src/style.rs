@@ -3,7 +3,7 @@
 //! everything.
 
 use iced::widget::{button as btn, container, text};
-use iced::{Border, Theme};
+use iced::{Border, Color, Theme};
 
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_S: f32 = 8.0;
@@ -26,6 +26,9 @@ pub const PERCENT_WIDTH: f32 = 48.0;
 pub const STATUS_ICON: f32 = 64.0;
 /// Application icons in the Mixer.
 pub const APP_ICON: f32 = 24.0;
+pub const APP_ICON_RADIUS: f32 = 6.0;
+/// The letter on an application's fallback tile.
+pub const APP_ICON_LETTER: f32 = 13.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Button {
@@ -67,6 +70,23 @@ pub fn card(theme: &Theme) -> container::Style {
         },
         ..base
     }
+}
+
+/// The fallback tile of an application without an icon.
+pub fn icon_tile(background: Color) -> container::Style {
+    container::Style {
+        background: Some(background.into()),
+        border: Border {
+            radius: APP_ICON_RADIUS.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Where an application icon appears once it has been looked up.
+pub fn icon_placeholder(theme: &Theme) -> container::Style {
+    icon_tile(theme.extended_palette().background.weak.color)
 }
 
 /// De-emphasised text such as section labels and hints.

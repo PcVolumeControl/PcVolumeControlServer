@@ -7,6 +7,7 @@
 //! to the inbox. [`IconCache`] remembers results, including misses.
 
 mod cache;
+pub mod fallback;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -18,7 +19,7 @@ use std::sync::{Arc, mpsc};
 use iced::widget::image;
 use pcvc_audio::Session;
 
-pub use cache::IconCache;
+pub use cache::{IconCache, Slot};
 
 use crate::icons::Rgba;
 use crate::inbox::{Inbound, Inbox};

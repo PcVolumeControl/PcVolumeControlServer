@@ -5,13 +5,14 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use iced_test::simulator;
+use iced_test::{Simulator, simulator};
 use pcvc_audio::{AudioBackend, AudioState, MockBackend};
 use pcvc_server::ClientInfo;
 
 use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
+use crate::app_icons::{IconKey, Resolved};
 use crate::config::ThemeChoice;
 use crate::inbox;
 use crate::mixer::Target;
@@ -65,6 +66,32 @@ impl Harness {
         }
     }
 
+    /// Pretends a window at scale 1 is open, so the Mixer shows icons.
+    fn open_window(&mut self) -> window::Id {
+        let id = window::Id::unique();
+        self.app.window = Some(id);
+        self.run(vec![Message::ScaleFactor(id, 1.0)]);
+        id
+    }
+
+    fn sessions(&self) -> Vec<pcvc_audio::Session> {
+        self.backend
+            .snapshot()
+            .unwrap()
+            .default_device
+            .unwrap()
+            .sessions
+    }
+
+    /// Delivers an icon lookup result as the icon worker would.
+    fn resolve_icon(&mut self, session: &pcvc_audio::Session, icon: Option<image::Handle>) {
+        let key = IconKey::new(session, style::APP_ICON as u32);
+        self.run(vec![Message::Inbound(Inbound::AppIcon(Resolved {
+            key,
+            icon,
+        }))]);
+    }
+
     /// Waits for the command thread to bring the backend into a state.
     fn wait_for(&mut self, done: impl Fn(&AudioState) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -101,6 +128,84 @@ fn mixer_lists_live_sessions_and_mutes() {
         .unwrap();
     h.refresh_audio();
     simulator(h.app.mixer_view()).find("VLC").unwrap();
+}
+
+fn icon_id(kind: &str, session: &pcvc_audio::Session) -> iced::widget::Id {
+    iced::widget::Id::from(format!("app-icon-{kind}:{}", session.id))
+}
+
+#[test]
+fn mixer_rows_show_icon_fallback_and_placeholder() {
+    let mut h = Harness::new();
+    h.open_window();
+    let sessions = h.sessions();
+    let (firefox, spotify, discord) = (&sessions[0], &sessions[1], &sessions[2]);
+    let red = image::Handle::from_rgba(1, 1, vec![255, 0, 0, 255]);
+    h.resolve_icon(firefox, Some(red));
+    h.resolve_icon(spotify, None);
+
+    let mut ui = simulator(h.app.mixer_view());
+    let icon = ui.find(icon_id("image", firefox)).unwrap().bounds();
+    let tile = ui.find(icon_id("fallback", spotify)).unwrap().bounds();
+    let pending = ui.find(icon_id("pending", discord)).unwrap().bounds();
+    assert!(ui.find(icon_id("image", spotify)).is_err());
+    ui.find("S").unwrap();
+    for b in [icon, tile, pending] {
+        assert_eq!((b.width, b.height), (style::APP_ICON, style::APP_ICON));
+        assert_eq!(b.x, icon.x, "icons share a column");
+    }
+    // Rows are evenly spaced whatever their icon state.
+    assert_eq!(tile.y - icon.y, pending.y - tile.y);
+    let names: Vec<f32> = ["Firefox", "Spotify", "Discord"]
+        .iter()
+        .map(|n| ui.find(*n).unwrap().bounds().x)
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|&x| x == names[0] && x > icon.x + style::APP_ICON)
+    );
+
+    // The master row has no icon.
+    let master = ui.find("Master").unwrap().bounds();
+    assert!(master.y < icon.y);
+}
+
+#[test]
+fn mixer_long_names_keep_the_columns() {
+    let mut h = Harness::new();
+    h.open_window();
+    let device = h.backend.snapshot().unwrap().default_device.unwrap().id;
+    let long = "A very long application name that does not fit in its column at all";
+    h.backend
+        .add_session(
+            &device,
+            pcvc_audio::Session::new(MockBackend::session_id(&device, "long"), long, 31.0),
+        )
+        .unwrap();
+    h.refresh_audio();
+    let sessions = h.sessions();
+    let long_session = sessions.iter().find(|s| s.name == long).unwrap();
+    h.resolve_icon(long_session, None);
+
+    let mut ui = Simulator::with_size(
+        iced::Settings::default(),
+        Size::new(560.0, 480.0),
+        h.app.mixer_view(),
+    );
+    let tile = ui.find(icon_id("fallback", long_session)).unwrap().bounds();
+    assert_eq!(tile.height, style::APP_ICON);
+    // The percentages stay in one column: the long name pushes nothing.
+    let long_percent = ui.find("31%").unwrap().bounds();
+    let spotify_percent = ui.find("65%").unwrap().bounds();
+    assert_eq!(long_percent.x, spotify_percent.x);
+    assert_eq!(long_percent.width, spotify_percent.width);
+    let name = ui.find(long).unwrap();
+    let visible = name.visible_bounds().unwrap();
+    assert!(
+        visible.x + visible.width <= long_percent.x,
+        "name is clipped before the slider"
+    );
 }
 
 #[test]
@@ -227,8 +332,16 @@ fn render_pages() {
             std::fs::remove_file(&path).unwrap();
         }
     }
-    let id = window::Id::unique();
-    h.app.window = Some(id);
+    let id = h.open_window();
+    // One icon found, two misses (fallback tiles) and one still pending.
+    let sessions = h.sessions();
+    let app = icons::rasterize(icons::APP, style::APP_ICON as u32).unwrap();
+    h.resolve_icon(
+        &sessions[0],
+        Some(image::Handle::from_rgba(app.width, app.height, app.pixels)),
+    );
+    h.resolve_icon(&sessions[1], None);
+    h.resolve_icon(&sessions[2], None);
     for page in [Page::Mixer, Page::Status, Page::Settings] {
         h.app.page = page;
         for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {

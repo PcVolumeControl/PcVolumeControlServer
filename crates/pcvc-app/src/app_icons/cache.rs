@@ -28,7 +28,6 @@ pub struct IconCache<K, T> {
     entries: HashMap<K, (Slot<T>, u64, Instant)>,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by the Mixer view next"))]
 impl<K: Eq + Hash + Clone, T> IconCache<K, T> {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -73,6 +72,7 @@ impl<K: Eq + Hash + Clone, T> IconCache<K, T> {
         self.evict();
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

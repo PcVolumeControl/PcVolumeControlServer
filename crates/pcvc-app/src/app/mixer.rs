@@ -2,12 +2,15 @@
 
 use std::time::Instant;
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, slider, text};
+use iced::widget::{
+    Space, button, column, container, image, pick_list, row, scrollable, slider, text,
+};
 use iced::{Center, Element, Fill, Task};
-use pcvc_audio::{Device, DeviceInfo};
+use pcvc_audio::{Device, DeviceInfo, Session};
 use pcvc_protocol::Command;
 
 use super::{App, Message};
+use crate::app_icons::{IconKey, Slot, fallback};
 use crate::mixer::{Target, control};
 use crate::style::{self, Button};
 
@@ -182,12 +185,13 @@ impl App {
                 .into()
         } else {
             column(device.sessions.iter().map(|s| {
-                self.volume_row(
-                    text(&s.name).wrapping(text::Wrapping::None),
-                    Target::Session(s.id.clone()),
-                    s.volume,
-                    s.muted,
-                )
+                let label = row![
+                    self.app_icon(s),
+                    text(&s.name).wrapping(text::Wrapping::None)
+                ]
+                .spacing(style::SPACE_S)
+                .align_y(Center);
+                self.volume_row(label, Target::Session(s.id.clone()), s.volume, s.muted)
             }))
             .spacing(style::SPACE_M)
             .into()
@@ -209,6 +213,46 @@ impl App {
         ]
         .spacing(style::SPACE_M)
         .into()
+    }
+
+    /// The session's icon once found, the fallback tile when there is
+    /// none, and an empty tile of the same size while it is looked up.
+    fn app_icon(&self, session: &Session) -> Element<'_, Message> {
+        let size = style::APP_ICON;
+        let slot = self
+            .icon_size()
+            .and_then(|px| self.icons.get(&IconKey::new(session, px)));
+        let id = |kind: &str| format!("app-icon-{kind}:{}", session.id);
+        match slot {
+            Some(Slot::Ready(Some(handle))) => container(
+                image(handle.clone())
+                    .width(size)
+                    .height(size)
+                    .border_radius(style::APP_ICON_RADIUS),
+            )
+            .id(id("image"))
+            .into(),
+            Some(Slot::Ready(None)) => {
+                let (letter, tile) = (session.name.clone(), session.name.clone());
+                container(
+                    text(fallback::initial(&session.name))
+                        .size(style::APP_ICON_LETTER)
+                        .style(move |theme| text::Style {
+                            color: Some(fallback::colors(theme, &letter).text),
+                        }),
+                )
+                .id(id("fallback"))
+                .center(size)
+                .style(move |theme| style::icon_tile(fallback::colors(theme, &tile).color))
+                .into()
+            }
+            _ => container(Space::new())
+                .id(id("pending"))
+                .width(size)
+                .height(size)
+                .style(style::icon_placeholder)
+                .into(),
+        }
     }
 
     fn volume_row<'a>(
