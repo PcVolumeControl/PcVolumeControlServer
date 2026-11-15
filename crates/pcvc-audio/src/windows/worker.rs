@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ::windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use ::windows::Win32::Media::Audio::{
@@ -21,12 +21,9 @@ use crate::{AudioError, AudioEvent, AudioState, Device, DeviceInfo, Session};
 
 const EVENT_CAPACITY: usize = 64;
 
-/// Delay before re-reading after a failed refresh.
-const RETRY_INTERVAL: Duration = Duration::from_millis(500);
-
-/// Most messages handled before the cache is refreshed, so a flood of
-/// notifications cannot starve commands.
-const MAX_BATCH: usize = 256;
+/// Most messages handled before the cache is refreshed and replies are sent,
+/// which bounds how long a command waits behind others.
+const MAX_BATCH: usize = 64;
 
 /// State shared between the COM thread and [`super::WindowsBackend`].
 pub(super) struct Shared {
@@ -140,6 +137,8 @@ struct Worker {
     /// Rebuild the default device's objects even if its id is unchanged,
     /// after one of them failed.
     reopen_default: bool,
+    /// Consecutive failed refreshes.
+    failures: u32,
     retry_at: Option<Instant>,
 }
 
@@ -155,6 +154,7 @@ impl Worker {
             default: None,
             dirty: Dirty::default(),
             reopen_default: false,
+            failures: 0,
             retry_at: None,
         };
         worker.refresh(Dirty::all())?;
@@ -205,29 +205,27 @@ impl Worker {
         }
     }
 
-    /// Runs a command against fresh state, and marks what it changes so the
-    /// next flush re-reads it even if Core Audio's notification is late.
+    /// Runs a command against the cached objects, re-reading once if the
+    /// target is not found, and marks what it changes so that the flush after
+    /// the batch re-reads it even if Core Audio's notification is late.
     fn execute(&mut self, request: Request) -> Result<(), AudioError> {
-        self.flush();
         match request {
             Request::DefaultDevice { device_id } => {
-                let endpoint_id = match self.endpoint_id_of(&device_id) {
-                    Some(id) => id,
-                    None => {
-                        // The device may have appeared since the last refresh.
-                        self.devices = self.enumerate_devices()?;
-                        self.endpoint_id_of(&device_id)
-                            .ok_or(AudioError::UnknownDevice(device_id))?
-                    }
-                };
+                let endpoint_id = self
+                    .find_or_refresh(Change::Devices, |w| w.endpoint_id_of(&device_id))
+                    .ok_or(AudioError::UnknownDevice(device_id))?;
                 self.dirty.mark(Change::Default);
                 policy_config::set_default_endpoint(&endpoint_id)
                     .map_err(|e| com_error("IPolicyConfig::SetDefaultEndpoint", e))
             }
             Request::Master { volume, muted } => {
-                let default = self.default.as_ref().ok_or(AudioError::NoDefaultDevice)?;
+                let control = self
+                    .find_or_refresh(Change::Default, |w| {
+                        w.default.as_ref().map(|d| d.volume.clone())
+                    })
+                    .ok_or(AudioError::NoDefaultDevice)?;
                 self.dirty.mark(Change::Master);
-                com::set_master(&default.volume, volume, muted)
+                com::set_master(&control, volume, muted)
                     .map_err(|e| com_error("setting master volume", e))
             }
             Request::Session {
@@ -235,17 +233,36 @@ impl Worker {
                 volume,
                 muted,
             } => {
-                let default = self.default.as_ref().ok_or(AudioError::NoDefaultDevice)?;
-                let session = default
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == session_id)
-                    .ok_or(AudioError::UnknownSession(session_id))?;
+                let control = self.find_or_refresh(Change::SessionList, |w| {
+                    let default = w.default.as_ref()?;
+                    let session = default.sessions.iter().find(|s| s.id == session_id)?;
+                    Some(session.simple.clone())
+                });
+                let control = match (control, &self.default) {
+                    (Some(control), _) => control,
+                    (None, Some(_)) => return Err(AudioError::UnknownSession(session_id)),
+                    (None, None) => return Err(AudioError::NoDefaultDevice),
+                };
                 self.dirty.mark(Change::SessionValues);
-                com::set_session_volume(&session.simple, volume, muted)
+                com::set_session_volume(&control, volume, muted)
                     .map_err(|e| com_error("setting session volume", e))
             }
         }
+    }
+
+    /// `find` on the cached state or, if that finds nothing, on the state
+    /// after re-reading `change`.
+    fn find_or_refresh<T>(
+        &mut self,
+        change: Change,
+        find: impl Fn(&Self) -> Option<T>,
+    ) -> Option<T> {
+        if let Some(found) = find(self) {
+            return Some(found);
+        }
+        self.dirty.mark(change);
+        self.flush();
+        find(self)
     }
 
     fn endpoint_id_of(&self, device_id: &str) -> Option<String> {
@@ -262,13 +279,29 @@ impl Worker {
         }
         let dirty = std::mem::take(&mut self.dirty);
         match self.refresh(dirty) {
-            Ok(()) => self.retry_at = None,
+            Ok(()) => {
+                if self.failures > 0 {
+                    tracing::info!("audio state readable again");
+                }
+                self.failures = 0;
+                self.retry_at = None;
+            }
             Err(e) => {
-                tracing::warn!("refreshing audio state failed, retrying: {e}");
+                self.failures = self.failures.saturating_add(1);
+                let delay = logic::retry_delay(self.failures);
+                if self.failures == 1 {
+                    tracing::warn!("refreshing audio state failed, retrying: {e}");
+                } else {
+                    tracing::debug!(
+                        failures = self.failures,
+                        ?delay,
+                        "refresh failed again: {e}"
+                    );
+                }
                 self.dirty.merge(dirty);
                 self.dirty.mark(Change::Default);
                 self.reopen_default = true;
-                self.retry_at = Some(Instant::now() + RETRY_INTERVAL);
+                self.retry_at = Some(Instant::now() + delay);
             }
         }
         self.publish();
@@ -329,8 +362,8 @@ impl Worker {
         if unchanged && !self.reopen_default {
             return Ok(false);
         }
-        // Release the old endpoint's objects before opening the new one.
-        self.default = None;
+        // On failure the old default stays cached until a retry succeeds,
+        // rather than briefly publishing no default device.
         self.default = Some(DefaultDevice::open(device, endpoint_id)?);
         self.reopen_default = false;
         Ok(true)
@@ -376,13 +409,22 @@ impl Worker {
 
 fn read_endpoint(device: &IMMDevice) -> Result<Endpoint, AudioError> {
     let endpoint_id = com::endpoint_id(device).map_err(|e| com_error("reading endpoint id", e))?;
+    Ok(endpoint_info(device, endpoint_id))
+}
+
+/// An endpoint's protocol id and name. An unreadable friendly name falls back
+/// to the id rather than hiding the endpoint.
+fn endpoint_info(device: &IMMDevice, endpoint_id: String) -> Endpoint {
     let id = logic::device_id_from_endpoint_id(&endpoint_id);
-    let friendly = com::friendly_name(device).map_err(|e| com_error("reading endpoint name", e))?;
+    let friendly = com::friendly_name(device).unwrap_or_else(|e| {
+        tracing::debug!(endpoint = %endpoint_id, "reading endpoint name failed: {e}");
+        None
+    });
     let name = logic::device_name(friendly.as_deref(), &id);
-    Ok(Endpoint {
+    Endpoint {
         endpoint_id,
         info: DeviceInfo { id, name },
-    })
+    }
 }
 
 /// The default endpoint and the objects that watch and control it.
@@ -401,7 +443,7 @@ struct DefaultDevice {
 
 impl DefaultDevice {
     fn open(device: IMMDevice, endpoint_id: String) -> Result<Self, AudioError> {
-        let Endpoint { info, .. } = read_endpoint(&device)?;
+        let Endpoint { endpoint_id, info } = endpoint_info(&device, endpoint_id);
         let volume: IAudioEndpointVolume =
             com::activate(&device).map_err(|e| com_error("activating IAudioEndpointVolume", e))?;
         let manager: IAudioSessionManager2 =

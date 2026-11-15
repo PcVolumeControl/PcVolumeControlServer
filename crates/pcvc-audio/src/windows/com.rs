@@ -206,7 +206,9 @@ pub(super) fn session_controls(
 /// expired.
 pub(super) fn is_listed(control: &IAudioSessionControl2) -> Result<bool> {
     // SAFETY: no pointer arguments.
-    let system = logic::is_s_ok(unsafe { control.IsSystemSoundsSession() }.0);
+    let system = unsafe { control.IsSystemSoundsSession() };
+    system.ok()?;
+    let system = logic::is_s_ok(system.0);
     // SAFETY: no pointer arguments.
     let state = unsafe { control.GetState() }?;
     Ok(!system && state != AudioSessionStateExpired)

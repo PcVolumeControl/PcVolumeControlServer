@@ -2,6 +2,7 @@
 //! are tested on every platform.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use pcvc_protocol::clamp_volume;
 
@@ -101,6 +102,15 @@ pub(crate) fn device_name(friendly: Option<&str>, device_id: &str) -> String {
     friendly
         .and_then(non_blank)
         .unwrap_or_else(|| device_id.to_owned())
+}
+
+/// Delay before retrying after `failures` consecutive failed refreshes:
+/// 500 ms, doubling up to 30 s.
+pub(crate) fn retry_delay(failures: u32) -> Duration {
+    const FIRST: Duration = Duration::from_millis(500);
+    const MAX: Duration = Duration::from_secs(30);
+    let doublings = failures.saturating_sub(1).min(16);
+    (FIRST * (1 << doublings)).min(MAX)
 }
 
 /// What a Core Audio notification says needs re-reading.
@@ -342,6 +352,14 @@ mod tests {
         );
         assert_eq!(device_name(Some(" "), GUID), GUID);
         assert_eq!(device_name(None, GUID), GUID);
+    }
+
+    #[test]
+    fn retry_backs_off() {
+        let ms = |n| retry_delay(n).as_millis();
+        assert_eq!([ms(0), ms(1), ms(2), ms(3)], [500, 500, 1000, 2000]);
+        assert_eq!(ms(7), 30_000);
+        assert_eq!(ms(u32::MAX), 30_000);
     }
 
     #[test]

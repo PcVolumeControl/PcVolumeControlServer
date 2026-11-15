@@ -1,5 +1,5 @@
-use std::sync::Arc;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -13,6 +13,9 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a command waits for the COM thread.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long dropping the backend waits for the COM thread to clean up.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// [`AudioBackend`] over Windows Core Audio.
 ///
@@ -30,6 +33,8 @@ pub struct WindowsBackend {
     tx: Sender<Msg>,
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    /// Disconnects when the COM thread exits.
+    exited: Mutex<Receiver<()>>,
 }
 
 impl WindowsBackend {
@@ -38,12 +43,17 @@ impl WindowsBackend {
         let shared = Arc::new(Shared::new());
         let (tx, rx) = mpsc::channel();
         let (init_tx, init_rx) = mpsc::sync_channel(1);
+        let (exit_tx, exit_rx) = mpsc::channel::<()>();
         let thread = thread::Builder::new()
             .name("pcvc-core-audio".into())
             .spawn({
                 let shared = Arc::clone(&shared);
                 let tx = tx.clone();
-                move || worker::run(shared, tx, rx, init_tx)
+                move || {
+                    // Dropped last, also when unwinding.
+                    let _exit = exit_tx;
+                    worker::run(shared, tx, rx, init_tx);
+                }
             })
             .map_err(|e| AudioError::Backend(Box::new(e)))?;
         match init_rx.recv_timeout(INIT_TIMEOUT) {
@@ -51,6 +61,7 @@ impl WindowsBackend {
                 tx,
                 shared,
                 thread: Some(thread),
+                exited: Mutex::new(exit_rx),
             }),
             Ok(Err(e)) => {
                 let _ = thread.join();
@@ -92,8 +103,21 @@ fn stopped() -> AudioError {
 impl Drop for WindowsBackend {
     fn drop(&mut self) {
         let _ = self.tx.send(Msg::Shutdown);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        let exited = self
+            .exited
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        match exited.recv_timeout(SHUTDOWN_TIMEOUT) {
+            Err(RecvTimeoutError::Disconnected) => {
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+            // Stuck in a COM call: leave the thread to finish on its own
+            // rather than hang whoever drops the backend.
+            Ok(()) | Err(RecvTimeoutError::Timeout) => {
+                tracing::warn!("Core Audio thread did not stop in time, detaching it");
+            }
         }
     }
 }
