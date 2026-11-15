@@ -7,9 +7,13 @@
 //! PulseAudio) will live in `cfg`-gated modules of this crate.
 
 mod mock;
+#[cfg(target_os = "linux")]
+mod pulse;
 
 pub use mock::MockBackend;
 use pcvc_protocol::Command;
+#[cfg(target_os = "linux")]
+pub use pulse::PulseBackend;
 use tokio::sync::broadcast;
 
 /// Snapshot of the audio system as the protocol presents it.

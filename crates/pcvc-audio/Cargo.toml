@@ -11,3 +11,8 @@ repository.workspace = true
 pcvc-protocol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding.workspace = true
+libpulse-sys.workspace = true
+tracing.workspace = true
