@@ -40,6 +40,60 @@ pub const LABEL_MAX: f32 = 260.0;
 /// its minimum.
 pub const SLIDER_MIN: f32 = 80.0;
 
+/// Sizes of the Mixer rows. The window's Mixer page and the mini mixer
+/// build their rows with the same code and differ only in these.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Density {
+    /// Labels, names, percentages and mute buttons.
+    pub text: f32,
+    /// The "Master" label.
+    pub master_text: f32,
+    /// Between the columns of a row.
+    pub spacing: f32,
+    /// Between application rows.
+    pub row_spacing: f32,
+    /// Padding on each side of the rows (a card's), which the columns
+    /// cannot use.
+    pub inset: f32,
+    pub mute_width: f32,
+    pub mute_padding: Padding,
+    pub percent_width: f32,
+    pub picker_padding: Padding,
+    /// The label column takes this share of the width the fixed columns
+    /// leave, within `label_min` and `label_max`.
+    pub label_share: f32,
+    pub label_min: f32,
+    pub label_max: f32,
+    /// The slider keeps at least this much before the label shrinks below
+    /// its minimum.
+    pub slider_min: f32,
+    /// Every row's height, when fixed.
+    pub row_height: Option<f32>,
+}
+
+/// The window's Mixer page.
+pub const REGULAR: Density = Density {
+    text: TEXT_DEFAULT,
+    master_text: TEXT_SECTION,
+    spacing: SPACE_M,
+    row_spacing: SPACE_M,
+    inset: SPACE_L,
+    mute_width: MUTE_WIDTH,
+    mute_padding: btn::DEFAULT_PADDING,
+    percent_width: PERCENT_WIDTH,
+    picker_padding: Padding {
+        top: SPACE_S,
+        right: SPACE_M,
+        bottom: SPACE_S,
+        left: SPACE_M,
+    },
+    label_share: LABEL_SHARE,
+    label_min: LABEL_MIN,
+    label_max: LABEL_MAX,
+    slider_min: SLIDER_MIN,
+    row_height: None,
+};
+
 /// Application icons in the Mixer.
 pub const APP_ICON: f32 = 24.0;
 pub const APP_ICON_RADIUS: f32 = 6.0;

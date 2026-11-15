@@ -1,4 +1,5 @@
-//! Mixer view and its message handling.
+//! Mixer view and its message handling. The rows are shared with the mini
+//! mixer, which builds them at another [`Density`].
 
 use std::borrow::Cow;
 use std::time::Instant;
@@ -14,7 +15,7 @@ use super::{App, Message};
 use crate::app_icons::{Slot, fallback};
 use crate::fit::fit;
 use crate::mixer::{Target, control};
-use crate::style::{self, Button};
+use crate::style::{self, Button, Density};
 
 #[derive(Debug, Clone)]
 pub enum MixerMessage {
@@ -183,33 +184,9 @@ impl App {
     }
 
     fn mixer_layout<'a>(&'a self, audio: &'a AudioState, width: f32) -> Element<'a, Message> {
-        let cols = MixerColumns::new(width);
-        let selected = audio.default_device.as_ref().and_then(|device| {
-            let info = audio.devices.iter().find(|d| d.id == device.id)?;
-            let label = fit(&info.name, style::TEXT_DEFAULT, cols.picker_text);
-            let shortened = matches!(label, Cow::Owned(_));
-            Some((
-                DeviceChoice::new(info).with_label(label.into_owned()),
-                shortened.then_some(info.name.as_str()),
-            ))
-        });
-        let full_name = selected.as_ref().and_then(|(_, full)| *full);
-        let devices: Vec<DeviceChoice> = audio.devices.iter().map(DeviceChoice::new).collect();
-        let list = pick_list(devices, selected.map(|(choice, _)| choice), |c| {
-            Message::Mixer(MixerMessage::SelectDevice(c))
-        })
-        .text_size(style::TEXT_DEFAULT)
-        .padding([style::SPACE_S, style::SPACE_M])
-        .width(Fill);
-        let picker = row![
-            container(text("Output device"))
-                .width(cols.label)
-                .clip(true),
-            with_tooltip(list, full_name),
-        ]
-        .spacing(style::SPACE_M)
-        .align_y(Center);
-
+        let density = &style::REGULAR;
+        let cols = MixerColumns::new(width, density);
+        let picker = device_picker(audio, &cols, density);
         let Some(device) = &audio.default_device else {
             return column![
                 style::beside_gutter(container(picker).padding(style::SPACE_L).style(style::card)),
@@ -218,34 +195,11 @@ impl App {
             .spacing(style::SPACE_M)
             .into();
         };
-        let master = self.volume_row(
-            text("Master").size(style::TEXT_SECTION).into(),
-            &cols,
-            Target::Master,
-            self.mixer.volume(&Target::Master, device.volume),
-            self.mixer.muted(&Target::Master, device.muted),
-        );
+        let master = self.master_row(device, &cols, density);
         let top = container(column![picker, master].spacing(style::SPACE_L))
-            .padding(style::SPACE_L)
+            .padding(density.inset)
             .style(style::card);
-
-        let sessions: Element<'_, Message> = if device.sessions.is_empty() {
-            text("No applications are playing audio")
-                .style(style::muted_text)
-                .into()
-        } else {
-            column(device.sessions.iter().map(|s| {
-                let target = Target::Session(s.id.clone());
-                let muted = self.mixer.muted(&target, s.muted);
-                let label = row![self.app_icon(s, muted), session_name(&s.name, cols.name)]
-                    .spacing(style::APP_ICON_GAP)
-                    .align_y(Center);
-                let volume = self.mixer.volume(&target, s.volume);
-                self.volume_row(label.into(), &cols, target, volume, muted)
-            }))
-            .spacing(style::SPACE_M)
-            .into()
-        };
+        let sessions = self.session_rows(device, &cols, density);
 
         column![
             style::beside_gutter(top),
@@ -254,9 +208,55 @@ impl App {
                     .size(style::TEXT_SMALL)
                     .style(style::muted_text)
             ),
-            style::scroll_area(container(sessions).padding([0.0, style::SPACE_L])),
+            style::scroll_area(container(sessions).padding([0.0, density.inset])),
         ]
         .spacing(style::SPACE_M)
+        .into()
+    }
+
+    /// The master row of `device`.
+    pub(super) fn master_row<'a>(
+        &self,
+        device: &Device,
+        cols: &MixerColumns,
+        density: &Density,
+    ) -> Element<'a, Message> {
+        self.volume_row(
+            text("Master").size(density.master_text).into(),
+            cols,
+            density,
+            Target::Master,
+            self.mixer.volume(&Target::Master, device.volume),
+            self.mixer.muted(&Target::Master, device.muted),
+        )
+    }
+
+    /// One row per application on `device`, or a note that there are none.
+    pub(super) fn session_rows<'a>(
+        &'a self,
+        device: &'a Device,
+        cols: &MixerColumns,
+        density: &Density,
+    ) -> Element<'a, Message> {
+        if device.sessions.is_empty() {
+            return text("No applications are playing audio")
+                .size(density.text)
+                .style(style::muted_text)
+                .into();
+        }
+        column(device.sessions.iter().map(|s| {
+            let target = Target::Session(s.id.clone());
+            let muted = self.mixer.muted(&target, s.muted);
+            let label = row![
+                self.app_icon(s, muted),
+                session_name(&s.name, cols.name, density)
+            ]
+            .spacing(style::APP_ICON_GAP)
+            .align_y(Center);
+            let volume = self.mixer.volume(&target, s.volume);
+            self.volume_row(label.into(), cols, density, target, volume, muted)
+        }))
+        .spacing(density.row_spacing)
         .into()
     }
 
@@ -311,18 +311,24 @@ impl App {
         &self,
         label: Element<'a, Message>,
         cols: &MixerColumns,
+        density: &Density,
         target: Target,
         volume: f32,
         muted: bool,
     ) -> Element<'a, Message> {
-        let mute = button(text(if muted { "Unmute" } else { "Mute" }).center())
-            .width(style::MUTE_WIDTH)
-            .style(style::button(if muted {
-                Button::Danger
-            } else {
-                Button::Secondary
-            }))
-            .on_press(Message::Mixer(MixerMessage::ToggleMute(target.clone())));
+        let mute = button(
+            text(if muted { "Unmute" } else { "Mute" })
+                .size(density.text)
+                .center(),
+        )
+        .width(density.mute_width)
+        .padding(density.mute_padding)
+        .style(style::button(if muted {
+            Button::Danger
+        } else {
+            Button::Secondary
+        }))
+        .on_press(Message::Mixer(MixerMessage::ToggleMute(target.clone())));
         let slide_target = target.clone();
         let fader = slider(0.0..=100.0, volume, move |v| {
             Message::Mixer(MixerMessage::Slide(slide_target.clone(), v))
@@ -331,32 +337,83 @@ impl App {
         .on_release(Message::Mixer(MixerMessage::Release(target)))
         .style(style::volume_slider(muted));
         let percent = text(format!("{volume:.0}%"))
-            .width(style::PERCENT_WIDTH)
+            .size(density.text)
+            .width(density.percent_width)
             .align_x(iced::Right);
         let percent = if muted {
             percent.style(style::muted_text)
         } else {
             percent
         };
+        fixed_height(
+            row![
+                container(label).width(cols.label).clip(true),
+                fader,
+                percent,
+                mute
+            ]
+            .spacing(density.spacing)
+            .align_y(Center),
+            density,
+        )
+    }
+}
+
+/// The output device label and picker, with the selected device's name
+/// shortened to fit.
+pub(super) fn device_picker<'a>(
+    audio: &'a AudioState,
+    cols: &MixerColumns,
+    density: &Density,
+) -> Element<'a, Message> {
+    let selected = audio.default_device.as_ref().and_then(|device| {
+        let info = audio.devices.iter().find(|d| d.id == device.id)?;
+        let label = fit(&info.name, density.text, cols.picker_text);
+        let shortened = matches!(label, Cow::Owned(_));
+        Some((
+            DeviceChoice::new(info).with_label(label.into_owned()),
+            shortened.then_some(info.name.as_str()),
+        ))
+    });
+    let full_name = selected.as_ref().and_then(|(_, full)| *full);
+    let devices: Vec<DeviceChoice> = audio.devices.iter().map(DeviceChoice::new).collect();
+    let list = pick_list(devices, selected.map(|(choice, _)| choice), |c| {
+        Message::Mixer(MixerMessage::SelectDevice(c))
+    })
+    .text_size(density.text)
+    .padding(density.picker_padding)
+    .width(Fill);
+    fixed_height(
         row![
-            container(label).width(cols.label).clip(true),
-            fader,
-            percent,
-            mute
+            container(text("Output device").size(density.text))
+                .width(cols.label)
+                .clip(true),
+            with_tooltip(list, full_name),
         ]
-        .spacing(style::SPACE_M)
-        .align_y(Center)
-        .into()
+        .spacing(density.spacing)
+        .align_y(Center),
+        density,
+    )
+}
+
+/// `content` at the density's row height, when it has one.
+fn fixed_height<'a>(
+    content: impl Into<Element<'a, Message>>,
+    density: &Density,
+) -> Element<'a, Message> {
+    match density.row_height {
+        Some(height) => container(content).height(height).align_y(Center).into(),
+        None => content.into(),
     }
 }
 
 /// A session name fitted to `width`, with the full name in a tooltip when
 /// it had to be shortened.
-fn session_name(name: &str, width: f32) -> Element<'_, Message> {
-    let fitted = fit(name, style::TEXT_DEFAULT, width);
+fn session_name<'a>(name: &'a str, width: f32, density: &Density) -> Element<'a, Message> {
+    let fitted = fit(name, density.text, width);
     let full = matches!(fitted, Cow::Owned(_)).then_some(name);
     let label = text(fitted)
-        .size(style::TEXT_DEFAULT)
+        .size(density.text)
         .wrapping(text::Wrapping::None);
     with_tooltip(label, full)
 }
@@ -384,7 +441,7 @@ fn with_tooltip<'a>(
 /// takes a share of the room left by the fixed columns, within bounds, and
 /// the slider (or the device picker) the rest.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct MixerColumns {
+pub(super) struct MixerColumns {
     /// The label column: "Output device", "Master", or icon and name.
     label: f32,
     /// Room for a session name after its icon.
@@ -394,23 +451,24 @@ struct MixerColumns {
 }
 
 impl MixerColumns {
-    fn new(width: f32) -> Self {
-        // Rows sit inside the card's padding, to the left of the gutter.
-        let row = (width - style::SCROLL_GUTTER - 2.0 * style::SPACE_L).max(0.0);
-        let fixed = style::PERCENT_WIDTH + style::MUTE_WIDTH + 3.0 * style::SPACE_M;
+    pub(super) fn new(width: f32, density: &Density) -> Self {
+        // Rows sit inside the density's inset, to the left of the gutter.
+        let row = (width - style::SCROLL_GUTTER - 2.0 * density.inset).max(0.0);
+        let fixed = density.percent_width + density.mute_width + 3.0 * density.spacing;
         let flexible = (row - fixed).max(0.0);
-        let share = flexible * style::LABEL_SHARE;
+        let share = flexible * density.label_share;
         // Too narrow for both minimums (the window may be forced below its
         // minimum size), the label gives way first, then both shrink alike.
         let label = share
-            .clamp(style::LABEL_MIN, style::LABEL_MAX)
-            .min((flexible - style::SLIDER_MIN).max(share));
-        let picker = (row - label - style::SPACE_M).max(0.0);
+            .clamp(density.label_min, density.label_max)
+            .min((flexible - density.slider_min).max(share));
+        let picker = (row - label - density.spacing).max(0.0);
+        let padding = density.picker_padding;
         Self {
             label,
             name: (label - style::APP_ICON - style::APP_ICON_GAP).max(0.0),
             // The picker's padding, and its arrow at the text size.
-            picker_text: (picker - 2.0 * style::SPACE_M - style::TEXT_DEFAULT - style::SPACE_XS)
+            picker_text: (picker - padding.left - padding.right - density.text - style::SPACE_XS)
                 .max(0.0),
         }
     }
@@ -423,7 +481,7 @@ mod tests {
     /// Width of the slider for a page `width`.
     fn slider(width: f32) -> f32 {
         let row = width - style::SCROLL_GUTTER - 2.0 * style::SPACE_L;
-        row - MixerColumns::new(width).label
+        row - MixerColumns::new(width, &style::REGULAR).label
             - style::PERCENT_WIDTH
             - style::MUTE_WIDTH
             - 3.0 * style::SPACE_M
@@ -431,9 +489,10 @@ mod tests {
 
     #[test]
     fn columns_scale_within_bounds() {
-        let narrow = MixerColumns::new(450.0);
-        let default = MixerColumns::new(550.0);
-        let wide = MixerColumns::new(1400.0);
+        let columns = |width| MixerColumns::new(width, &style::REGULAR);
+        let narrow = columns(450.0);
+        let default = columns(550.0);
+        let wide = columns(1400.0);
         assert_eq!(narrow.label, style::LABEL_MIN);
         assert!(default.label > narrow.label && default.label < style::LABEL_MAX);
         assert_eq!(wide.label, style::LABEL_MAX);
@@ -446,11 +505,11 @@ mod tests {
             assert!(slider(width) >= style::SLIDER_MIN);
         }
         // Squeezed below the minimums, the slider keeps a share.
-        let squeezed = MixerColumns::new(300.0);
+        let squeezed = columns(300.0);
         assert!(squeezed.label < style::LABEL_MIN);
         assert!(slider(300.0) > 0.0);
         assert_eq!(slider(300.0), squeezed.label);
-        assert_eq!(MixerColumns::new(0.0).label, 0.0);
+        assert_eq!(columns(0.0).label, 0.0);
     }
 
     #[test]
