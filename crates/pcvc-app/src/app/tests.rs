@@ -90,7 +90,7 @@ impl Harness {
 
     /// Opens the mini mixer with a left click on the tray icon.
     fn open_mini(&mut self) -> window::Id {
-        self.open_mini_with(TrayAction::Click(tray_icon::MouseButton::Left))
+        self.open_mini_with(TrayAction::Click(tray_icon::MouseButton::Left, None))
     }
 
     /// The mini mixer's view at its window size.
@@ -593,7 +593,7 @@ fn mini_closes_and_opens_the_full_window() {
     assert_eq!(h.app.mini.id(), None);
 
     // Middle clicks toggle it too.
-    let middle = TrayAction::Click(tray_icon::MouseButton::Middle);
+    let middle = TrayAction::Click(tray_icon::MouseButton::Middle, None);
     h.open_mini_with(middle);
     h.run(vec![tray(middle)]);
     assert_eq!(h.app.mini.id(), None);

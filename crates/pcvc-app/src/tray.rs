@@ -4,17 +4,22 @@
 //! forward into the [`Inbox`]. The icon itself is driven by a [`TrayModel`]
 //! computed from app state after every update.
 
+use tray_icon::dpi::PhysicalPosition;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{
+    Icon, MouseButton, MouseButtonState, Rect, TrayIcon, TrayIconBuilder, TrayIconEvent,
+};
 
 use crate::icons;
 use crate::inbox::{Inbound, Inbox};
+use crate::placement::ScreenRect;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrayAction {
     /// A left or middle click on the icon (on Linux, the host's activate
-    /// and secondary activate).
-    Click(MouseButton),
+    /// and secondary activate), with the icon's rectangle (Windows) or the
+    /// click's position (Linux, when the host gives one).
+    Click(MouseButton, Option<ScreenRect>),
     /// A double click on the icon (Windows only).
     DoubleClick,
     /// The menu's Mixer item.
@@ -51,8 +56,10 @@ impl TrayAction {
             TrayIconEvent::Click {
                 button: button @ (MouseButton::Left | MouseButton::Middle),
                 button_state: MouseButtonState::Up,
+                rect,
+                position,
                 ..
-            } => Some(Self::Click(button)),
+            } => Some(Self::Click(button, click_area(rect, position))),
             TrayIconEvent::DoubleClick {
                 button: MouseButton::Left,
                 ..
@@ -60,6 +67,20 @@ impl TrayAction {
             _ => None,
         }
     }
+}
+
+/// The icon's rectangle when the platform gives one (Windows), else the
+/// click's position; Linux hosts may send 0, 0 for an unknown position.
+fn click_area(rect: Rect, position: PhysicalPosition<f64>) -> Option<ScreenRect> {
+    if rect.size.width > 0 && rect.size.height > 0 {
+        return Some(ScreenRect::new(
+            rect.position.x,
+            rect.position.y,
+            f64::from(rect.size.width),
+            f64::from(rect.size.height),
+        ));
+    }
+    (position.x != 0.0 || position.y != 0.0).then(|| ScreenRect::point(position.x, position.y))
 }
 
 /// Routes tray clicks and menu choices into the inbox. Call once, before the
@@ -329,5 +350,78 @@ mod platform {
                 core.apply(model);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tray_icon::TrayIconId;
+    use tray_icon::dpi::PhysicalSize;
+
+    use super::*;
+
+    fn click(
+        button: MouseButton,
+        state: MouseButtonState,
+        rect: Rect,
+        x: f64,
+        y: f64,
+    ) -> TrayIconEvent {
+        TrayIconEvent::Click {
+            id: TrayIconId::new("test"),
+            position: PhysicalPosition::new(x, y),
+            rect,
+            button,
+            button_state: state,
+        }
+    }
+
+    #[test]
+    fn clicks_become_actions() {
+        use MouseButton::{Left, Middle, Right};
+        use MouseButtonState::{Down, Up};
+        let icon = Rect {
+            size: PhysicalSize::new(24, 40),
+            position: PhysicalPosition::new(1500.0, 1040.0),
+        };
+        let action = |event| TrayAction::from_icon_event(&event);
+        // Windows: the icon's rectangle, on release only.
+        assert_eq!(
+            action(click(Left, Up, icon, 1510.0, 1050.0)),
+            Some(TrayAction::Click(
+                Left,
+                Some(ScreenRect::new(1500.0, 1040.0, 24.0, 40.0))
+            ))
+        );
+        assert_eq!(action(click(Left, Down, icon, 1510.0, 1050.0)), None);
+        assert_eq!(action(click(Right, Up, icon, 1510.0, 1050.0)), None);
+        // Linux: a position, or none.
+        let none = Rect::default();
+        assert_eq!(
+            action(click(Middle, Up, none, 1700.0, 12.0)),
+            Some(TrayAction::Click(
+                Middle,
+                Some(ScreenRect::point(1700.0, 12.0))
+            ))
+        );
+        assert_eq!(
+            action(click(Left, Up, none, 0.0, 0.0)),
+            Some(TrayAction::Click(Left, None))
+        );
+        let double = TrayIconEvent::DoubleClick {
+            id: TrayIconId::new("test"),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: icon,
+            button: Left,
+        };
+        assert_eq!(action(double), Some(TrayAction::DoubleClick));
+    }
+
+    #[test]
+    fn menu_items_become_actions() {
+        let action = |id: &str| TrayAction::from_menu_id(&MenuId::new(id));
+        assert_eq!(action(ID_MIXER), Some(TrayAction::Mixer));
+        assert_eq!(action(ID_OPEN), Some(TrayAction::Open));
+        assert_eq!(action("other"), None);
     }
 }

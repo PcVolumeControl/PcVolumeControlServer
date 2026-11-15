@@ -28,6 +28,7 @@ use crate::logging::LogBuffer;
 use crate::mini::{CloseReason, Event as MiniEvent, MiniWindow};
 use crate::mixer::Mixer;
 use crate::model;
+use crate::placement::Anchoring;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
 use crate::{autostart, icons, instance, style};
@@ -182,6 +183,9 @@ pub struct App {
     mini_height: f32,
     /// Whether the mini mixer's device list is open.
     mini_picker_open: bool,
+    /// What the mini mixer was placed against, where the platform lets it
+    /// be placed.
+    mini_anchoring: Option<Anchoring>,
     config: Config,
     config_path: Option<PathBuf>,
     settings: SettingsForm,
@@ -244,6 +248,7 @@ impl App {
             mini: MiniWindow::default(),
             mini_height: 0.0,
             mini_picker_open: false,
+            mini_anchoring: None,
             settings: SettingsForm::from(&config),
             notice: None,
             config,
@@ -330,11 +335,16 @@ impl App {
             }
             Message::ScaleFactor(id, factor) => {
                 let ours = self.window == Some(id) || self.mini.is(id);
-                if ours && factor.is_finite() && factor > 0.0 {
-                    self.window_scales.insert(id, factor);
-                    self.update_scale_factor();
+                if !(ours && factor.is_finite() && factor > 0.0) {
+                    return Task::none();
                 }
-                Task::none()
+                self.window_scales.insert(id, factor);
+                self.update_scale_factor();
+                if self.mini.is(id) {
+                    self.mini_rescaled(id, factor)
+                } else {
+                    Task::none()
+                }
             }
             Message::WindowFocus(id, focused) => {
                 if !self.mini.is(id) {
@@ -373,13 +383,13 @@ impl App {
 
     fn tray_action(&mut self, action: TrayAction) -> Task<Message> {
         match action {
-            TrayAction::Click(button) => {
-                tracing::debug!("tray: {button:?} click");
-                self.mini_event(MiniEvent::Toggle)
+            TrayAction::Click(button, area) => {
+                tracing::debug!("tray: {button:?} click at {area:?}");
+                self.mini_toggle(area)
             }
             TrayAction::Mixer => {
                 tracing::debug!("tray: Mixer menu item");
-                self.mini_event(MiniEvent::Toggle)
+                self.mini_toggle(None)
             }
             TrayAction::DoubleClick => {
                 tracing::debug!("tray: double click");

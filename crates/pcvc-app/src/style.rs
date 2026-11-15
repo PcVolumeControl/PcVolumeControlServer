@@ -136,6 +136,8 @@ pub const MINI_GAP: f32 = SPACE_S;
 pub const MINI_HEADER: f32 = 24.0;
 pub const MINI_HEADER_ICON: f32 = 14.0;
 pub const MINI_DIVIDER: f32 = 1.0;
+/// Between the mini mixer and the taskbar or the screen's edges.
+pub const MINI_SCREEN_MARGIN: f32 = SPACE_S;
 
 /// Application icons in the Mixer.
 pub const APP_ICON: f32 = 24.0;

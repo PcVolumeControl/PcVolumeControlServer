@@ -19,6 +19,7 @@ mod mini;
 mod mixer;
 mod model;
 mod paths;
+mod placement;
 mod server_ctl;
 mod style;
 mod tray;

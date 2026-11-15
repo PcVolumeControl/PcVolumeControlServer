@@ -14,6 +14,7 @@ use super::mixer::{MixerColumns, device_picker, fixed_height, with_tooltip};
 use super::{App, Message};
 use crate::icons;
 use crate::mini::{self, Action, Body, CloseReason, Event};
+use crate::placement::{self, ScreenRect};
 use crate::style::{self, Button};
 
 static OPEN_WINDOW: LazyLock<svg::Handle> =
@@ -36,11 +37,23 @@ impl App {
     /// Feeds an event to the mini window's rules and carries out what they
     /// decide.
     pub(super) fn mini_event(&mut self, event: Event) -> Task<Message> {
-        match self.mini.handle(event, Instant::now()) {
+        let action = self.mini.handle(event, Instant::now());
+        self.mini_action(action, None)
+    }
+
+    /// A tray click at `area`, or the tray menu's Mixer item without one.
+    pub(super) fn mini_toggle(&mut self, area: Option<ScreenRect>) -> Task<Message> {
+        let action = self.mini.handle(Event::Toggle, Instant::now());
+        self.mini_action(action, area)
+    }
+
+    fn mini_action(&mut self, action: Action, area: Option<ScreenRect>) -> Task<Message> {
+        match action {
             Action::None => Task::none(),
-            Action::Open => self.open_mini(),
+            Action::Open => self.open_mini(area),
             Action::Close(id, _) => {
                 self.forget_window(id);
+                self.mini_anchoring = None;
                 window::close(id)
             }
             Action::Refocus(id) => window::gain_focus(id),
@@ -76,11 +89,17 @@ impl App {
         self.mini_event(Event::Escape(id))
     }
 
-    fn open_mini(&mut self) -> Task<Message> {
+    fn open_mini(&mut self, area: Option<ScreenRect>) -> Task<Message> {
         let height = mini::height(self.mini_body());
         let size = Size::new(style::MINI_WIDTH, height);
+        self.mini_anchoring = placement::anchoring(area, self.scale_factor);
+        let position = match &self.mini_anchoring {
+            Some(anchoring) => window::Position::Specific(anchoring.position(size)),
+            None => window::Position::Default,
+        };
         let (id, opened) = window::open(window::Settings {
             size,
+            position,
             resizable: false,
             decorations: false,
             minimizable: false,
@@ -100,7 +119,7 @@ impl App {
             },
             ..Default::default()
         });
-        tracing::debug!("mini mixer: opening, {size:?}");
+        tracing::debug!("mini mixer: opening, {size:?} at {position:?}");
         self.mini.handle(Event::Opened(id), Instant::now());
         self.mini_height = height;
         self.mini_picker_open = false;
@@ -138,11 +157,35 @@ impl App {
         let size = Size::new(style::MINI_WIDTH, height);
         // A window that is not resizable keeps its size limits, so they
         // move with it.
-        window::set_min_size::<Message>(id, None)
+        let resize = window::set_min_size::<Message>(id, None)
             .chain(window::set_max_size(id, None))
             .chain(window::resize(id, size))
             .chain(window::set_min_size(id, Some(size)))
-            .chain(window::set_max_size(id, Some(size)))
+            .chain(window::set_max_size(id, Some(size)));
+        // Keeps it against the taskbar as it grows or shrinks.
+        match &self.mini_anchoring {
+            Some(anchoring) => resize.chain(window::move_to(id, anchoring.position(size))),
+            None => resize,
+        }
+    }
+
+    /// Places the mini mixer again at the scale factor its window reports,
+    /// when that differs from the one it was placed at.
+    pub(super) fn mini_rescaled(&mut self, id: window::Id, factor: f32) -> Task<Message> {
+        let Some(anchoring) = &mut self.mini_anchoring else {
+            return Task::none();
+        };
+        let factor = f64::from(factor);
+        if (anchoring.monitor.scale - factor).abs() < 0.01 {
+            return Task::none();
+        }
+        tracing::debug!(
+            "mini mixer: placed at scale {}, window has {factor}",
+            anchoring.monitor.scale
+        );
+        anchoring.monitor.scale = factor;
+        let size = Size::new(style::MINI_WIDTH, self.mini_height);
+        window::move_to(id, anchoring.position(size))
     }
 
     pub(super) fn mini_view(&self) -> Element<'_, Message> {
