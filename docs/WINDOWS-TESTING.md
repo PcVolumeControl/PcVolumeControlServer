@@ -139,6 +139,60 @@ or `Shell`), or `None` when there is none.
 - [ ] Rows keep the same height with and without an icon, and the window
       stays responsive while the icons appear.
 
+## 6. Mini mixer
+
+The mini mixer was only type-checked for Windows; its placement and focus
+handling have not run there.
+
+```powershell
+$env:RUST_LOG = "info,pcvolumecontrol=debug"
+cargo run -p pcvolumecontrol -- --mock-audio
+```
+
+The log shows each tray click with the icon's rectangle, the anchoring
+(icon, taskbar edge, work area, monitor scale), `shown at` with the logical
+position, `focused` and `unfocused` with the time since opening, and each
+close with its reason and whether the window had focus.
+
+Opening and closing:
+
+- [ ] A left click on the tray icon opens it; another left click closes it,
+      and does not close and immediately reopen it.
+- [ ] A middle click toggles it the same way.
+- [ ] Mixer in the tray's right-click menu opens it (the menu taking focus
+      closes an open one first).
+- [ ] A double click on the tray icon opens the full window and leaves the
+      mini mixer closed, without it flashing open again afterwards.
+- [ ] It gets keyboard focus when it opens (the log has `focused` within a
+      few hundred ms); Escape closes it.
+- [ ] Clicking the desktop, another window, the taskbar and the Start
+      button each close it.
+- [ ] Its open button opens the full window and closes the mini mixer; its
+      close button closes it. Both windows can be open together, and a
+      change in one shows in the other.
+- [ ] It has no taskbar button (note whether it shows in Alt+Tab), stays
+      above other windows, and has rounded corners on Windows 11 (square on
+      Windows 10), with no black or white fringe at the corners.
+
+Placement (try each, the scale factors where you can):
+
+- [ ] Taskbar at the bottom: it opens just above the taskbar, centred on the
+      icon, never past the screen's right edge (icon near the corner).
+- [ ] Taskbar at the top, left and right (Windows 10, or Windows 11 with a
+      tool such as ExplorerPatcher): it opens beside the taskbar, next to the
+      icon, inside the screen.
+- [ ] The icon in the overflow flyout (the `^` area): it opens near the
+      flyout, inside the screen.
+- [ ] 100 %, 150 % and 200 % scaling: same spot relative to the icon, and
+      the content is not blurry or cut off.
+- [ ] Two monitors with different scaling and the taskbar (with tray) on the
+      secondary one: it opens on that monitor, beside the icon, at that
+      monitor's size.
+- [ ] Opened from the menu: bottom right of the primary monitor's work
+      area.
+- [ ] An application starting or stopping playback while it is open: it
+      grows or shrinks and stays against the taskbar.
+
 ## Known risk areas
 
 These could not be checked without Windows and are the most likely to need
@@ -170,3 +224,11 @@ fixes:
 - **Tray timing** (once the GUI is wired up): the tray icon must be created
   after the GUI's event loop is running. The audio backend runs on its own
   MTA thread and does not depend on the GUI thread's COM apartment.
+- **Mini mixer placement**: the window is created hidden, moved, then
+  shown; the move is given in logical pixels at the window's own scale,
+  which winit converts back. On mixed-scale monitors a wrong spot, or a
+  window that jumps after showing, points at `placement::Anchoring::position`
+  and `App::mini_rescaled` in `crates/pcvc-app/src/app/mini.rs`.
+- **Mini mixer focus**: Windows' foreground lock may keep the new window
+  from taking focus; then clicking outside does not close it (the log says
+  `had focus: false` when it closes).

@@ -124,6 +124,39 @@ Ubuntu's GNOME and most other desktops show it; stock GNOME needs the
 extension. Without a tray the window opens at launch and closing it quits.
 `packaging/linux/` has the desktop entry and icon for packages.
 
+### Mini mixer
+
+A small window with the output device, the master volume and one row per
+application, the same controls as the Mixer page, for quick changes from
+the tray. It sits on top of other windows, grows with the number of
+applications (then scrolls), and has buttons to open the full window and to
+close it.
+
+| To | Do |
+| --- | --- |
+| Open or close it | Left click the tray icon, middle click it, or choose Mixer in the tray menu |
+| Close it | Click anywhere outside it, press Escape, or use its close button |
+| Open the full window | Its open button, Open in the tray menu, a double click on the tray icon (Windows), or launching the app again |
+
+Both windows can be open at once and stay live. Clicking outside reaches
+the app only as the mini mixer losing focus, so a window that never had
+focus (focus stealing prevention) stays open until you click into it, press
+Escape, use the tray or its close button. Opening the tray menu takes focus
+too, so it closes the mini mixer; choosing Mixer there opens it again.
+
+Where it opens depends on the platform:
+
+- **Windows**: beside the tray icon, on the side away from the taskbar,
+  inside the monitor's work area; from the tray menu, at the bottom right of
+  the primary monitor's work area.
+- **Linux on X11**: beside the click, or beside the pointer when the tray
+  host gives no position (as from the menu), inside the monitor.
+- **Linux on Wayland**: wherever the compositor puts it; Wayland does not
+  let applications position their windows.
+
+On GNOME the AppIndicator extension opens the tray menu on a left click, so
+use the menu's Mixer item or a middle click on the icon there.
+
 ### Application icons
 
 Each row in the Mixer shows the application's icon. The Mixer's lookups run

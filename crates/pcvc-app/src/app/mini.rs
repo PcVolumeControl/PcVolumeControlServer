@@ -172,7 +172,14 @@ impl App {
             Some(anchoring) => {
                 let position = anchoring.position(self.mini_size(), self.window_scale(id));
                 tracing::debug!("mini mixer: shown at {position:?}");
-                window::move_to(id, position).chain(show)
+                let place = window::move_to(id, position);
+                // X11 window managers place a window as it maps and ignore
+                // earlier moves; Win32 moves a hidden window as asked.
+                if cfg!(target_os = "windows") {
+                    place.chain(show)
+                } else {
+                    show.chain(place)
+                }
             }
             None => show,
         }

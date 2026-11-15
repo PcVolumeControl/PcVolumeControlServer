@@ -354,6 +354,7 @@ impl App {
             }
             Message::WindowFocus(id, focused) => {
                 if !self.mini.is(id) {
+                    tracing::debug!("window {id:?} focused: {focused}");
                     return Task::none();
                 }
                 self.mini_event(if focused {

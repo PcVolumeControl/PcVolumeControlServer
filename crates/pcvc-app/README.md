@@ -1,8 +1,9 @@
 # pcvc-app
 
 The `pcvolumecontrol` desktop host: an [iced](https://iced.rs) daemon with a
-tray icon, the server from `pcvc-server`, and one window with Mixer, Status
-and Settings pages. User-facing documentation is in the repository README.
+tray icon, the server from `pcvc-server`, a window with Mixer, Status and
+Settings pages, and a mini mixer window opened from the tray. User-facing
+documentation is in the repository README.
 
 ## Message flow
 
@@ -17,8 +18,9 @@ second launch      --ShowRequested-------------+
 Ctrl-C / SIGTERM   --QuitRequested-------------+
 ```
 
-- **Tray** (`tray.rs`): `tray-icon`'s global event handlers turn a left
-  click and menu choices into `Inbound::Tray(TrayAction)`. After every
+- **Tray** (`tray.rs`): `tray-icon`'s global event handlers turn left,
+  middle and double clicks (with the icon's rectangle or the click's
+  position) and menu choices into `Inbound::Tray(TrayAction)`. After every
   update the app computes a `TrayModel` (icon variant, tooltip, menu labels
   and check state) and hands it to the tray, which applies what changed. On
   Linux the tray (ksni over D-Bus) lives on its own thread, because ksni
@@ -70,11 +72,45 @@ the final value (on release, or from a scheduled wake-up), and keep showing
 the user's value until the backend reports it back or 300 ms pass
 (`mixer.rs`). Mute toggles are shown immediately.
 
+## Mini mixer
+
+A second window (`app/mini.rs`) with the Mixer's device picker, master row
+and application rows. Both views build their rows with the same functions
+in `app/mixer.rs` and the same `Mixer` model, at a `style::Density`
+(`REGULAR` for the page, `COMPACT` for the mini mixer, whose rows have a
+fixed height so `mini::height` can size the window before it is drawn).
+Audio snapshots, icon results and scale factors reach both windows; icons
+are rendered at the largest scale factor of the open windows.
+
+`mini::MiniWindow` decides when it opens and closes, from events carrying
+the time (tray toggle, double click, opened, created, focus, unfocus,
+Escape, close, closed), so the rules are tested with a fake clock:
+
+- an unfocus is ignored until the window has had focus, and within
+  `OPEN_GRACE` of opening (it asks for focus again once instead);
+- a tray toggle within `TOGGLE_DEBOUNCE` of a close on losing focus is the
+  click that took the focus, so it leaves the window closed;
+- clicks within `DOUBLE_CLICK_QUIET` of a double click belong to it;
+- a close before iced has created the window waits until it exists, since
+  iced drops window actions for unknown windows.
+
+Where the platform lets the app position windows, the window opens hidden;
+once created, the app checks its handle (not Wayland), looks up the
+anchoring on a blocking task (`placement::anchoring`: Win32 monitor info on
+Windows, RandR and the pointer on X11), moves it beside the tray icon and
+shows it. `placement::place` is the pure geometry, in physical pixels; the
+logical position handed to iced is divided by the window's own scale, which
+is how the platform converts it back. Debug logs (`RUST_LOG=pcvolumecontrol=debug`)
+record tray clicks, opening, creation, placement, focus, unfocus and each
+close with its reason.
+
 ## Where things live
 
 | Module | Purpose |
 | --- | --- |
-| `app/` | State, `update`, subscriptions and the three views |
+| `app/` | State, `update`, subscriptions, the three pages and the mini mixer view |
+| `mini.rs` | When the mini mixer opens and closes, and its height |
+| `placement.rs` | Where the mini mixer opens, per platform |
 | `audio.rs` | `create_backend` (platform backends plug in here), watcher, command thread |
 | `config.rs`, `paths.rs` | TOML settings and per-user directories |
 | `autostart.rs` | Start on login via `auto-launch` |
