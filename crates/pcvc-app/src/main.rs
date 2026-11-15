@@ -5,14 +5,18 @@
 
 mod app;
 mod audio;
+mod autostart;
 mod cli;
 mod config;
 mod icons;
 mod inbox;
+mod instance;
 mod logging;
+mod mixer;
 mod model;
 mod paths;
 mod server_ctl;
+mod style;
 mod tray;
 
 use std::process::ExitCode;
@@ -22,6 +26,7 @@ use app::{App, Boot};
 use audio::BackendChoice;
 use cli::Parsed;
 use config::Config;
+use instance::{AcquireError, Instance};
 
 fn main() -> ExitCode {
     let parsed = cli::parse(std::env::args().skip(1));
@@ -46,18 +51,53 @@ fn main() -> ExitCode {
 
     let (logs, _log_guard) = logging::init(paths::log_dir().as_deref());
 
-    let config = Config::default();
+    let (inbox, inbox_rx) = inbox::channel();
+    // Answer later launches right away; their requests wait in the inbox
+    // until the app is up.
+    let _instance = match instance::acquire() {
+        Ok(Instance::Secondary) => {
+            tracing::info!("PcVolumeControl is already running; asked it to show its window");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Instance::Primary(listener)) => Some(instance::serve(listener, inbox.clone())),
+        Err(e @ AcquireError::Unresponsive(_)) => {
+            tracing::error!("{e}");
+            return ExitCode::FAILURE;
+        }
+        Err(e @ AcquireError::Unavailable(_)) => {
+            tracing::warn!("{e}; running without it");
+            None
+        }
+    };
+
+    let mut config_path = paths::config_file();
+    let config = match &config_path {
+        Some(path) => {
+            let loaded = config::load(path);
+            if let Some(warning) = loaded.warning {
+                tracing::warn!("{warning}");
+            }
+            if !loaded.writable {
+                config_path = None;
+            }
+            loaded.config
+        }
+        None => {
+            tracing::warn!("no home directory; settings will not be saved");
+            Config::default()
+        }
+    };
     let backend = audio::create_backend(if args.mock_audio {
         BackendChoice::Mock
     } else {
         BackendChoice::System
     });
-    let (inbox, inbox_rx) = inbox::channel();
     tray::install_event_handlers(&inbox);
 
     let boot = Mutex::new(Some(Boot {
         show_window: args.show || config.show_on_launch,
         config,
+        config_path,
         backend,
         inbox,
         inbox_rx,

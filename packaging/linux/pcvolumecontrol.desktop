@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=PcVolumeControl
+GenericName=Remote Volume Control
+Comment=Control this computer's volume from your phone
+Exec=pcvolumecontrol --show
+Icon=pcvolumecontrol
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=volume;mixer;remote;phone;audio;
+StartupWMClass=pcvolumecontrol

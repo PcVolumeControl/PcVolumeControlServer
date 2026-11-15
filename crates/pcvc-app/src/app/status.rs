@@ -9,6 +9,7 @@ use pcvc_server::MdnsStatus;
 
 use super::{App, Message};
 use crate::server_ctl::ServerStatus;
+use crate::style::{self, Button};
 use crate::{icons, model};
 
 const LOG_LINES_SHOWN: usize = 8;
@@ -23,7 +24,7 @@ impl App {
                 model::clients_label(clients) + " connected",
             ),
             ServerStatus::Running(_) => {
-                (icons::TRAY_ONLINE, "Online", "No phones connected".into())
+                (icons::TRAY_ONLINE, "Online", "No clients connected".into())
             }
             ServerStatus::Starting => (icons::TRAY_OFFLINE, "Starting", String::new()),
             ServerStatus::Stopped => (icons::TRAY_OFFLINE, "Offline", "Server stopped".into()),
@@ -38,19 +39,33 @@ impl App {
         } else {
             "Start server"
         }))
+        .padding([style::SPACE_S, style::SPACE_L])
         .on_press(Message::ToggleServer)
-        .style(if running {
-            button::danger
+        .style(style::button(if running {
+            Button::Danger
         } else {
-            button::success
-        });
-        let indicator = row![
-            svg(svg::Handle::from_memory(icon)).width(64).height(64),
-            column![text(headline).size(32), text(detail).size(14)].width(Fill),
-            toggle,
-        ]
-        .spacing(16)
-        .align_y(Center);
+            Button::Success
+        }));
+        let indicator = container(
+            row![
+                svg(svg::Handle::from_memory(icon))
+                    .width(style::STATUS_ICON)
+                    .height(style::STATUS_ICON),
+                column![
+                    text(headline).size(style::TEXT_HEADLINE),
+                    text(detail)
+                        .size(style::TEXT_SMALL)
+                        .style(style::muted_text),
+                ]
+                .spacing(style::SPACE_XS)
+                .width(Fill),
+                toggle,
+            ]
+            .spacing(style::SPACE_L)
+            .align_y(Center),
+        )
+        .padding(style::SPACE_L)
+        .style(style::card);
 
         let addresses: Element<'_, Message> = match &self.server_status {
             ServerStatus::Running(addr) => column(
@@ -58,6 +73,7 @@ impl App {
                     .into_iter()
                     .map(|a| text(a).font(Font::MONOSPACE).into()),
             )
+            .spacing(style::SPACE_XS)
             .into(),
             _ => text("Not listening").into(),
         };
@@ -73,8 +89,14 @@ impl App {
             text("None").into()
         } else {
             let header = row![
-                text("Address").width(FillPortion(3)),
-                text("Connected since").width(FillPortion(2)),
+                text("Address")
+                    .size(style::TEXT_SMALL)
+                    .style(style::muted_text)
+                    .width(FillPortion(3)),
+                text("Connected since")
+                    .size(style::TEXT_SMALL)
+                    .style(style::muted_text)
+                    .width(FillPortion(2)),
             ];
             column(
                 std::iter::once(header.into()).chain(self.clients.iter().map(|c| {
@@ -87,16 +109,17 @@ impl App {
                     .into()
                 })),
             )
-            .spacing(4)
+            .spacing(style::SPACE_XS)
             .into()
         };
 
-        let logs = column(
-            self.logs
-                .recent(LOG_LINES_SHOWN)
-                .into_iter()
-                .map(|l| text(l.display()).font(Font::MONOSPACE).size(12).into()),
-        );
+        let logs = column(self.logs.recent(LOG_LINES_SHOWN).into_iter().map(|l| {
+            text(l.display())
+                .font(Font::MONOSPACE)
+                .size(style::TEXT_SMALL)
+                .into()
+        }))
+        .spacing(2);
 
         let versions = format!(
             "PcVolumeControl {} (reports {APPLICATION_VERSION}), protocol v{PROTOCOL_VERSION}",
@@ -112,21 +135,26 @@ impl App {
                 section(
                     "Recent log",
                     container(logs)
-                        .padding(8)
+                        .padding(style::SPACE_M)
                         .width(Fill)
-                        .style(container::bordered_box)
+                        .style(style::card)
                 ),
-                text(versions).size(12),
+                text(versions)
+                    .size(style::TEXT_SMALL)
+                    .style(style::muted_text),
             ]
-            .spacing(20)
-            .padding(4),
+            .spacing(style::SPACE_L)
+            .padding(iced::Padding::ZERO.right(style::SPACE_M)),
         )
         .into()
     }
 }
 
 fn section<'a>(title: &'a str, body: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(title).size(14).style(text::secondary), body.into()]
-        .spacing(6)
-        .into()
+    column![
+        text(title).size(style::TEXT_SMALL).style(style::muted_text),
+        body.into()
+    ]
+    .spacing(style::SPACE_S)
+    .into()
 }

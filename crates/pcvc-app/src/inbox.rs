@@ -19,6 +19,10 @@ pub enum Inbound {
     TrayFailed(String),
     Server(ServerUpdate),
     Audio(AudioState),
+    /// Another launch asked this instance to show its window.
+    ShowRequested,
+    /// The process was asked to terminate (Ctrl-C, SIGTERM).
+    QuitRequested,
 }
 
 /// Sending half; cheap to clone and usable from any thread.
@@ -48,6 +52,12 @@ pub fn channel() -> (Inbox, InboxReceiver) {
 }
 
 impl InboxReceiver {
+    /// The raw receiver, for tests that read the inbox without iced.
+    #[cfg(all(test, unix))]
+    pub fn take_stream(&self) -> Option<mpsc::UnboundedReceiver<Inbound>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+
     /// The subscription has a constant identity, so iced starts the stream
     /// once and keeps it running; the receiver is taken on that first start.
     pub fn subscription(&self) -> Subscription<Inbound> {

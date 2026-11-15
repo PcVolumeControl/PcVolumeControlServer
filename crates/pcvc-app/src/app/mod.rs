@@ -1,8 +1,13 @@
 //! The iced daemon: state, messages, update and subscriptions.
 
+mod mixer;
+mod settings;
 mod status;
+#[cfg(test)]
+mod tests;
 
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,15 +18,18 @@ use pcvc_protocol::Command;
 use pcvc_server::{ClientInfo, MdnsStatus};
 
 use crate::audio::{self, CommandSender};
-use crate::config::Config;
-use crate::icons;
+use crate::config::{Config, WindowSize};
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
 use crate::logging::LogBuffer;
+use crate::mixer::Mixer;
 use crate::model;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
+use crate::{autostart, icons, instance, style};
+use mixer::MixerMessage;
+use settings::{Notice, SettingsForm, SettingsMessage};
 
-const MIN_SIZE: Size = Size::new(480.0, 400.0);
+const MIN_SIZE: Size = Size::new(WindowSize::MIN.width, WindowSize::MIN.height);
 
 /// Longest wait for the server to stop on quit before exiting anyway.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -42,6 +50,8 @@ pub enum Message {
     WindowResized(window::Id, Size),
     ShowPage(Page),
     ToggleServer,
+    Mixer(MixerMessage),
+    Settings(SettingsMessage),
     /// Periodic refresh of time-dependent views.
     Tick,
     ForceExit,
@@ -50,11 +60,58 @@ pub enum Message {
 /// What `main` prepares before the daemon starts.
 pub struct Boot {
     pub config: Config,
+    /// Where the config is saved; `None` keeps it in memory only.
+    pub config_path: Option<PathBuf>,
     pub show_window: bool,
     pub backend: Arc<dyn AudioBackend>,
     pub inbox: Inbox,
     pub inbox_rx: InboxReceiver,
     pub logs: LogBuffer,
+}
+
+/// Quits cleanly (so mDNS sends its goodbye) on Ctrl-C or, on Unix, on
+/// SIGTERM as sent at logout. A second signal exits at once.
+fn spawn_signal_handler(inbox: Inbox) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(term) => Some(term),
+                Err(e) => {
+                    tracing::warn!("cannot listen for SIGTERM: {e}");
+                    None
+                }
+            };
+        for first in [true, false] {
+            let interrupt = async {
+                if let Err(e) = tokio::signal::ctrl_c().await {
+                    tracing::warn!("cannot listen for Ctrl-C: {e}");
+                    std::future::pending::<()>().await;
+                }
+            };
+            #[cfg(unix)]
+            let terminate = async {
+                match term.as_mut() {
+                    Some(term) => {
+                        term.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            #[cfg(not(unix))]
+            let terminate = std::future::pending::<()>();
+            tokio::select! {
+                () = interrupt => {}
+                () = terminate => {}
+            }
+            if first {
+                inbox.send(Inbound::QuitRequested);
+            } else {
+                tracing::warn!("second termination signal; exiting now");
+                std::process::exit(1);
+            }
+        }
+    });
 }
 
 pub struct App {
@@ -66,12 +123,18 @@ pub struct App {
     clients: Vec<ClientInfo>,
     mdns: MdnsStatus,
     audio: Option<AudioState>,
+    mixer: Mixer,
+    /// When the pending mixer wake-up fires, if one is scheduled.
+    mixer_timer: Option<std::time::Instant>,
     local_ips: Vec<Ipv4Addr>,
     /// The last interface listing error, so a persistent one is logged once.
     local_ips_error: Option<String>,
     tray: Option<Tray>,
     window: Option<window::Id>,
     config: Config,
+    config_path: Option<PathBuf>,
+    settings: SettingsForm,
+    notice: Option<Notice>,
     page: Page,
     logs: LogBuffer,
     quitting: bool,
@@ -81,7 +144,8 @@ impl App {
     /// Runs inside iced's tokio runtime, so it may spawn tasks.
     pub fn boot(boot: Boot) -> (Self, Task<Message>) {
         let Boot {
-            config,
+            mut config,
+            config_path,
             show_window,
             backend,
             inbox,
@@ -89,9 +153,19 @@ impl App {
             logs,
         } = boot;
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
+        spawn_signal_handler(inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
         let server = ServerController::spawn(backend, inbox.clone());
         server.start(config.server_config());
+        // The login item itself is the truth; it may have been removed
+        // outside the app.
+        match autostart::is_enabled() {
+            Ok(enabled) => config.start_on_login = enabled,
+            Err(e) => tracing::warn!("reading start on login failed: {e}"),
+        }
+        if config.start_on_login {
+            autostart::refresh();
+        }
 
         let mut app = Self {
             inbox,
@@ -102,11 +176,16 @@ impl App {
             clients: Vec::new(),
             mdns: MdnsStatus::Disabled,
             audio: None,
+            mixer: Mixer::default(),
+            mixer_timer: None,
             local_ips: Vec::new(),
             local_ips_error: None,
             tray: None,
             window: None,
+            settings: SettingsForm::from(&config),
+            notice: None,
             config,
+            config_path,
             page: Page::Mixer,
             logs,
             quitting: false,
@@ -127,7 +206,7 @@ impl App {
     }
 
     pub fn theme(&self, _window: window::Id) -> Option<Theme> {
-        None
+        self.config.theme.theme()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -150,7 +229,10 @@ impl App {
                 self.open_window()
             }
             Message::Inbound(Inbound::Tray(action)) => self.tray_action(action),
+            Message::Inbound(Inbound::ShowRequested) => self.open_window(),
+            Message::Inbound(Inbound::QuitRequested) => self.quit(),
             Message::Inbound(Inbound::Audio(state)) => {
+                self.mixer.on_state(&state);
                 self.audio = Some(state);
                 Task::none()
             }
@@ -181,6 +263,8 @@ impl App {
                 self.toggle_server();
                 Task::none()
             }
+            Message::Mixer(message) => self.mixer_update(message),
+            Message::Settings(message) => self.settings_update(message),
             Message::Tick => {
                 if self.page == Page::Status {
                     self.refresh_local_ips();
@@ -214,7 +298,10 @@ impl App {
                 self.toggle_server();
                 Task::none()
             }
-            TrayAction::ToggleStartOnLogin => Task::none(),
+            TrayAction::ToggleStartOnLogin => {
+                self.toggle_start_on_login();
+                Task::none()
+            }
             TrayAction::Quit => self.quit(),
         }
     }
@@ -266,7 +353,10 @@ impl App {
         if let Some(id) = self.window {
             return window::gain_focus(id);
         }
+        tracing::debug!("opening the window");
         self.page = Page::Mixer;
+        self.settings = SettingsForm::from(&self.config);
+        self.notice = None;
         let (id, opened) = window::open(window::Settings {
             size: Size::new(self.config.window.width, self.config.window.height),
             min_size: Some(MIN_SIZE),
@@ -294,6 +384,8 @@ impl App {
     fn close_window(&mut self, id: window::Id) -> Task<Message> {
         if self.window == Some(id) {
             self.window = None;
+            // Keeps the window size for next time.
+            let _ = self.persist_config();
         }
         window::close(id)
     }
@@ -304,6 +396,7 @@ impl App {
         }
         tracing::info!("quitting");
         self.quitting = true;
+        instance::shutting_down();
         self.server.shutdown();
         let close = match self.window {
             Some(id) => self.close_window(id),
@@ -365,13 +458,10 @@ impl App {
             return text("").into();
         }
         let tab = |label: &'static str, page: Page| {
-            button(text(label))
+            button(text(label).size(style::TEXT_BODY))
                 .on_press(Message::ShowPage(page))
-                .style(if self.page == page {
-                    button::primary
-                } else {
-                    button::text
-                })
+                .padding([style::SPACE_S, style::SPACE_M])
+                .style(style::button(style::Button::Nav(self.page == page)))
                 .width(Length::Fill)
         };
         let nav = column![
@@ -379,16 +469,21 @@ impl App {
             tab("Status", Page::Status),
             tab("Settings", Page::Settings),
         ]
-        .spacing(4)
-        .width(140);
-        let body: Element<'_, Message> = match self.page {
-            Page::Mixer => text("Mixer").into(),
-            Page::Status => self.status_view(),
-            Page::Settings => text("Settings").into(),
+        .spacing(style::SPACE_XS)
+        .width(style::NAV_WIDTH);
+        let (title, body) = match self.page {
+            Page::Mixer => ("Mixer", self.mixer_view()),
+            Page::Status => ("Status", self.status_view()),
+            Page::Settings => ("Settings", self.settings_view()),
         };
+        let page = column![text(title).size(style::TEXT_TITLE), body]
+            .spacing(style::SPACE_L)
+            .height(Length::Fill);
         row![
-            container(nav).padding(12),
-            container(body).padding(16).width(Length::Fill)
+            container(nav).padding(style::SPACE_M),
+            container(page)
+                .padding([style::SPACE_L, style::SPACE_XL])
+                .width(Length::Fill)
         ]
         .into()
     }

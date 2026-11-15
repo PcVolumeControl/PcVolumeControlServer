@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Installs the toolchain and components named in rust-toolchain.toml.
+      - run: rustup toolchain install --no-self-update
+
+      - run: cargo fmt --all --check
+
+  check:
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - run: rustup toolchain install --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+
+      # iced, winit and the ksni tray dlopen X11, Wayland and xkbcommon and
+      # reach D-Bus through zbus, so libpulse (PulseAudio backend) is the only
+      # system library the build links.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          if grep -q libpulse crates/pcvc-audio/Cargo.toml; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libpulse-dev
+          fi
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # View tests render with tiny-skia (.cargo/config.toml), so no display
+      # is needed.
+      - name: Test
+        run: cargo test --workspace --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install the app's rust-version toolchain
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' crates/pcvc-app/Cargo.toml)
+          test -n "$msrv"
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          # Overrides rust-toolchain.toml for the rest of the job.
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Install Linux build dependencies
+        run: |
+          if grep -q libpulse crates/pcvc-audio/Cargo.toml; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libpulse-dev
+          fi
+
+      - name: Check
+        run: cargo check -p pcvolumecontrol --all-targets --locked
