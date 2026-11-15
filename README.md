@@ -93,4 +93,4 @@ The protocol is specified in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## License
 
-MIT
+MIT, see [LICENSE](LICENSE).
