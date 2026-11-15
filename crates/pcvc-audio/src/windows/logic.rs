@@ -115,7 +115,6 @@ pub(crate) fn retry_delay(failures: u32) -> Duration {
 
 /// What a Core Audio notification says needs re-reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(target_os = "windows", allow(dead_code))]
 pub(crate) enum Change {
     /// An endpoint appeared, disappeared, changed state or was renamed.
     Devices,

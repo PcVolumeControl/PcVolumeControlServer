@@ -8,6 +8,8 @@ mod logic;
 #[cfg(target_os = "windows")]
 mod backend;
 #[cfg(target_os = "windows")]
+mod callbacks;
+#[cfg(target_os = "windows")]
 mod com;
 #[cfg(target_os = "windows")]
 mod policy_config;

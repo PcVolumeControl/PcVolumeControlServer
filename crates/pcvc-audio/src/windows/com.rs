@@ -182,6 +182,12 @@ pub(super) fn set_master(
     Ok(())
 }
 
+/// Requests and discards a session enumerator.
+pub(super) fn request_session_enumerator(manager: &IAudioSessionManager2) -> Result<()> {
+    // SAFETY: no pointer arguments.
+    unsafe { manager.GetSessionEnumerator() }.map(drop)
+}
+
 /// Every session control on the endpoint, including expired and system-sound
 /// sessions.
 pub(super) fn session_controls(

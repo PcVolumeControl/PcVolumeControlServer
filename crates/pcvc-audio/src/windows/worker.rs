@@ -6,14 +6,18 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
-use ::windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+use ::windows::Win32::Media::Audio::Endpoints::{
+    IAudioEndpointVolume, IAudioEndpointVolumeCallback,
+};
 use ::windows::Win32::Media::Audio::{
-    IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
+    IAudioSessionControl, IAudioSessionControl2, IAudioSessionEvents, IAudioSessionManager2,
+    IAudioSessionNotification, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
     ISimpleAudioVolume,
 };
 use ::windows::core::Interface;
 use tokio::sync::broadcast;
 
+use super::callbacks::{self, Poster, Registration};
 use super::com::{self, Apartment};
 use super::logic::{self, Change, Dirty};
 use super::policy_config;
@@ -55,7 +59,6 @@ pub(super) type Reply = SyncSender<Result<(), AudioError>>;
 
 pub(super) enum Msg {
     /// Posted by Core Audio callbacks.
-    #[allow(dead_code)]
     Changed(Change),
     Command(Request, Reply),
     Shutdown,
@@ -128,8 +131,8 @@ struct Endpoint {
 
 struct Worker {
     shared: Arc<Shared>,
-    #[allow(dead_code)]
-    tx: Sender<Msg>,
+    poster: Poster,
+    _endpoint_notifications: Registration<IMMDeviceEnumerator, IMMNotificationClient>,
     enumerator: IMMDeviceEnumerator,
     devices: Vec<Endpoint>,
     default: Option<DefaultDevice>,
@@ -146,9 +149,15 @@ impl Worker {
     fn new(shared: Arc<Shared>, tx: Sender<Msg>) -> Result<Self, AudioError> {
         let enumerator =
             com::create_enumerator().map_err(|e| com_error("creating IMMDeviceEnumerator", e))?;
+        let poster = Poster::new(tx);
+        // Registered before the first read so that no change is missed.
+        let endpoint_notifications =
+            callbacks::register_endpoint_notifications(&enumerator, poster.clone())
+                .map_err(|e| com_error("registering IMMNotificationClient", e))?;
         let mut worker = Self {
             shared,
-            tx,
+            poster,
+            _endpoint_notifications: endpoint_notifications,
             enumerator,
             devices: Vec::new(),
             default: None,
@@ -364,7 +373,11 @@ impl Worker {
         }
         // On failure the old default stays cached until a retry succeeds,
         // rather than briefly publishing no default device.
-        self.default = Some(DefaultDevice::open(device, endpoint_id)?);
+        self.default = Some(DefaultDevice::open(
+            device,
+            endpoint_id,
+            self.poster.clone(),
+        )?);
         self.reopen_default = false;
         Ok(true)
     }
@@ -436,18 +449,33 @@ struct DefaultDevice {
     /// Percent and mute.
     master: (f32, bool),
     sessions: Vec<SessionEntry>,
+    poster: Poster,
+    _volume_notifications: Registration<IAudioEndpointVolume, IAudioEndpointVolumeCallback>,
+    _session_notifications: Registration<IAudioSessionManager2, IAudioSessionNotification>,
     volume: IAudioEndpointVolume,
+    /// Kept alive: session-created notifications stop when it is released.
     manager: IAudioSessionManager2,
     _device: IMMDevice,
 }
 
 impl DefaultDevice {
-    fn open(device: IMMDevice, endpoint_id: String) -> Result<Self, AudioError> {
+    /// Opens the endpoint's controls, registers its callbacks and reads it.
+    fn open(device: IMMDevice, endpoint_id: String, poster: Poster) -> Result<Self, AudioError> {
         let Endpoint { endpoint_id, info } = endpoint_info(&device, endpoint_id);
         let volume: IAudioEndpointVolume =
             com::activate(&device).map_err(|e| com_error("activating IAudioEndpointVolume", e))?;
         let manager: IAudioSessionManager2 =
             com::activate(&device).map_err(|e| com_error("activating IAudioSessionManager2", e))?;
+        let volume_notifications =
+            callbacks::register_volume_notifications(&volume, poster.clone())
+                .map_err(|e| com_error("registering IAudioEndpointVolumeCallback", e))?;
+        // Core Audio only delivers session-created notifications to a manager
+        // whose session enumerator has been requested.
+        com::request_session_enumerator(&manager)
+            .map_err(|e| com_error("enumerating audio sessions", e))?;
+        let session_notifications =
+            callbacks::register_session_created(&manager, poster.clone())
+                .map_err(|e| com_error("registering IAudioSessionNotification", e))?;
         let master = com::master(&volume).map_err(|e| com_error("reading master volume", e))?;
         let mut default = Self {
             endpoint_id,
@@ -455,6 +483,9 @@ impl DefaultDevice {
             name: info.name,
             master,
             sessions: Vec::new(),
+            poster,
+            _volume_notifications: volume_notifications,
+            _session_notifications: session_notifications,
             volume,
             manager,
             _device: device,
@@ -501,7 +532,7 @@ impl DefaultDevice {
                     "session id does not contain its device id"
                 );
             }
-            match SessionEntry::open(id, control.clone()) {
+            match SessionEntry::open(id, control.clone(), self.poster.clone()) {
                 Ok(entry) => self.sessions.push(entry),
                 Err(e) => tracing::debug!("skipping audio session: {e}"),
             }
@@ -535,13 +566,21 @@ struct SessionEntry {
     process: Option<Option<String>>,
     volume: f32,
     muted: bool,
+    _events: Registration<IAudioSessionControl, IAudioSessionEvents>,
 }
 
 impl SessionEntry {
-    fn open(id: String, control: IAudioSessionControl2) -> Result<Self, AudioError> {
+    /// Registers for the session's events, then reads it.
+    fn open(
+        id: String,
+        control: IAudioSessionControl2,
+        poster: Poster,
+    ) -> Result<Self, AudioError> {
         let simple: ISimpleAudioVolume = control
             .cast()
             .map_err(|e| com_error("querying ISimpleAudioVolume", e))?;
+        let events = callbacks::register_session_events(&control, poster)
+            .map_err(|e| com_error("registering IAudioSessionEvents", e))?;
         // Multi-process sessions have no single pid; they fall back to their
         // display name or "Unknown".
         let pid = com::process_id(&control).unwrap_or(0);
@@ -555,6 +594,7 @@ impl SessionEntry {
             process: None,
             volume: 0.0,
             muted: false,
+            _events: events,
         };
         entry.refresh()?;
         Ok(entry)
