@@ -21,7 +21,7 @@ async fn main() -> ExitCode {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let mut config = ServerConfig::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT, true);
+    let mut config = ServerConfig::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -45,11 +45,14 @@ async fn main() -> ExitCode {
 
     let mut mdns = server.mdns();
     tokio::spawn(async move {
-        while mdns.changed().await.is_ok() {
+        loop {
             match &*mdns.borrow_and_update() {
                 MdnsStatus::Registered { instance } => tracing::info!(%instance, "advertising"),
                 MdnsStatus::Failed(e) => tracing::warn!("mDNS: {e}"),
-                MdnsStatus::Disabled => {}
+                MdnsStatus::Disabled | MdnsStatus::Starting => {}
+            }
+            if mdns.changed().await.is_err() {
+                break;
             }
         }
     });

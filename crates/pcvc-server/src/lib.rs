@@ -46,27 +46,35 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn new(bind: IpAddr, port: u16, mdns: bool) -> Self {
+    /// A config with mDNS enabled and the default coalescing window.
+    pub fn new(bind: IpAddr, port: u16) -> Self {
         Self {
             bind,
             port,
-            mdns,
+            mdns: true,
             coalesce: DEFAULT_COALESCE,
         }
+    }
+
+    pub fn with_mdns(mut self, enabled: bool) -> Self {
+        self.mdns = enabled;
+        self
     }
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT, true)
+        Self::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MdnsStatus {
-    /// Not requested, not yet registered, or withdrawn.
+    /// Not requested, or withdrawn.
     Disabled,
-    /// Advertised under this instance name, which differs from the requested
+    /// Registration requested; the service has not been announced yet.
+    Starting,
+    /// Announced under this instance name, which differs from the requested
     /// one if the mDNS stack had to resolve a name conflict.
     Registered {
         instance: String,

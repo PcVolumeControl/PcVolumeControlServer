@@ -16,7 +16,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[ignore = "requires multicast networking"]
 async fn advertises_while_running_and_withdraws_on_stop() {
     let backend: Arc<dyn AudioBackend> = Arc::new(MockBackend::demo());
-    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, true);
+    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let server = ServerHandle::start(backend, config).await.unwrap();
     let port = server.local_addr().port();
 
@@ -66,5 +66,6 @@ async fn advertises_while_running_and_withdraws_on_stop() {
     })
     .await
     .expect("service not withdrawn");
+    assert_eq!(*status.borrow(), MdnsStatus::Disabled);
     let _ = browser.shutdown();
 }
