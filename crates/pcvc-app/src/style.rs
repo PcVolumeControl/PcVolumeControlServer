@@ -2,8 +2,11 @@
 //! built-in light and dark palettes, so swapping the theme restyles
 //! everything.
 
-use iced::widget::{button as btn, container, text};
-use iced::{Border, Color, Theme};
+use std::time::Duration;
+
+use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::{Container, Scrollable, button as btn, container, scrollable, slider, text};
+use iced::{Border, Color, Element, Fill, Padding, Theme};
 
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_S: f32 = 8.0;
@@ -12,6 +15,8 @@ pub const SPACE_L: f32 = 20.0;
 pub const SPACE_XL: f32 = 28.0;
 
 pub const TEXT_SMALL: f32 = 13.0;
+/// iced's default text size, named so labels can be measured at it.
+pub const TEXT_DEFAULT: f32 = 16.0;
 pub const TEXT_BODY: f32 = 15.0;
 pub const TEXT_SECTION: f32 = 18.0;
 pub const TEXT_TITLE: f32 = 24.0;
@@ -20,15 +25,43 @@ pub const TEXT_HEADLINE: f32 = 32.0;
 pub const RADIUS: f32 = 8.0;
 
 pub const NAV_WIDTH: f32 = 150.0;
+/// Labels of the Settings rows.
 pub const LABEL_WIDTH: f32 = 140.0;
 pub const MUTE_WIDTH: f32 = 90.0;
 pub const PERCENT_WIDTH: f32 = 48.0;
 pub const STATUS_ICON: f32 = 64.0;
+
+/// The Mixer's label column (output device, master, icon and name) takes
+/// this share of the width the fixed columns leave, within these bounds.
+pub const LABEL_SHARE: f32 = 0.5;
+pub const LABEL_MIN: f32 = 120.0;
+pub const LABEL_MAX: f32 = 260.0;
+
 /// Application icons in the Mixer.
 pub const APP_ICON: f32 = 24.0;
 pub const APP_ICON_RADIUS: f32 = 6.0;
+pub const APP_ICON_GAP: f32 = SPACE_S;
 /// The letter on an application's fallback tile.
 pub const APP_ICON_LETTER: f32 = 13.0;
+/// Opacity of a muted application's icon.
+pub const MUTED_OPACITY: f32 = 0.45;
+
+pub const TOOLTIP_DELAY: Duration = Duration::from_millis(400);
+
+/// Scroll areas keep their scrollbar in a gutter at the page's right edge,
+/// empty whether or not the content scrolls, so the scrollbar never covers
+/// content; content outside them is inset by the same gutter so right edges
+/// line up.
+pub const SCROLLBAR_WIDTH: f32 = 8.0;
+pub const SCROLL_GUTTER: f32 = SCROLLBAR_WIDTH + SPACE_S;
+
+/// Space around a page; the right side holds the scroll gutter.
+pub const PAGE_PADDING: Padding = Padding {
+    top: SPACE_M,
+    right: SPACE_XL - SCROLL_GUTTER,
+    bottom: SPACE_M,
+    left: SPACE_XL,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Button {
@@ -87,6 +120,61 @@ pub fn icon_tile(background: Color) -> container::Style {
 /// Where an application icon appears once it has been looked up.
 pub fn icon_placeholder(theme: &Theme) -> container::Style {
     icon_tile(theme.extended_palette().background.weak.color)
+}
+
+/// A vertically scrolling area filling the remaining height, with its
+/// scrollbar in the gutter.
+pub fn scroll_area<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+) -> Scrollable<'a, Message> {
+    scrollable(beside_gutter(content))
+        .direction(Direction::Vertical(
+            Scrollbar::new()
+                .width(SCROLLBAR_WIDTH)
+                .scroller_width(SCROLLBAR_WIDTH),
+        ))
+        .height(Fill)
+}
+
+/// Content outside a scroll area, ending where scrolling content ends.
+pub fn beside_gutter<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+) -> Container<'a, Message> {
+    container(content).padding(Padding::ZERO.right(SCROLL_GUTTER))
+}
+
+/// The volume slider; a muted control's slider is greyed out.
+pub fn volume_slider(muted: bool) -> impl Fn(&Theme, slider::Status) -> slider::Style {
+    move |theme, status| {
+        let base = slider::default(theme, status);
+        if !muted {
+            return base;
+        }
+        let palette = theme.extended_palette();
+        let fill = palette.background.strong.color;
+        slider::Style {
+            rail: slider::Rail {
+                backgrounds: (fill.into(), palette.background.weak.color.into()),
+                ..base.rail
+            },
+            handle: slider::Handle {
+                background: fill.into(),
+                ..base.handle
+            },
+        }
+    }
+}
+
+/// The bubble of a tooltip.
+pub fn tooltip(theme: &Theme) -> container::Style {
+    let base = container::bordered_box(theme);
+    container::Style {
+        border: Border {
+            radius: (RADIUS / 2.0).into(),
+            ..base.border
+        },
+        ..base
+    }
 }
 
 /// De-emphasised text such as section labels and hints.

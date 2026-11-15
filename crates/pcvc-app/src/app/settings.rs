@@ -2,9 +2,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, text, text_input, toggler,
-};
+use iced::widget::{button, column, container, pick_list, row, rule, text, text_input, toggler};
 use iced::{Center, Element, Fill, Task};
 
 use super::{App, Message};
@@ -230,7 +228,7 @@ impl App {
                 msg(SettingsMessage::Mdns(on))
             }),
         ]
-        .spacing(style::SPACE_L);
+        .spacing(style::SPACE_M);
 
         let app = column![
             switch("Start on login", form.start_on_login, move |on| {
@@ -253,7 +251,7 @@ impl App {
                 .width(160),
             ),
         ]
-        .spacing(style::SPACE_L);
+        .spacing(style::SPACE_M);
 
         let dirty = form.is_dirty(&self.config);
         let save = button(text("Save"))
@@ -278,17 +276,17 @@ impl App {
             .size(style::TEXT_SMALL)
             .style(style::muted_text);
 
-        // The actions stay visible below the scrolling groups.
+        // The actions stay visible below the scrolling groups, as a footer
+        // set off by a hairline.
+        let footer = column![rule::horizontal(1), actions].spacing(style::SPACE_M);
         column![
-            scrollable(
+            style::scroll_area(
                 column![group("Server", server), group("Application", app), hint]
-                    .spacing(style::SPACE_L)
-                    .padding(iced::Padding::ZERO.right(style::SPACE_M)),
-            )
-            .height(Fill),
-            actions,
+                    .spacing(style::SPACE_M)
+                    .padding(iced::Padding::ZERO.bottom(style::SPACE_M)),
+            ),
+            style::beside_gutter(footer),
         ]
-        .spacing(style::SPACE_L)
         .into()
     }
 }
@@ -297,7 +295,7 @@ fn group<'a>(title: &'a str, body: impl Into<Element<'a, Message>>) -> Element<'
     column![
         text(title).size(style::TEXT_SMALL).style(style::muted_text),
         container(body)
-            .padding(style::SPACE_L)
+            .padding([style::SPACE_M, style::SPACE_L])
             .width(Fill)
             .style(style::card),
     ]

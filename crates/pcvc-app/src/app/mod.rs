@@ -576,7 +576,7 @@ impl App {
         row![
             container(nav).padding(style::SPACE_M),
             container(page)
-                .padding([style::SPACE_L, style::SPACE_XL])
+                .padding(style::PAGE_PADDING)
                 .width(Length::Fill)
         ]
         .into()
