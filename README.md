@@ -5,8 +5,9 @@ in Rust. It owns the audio stack, serves the iOS and Android apps over TCP
 (protocol v7, compatible with the existing apps), and advertises itself over
 mDNS. It replaces the C# `PcVolumeControlWindows` server.
 
-Status: the protocol, server and a mock audio backend are in place. Windows
-(Core Audio) and Linux (PulseAudio) backends and the desktop GUI come next.
+Status: the protocol, server, a mock audio backend and the Linux
+(PulseAudio) backend are in place. The Windows (Core Audio) backend and the
+desktop GUI come next.
 
 ## Build and test
 
@@ -34,12 +35,44 @@ advertises `_pcvolumecontrol._tcp`. Point the iOS or Android app at this
 machine (or let it discover the server). Options: `--port N`, `--no-mdns`;
 logging follows `RUST_LOG`.
 
+## Linux
+
+The Linux backend talks to the PulseAudio protocol, so it works with
+PulseAudio itself and with PipeWire through `pipewire-pulse` (the default on
+current distributions).
+
+- Build: `libpulse` development files and `pkg-config` (Debian/Ubuntu:
+  `libpulse-dev`, Fedora: `pulseaudio-libs-devel`, Arch: `libpulse`).
+- Run: a PulseAudio or `pipewire-pulse` server in the user session.
+
+Sinks are the devices, the default sink is the default device, and the
+application streams playing to it are its sessions (event sounds and
+streams created by server modules are left out). Changing the default device
+also moves the streams on the old default to the new one, as on Windows.
+
+To control this machine from a phone before the desktop app is ready:
+
+```sh
+cargo run -p pcvc-server --example pulse_server
+```
+
+It takes the same options as `mock_server`. `cargo run -p pcvc-audio
+--example pulse_dump` prints what the backend sees and the events it emits.
+
+The tests against the running sound server are ignored by default. They play
+silence through `pw-play` and briefly make a temporary null sink the default
+(well under two seconds), restoring everything afterwards:
+
+```sh
+cargo test -p pcvc-audio --test pulse_live -- --ignored --test-threads=1
+```
+
 ## Crates
 
 | Crate | Purpose |
 | --- | --- |
 | `pcvc-protocol` | Wire models, line framing, and the pure rule that turns a client update into backend commands. Depends only on serde. |
-| `pcvc-audio` | `AudioBackend` trait, domain types, `AudioEvent`, and `MockBackend`. Platform backends will live here behind `cfg`. |
+| `pcvc-audio` | `AudioBackend` trait, domain types, `AudioEvent`, `MockBackend`, and the platform backends behind `cfg` (`PulseBackend` on Linux). |
 | `pcvc-server` | Tokio TCP server, coalescing state broadcaster, mDNS advertiser, and the `ServerHandle` API for front ends. |
 
 The protocol is specified in [docs/PROTOCOL.md](docs/PROTOCOL.md).
