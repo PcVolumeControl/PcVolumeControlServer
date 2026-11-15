@@ -23,6 +23,8 @@ mod placement;
 mod server_ctl;
 mod style;
 mod tray;
+#[allow(dead_code, reason = "the app uses it once the scheduler is in place")]
+mod update;
 
 use std::process::ExitCode;
 use std::sync::Mutex;

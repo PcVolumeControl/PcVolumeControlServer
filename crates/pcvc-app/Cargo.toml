@@ -41,6 +41,9 @@ thiserror.workspace = true
 if-addrs = "0.15"
 sha2 = "0.10"
 unicode-segmentation = "1.12"
+serde_json.workspace = true
+semver = "1.0.28"
+minisign-verify = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
@@ -51,6 +54,20 @@ x11rb = { version = "0.13.2", features = ["randr"] }
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = { version = "0.26", default-features = false }
 
+# Update checks over HTTPS, without gzip (GitHub's JSON is small). Windows
+# uses its own TLS (SChannel) and certificate store; elsewhere rustls with
+# Mozilla's roots built in, so no OpenSSL or other system library. ring,
+# which rustls uses, cannot be built for Windows without MSVC's headers.
+[target.'cfg(not(target_os = "windows"))'.dependencies.ureq]
+version = "3.5"
+default-features = false
+features = ["rustls"]
+
+[target.'cfg(target_os = "windows")'.dependencies.ureq]
+version = "3.5"
+default-features = false
+features = ["native-tls-no-default"]
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -58,6 +75,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Console",
+    "Win32_System_Registry",
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
@@ -72,7 +90,8 @@ winresource = { version = "0.1.34", default-features = false }
 tempfile = "3"
 iced_test = "0.14"
 base64.workspace = true
-serde_json.workspace = true
+# Signs with a throwaway key in the update tests.
+minisign = "0.10"
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [package.metadata.deb]
