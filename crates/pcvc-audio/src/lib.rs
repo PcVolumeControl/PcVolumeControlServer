@@ -8,7 +8,8 @@
 
 mod mock;
 
-pub use mock::{MockBackend, MockDevice};
+pub use mock::MockBackend;
+use pcvc_protocol::Command;
 use tokio::sync::broadcast;
 
 /// Snapshot of the audio system as the protocol presents it.
@@ -37,6 +38,24 @@ pub struct Device {
     pub sessions: Vec<Session>,
 }
 
+impl Device {
+    /// A device with no sessions, unmuted.
+    pub fn new(id: impl Into<String>, name: impl Into<String>, volume: f32) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            volume,
+            muted: false,
+            sessions: Vec::new(),
+        }
+    }
+
+    pub fn with_session(mut self, session: Session) -> Self {
+        self.sessions.push(session);
+        self
+    }
+}
+
 /// A per-application audio stream on a device.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
@@ -47,6 +66,18 @@ pub struct Session {
     /// Percent, 0.0 to 100.0.
     pub volume: f32,
     pub muted: bool,
+}
+
+impl Session {
+    /// An unmuted session.
+    pub fn new(id: impl Into<String>, name: impl Into<String>, volume: f32) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            volume,
+            muted: false,
+        }
+    }
 }
 
 /// A change notification. Events are hints: consumers re-read the state with
@@ -69,6 +100,11 @@ pub enum AudioError {
     UnknownSession(String),
     #[error("no default playback device")]
     NoDefaultDevice,
+    #[error("session id {session_id} does not contain its device id {device_id}")]
+    InvalidSessionId {
+        session_id: String,
+        device_id: String,
+    },
     #[error("audio backend error: {0}")]
     Backend(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -81,7 +117,8 @@ pub enum AudioError {
 /// - list only active playback devices and exclude system-sound sessions;
 /// - report and accept volumes as percentages, clamping inputs to 0..=100;
 /// - emit at least one [`AudioEvent`] after every change to the state, whether
-///   it came from these methods or from elsewhere in the system.
+///   it came from these methods or from elsewhere in the system. Calls that
+///   change nothing need not emit.
 pub trait AudioBackend: Send + Sync {
     fn snapshot(&self) -> Result<AudioState, AudioError>;
 
@@ -98,4 +135,17 @@ pub trait AudioBackend: Send + Sync {
     /// A new receiver for change events. A lagged receiver should treat the
     /// lag as "something changed".
     fn subscribe(&self) -> broadcast::Receiver<AudioEvent>;
+
+    /// Runs a protocol command through the matching setter.
+    fn apply(&self, command: &Command) -> Result<(), AudioError> {
+        match command {
+            Command::SetDefaultDevice { device_id } => self.set_default_device(device_id),
+            Command::SetMaster { volume, muted } => self.set_master(*volume, *muted),
+            Command::SetSession {
+                session_id,
+                volume,
+                muted,
+            } => self.set_session(session_id, *volume, *muted),
+        }
+    }
 }
