@@ -3,7 +3,10 @@
 The PC side of [PcVolumeControl](https://github.com/PcVolumeControl), rewritten
 in Rust. It owns the audio stack, serves the iOS and Android apps over TCP
 (protocol v7, compatible with the existing apps), and advertises itself over
-mDNS. It replaces the C# `PcVolumeControlWindows` server.
+mDNS. It replaces the C# `PcVolumeControlWindows` server. The server library
+also implements the optional "v8" extensions (app icons), which keep the wire
+version at 7 so the shipped apps are unaffected; the mock server below serves
+them for client development.
 
 Status: the protocol, server, desktop app, the Linux (PulseAudio) backend and
 a Windows (Core Audio) backend are in place. The Windows backend and the
@@ -122,8 +125,65 @@ cargo run -p pcvc-server --example mock_server
 
 This listens on `0.0.0.0:3000` with a scripted set of devices and sessions and
 advertises `_pcvolumecontrol._tcp`. Point the iOS or Android app at this
-machine (or let it discover the server). Options: `--port N`, `--no-mdns`;
-logging follows `RUST_LOG`.
+machine (or let it discover the server). Options: `--port N`, `--no-mdns`,
+`--no-icons`; logging follows `RUST_LOG`.
+
+### Building a client against the icon extension
+
+The mock server serves the v8 `icons` feature by default (`--no-icons` turns
+it off and makes it a plain v7 server). Its demo provider draws a coloured
+rounded square per app at whatever size is asked for, and resolves icon ids
+in the background like a real one: each session first appears without an
+`iconId` and gains it about half a second later. See
+[docs/PROTOCOL.md](docs/PROTOCOL.md#protocol-v8-extensions) for the format.
+
+To poke at it by hand, run it on a spare port and connect with `nc`:
+
+```sh
+cargo run -p pcvc-server --example mock_server -- --port 3001 --no-mdns
+nc localhost 3001
+```
+
+The first line is a full state with `"features":["icons"]`; once the ids are
+resolved a second state follows with an `iconId` on every session. Paste a
+request using one of them and the reply line comes back:
+
+```json
+{"protocolVersion":7,"iconRequest":{"ids":["<iconId>","nosuchid"],"size":96}}
+```
+
+A few lines of Python do the whole round trip and save the PNGs:
+
+```python
+import base64, json, socket
+
+s = socket.create_connection(("localhost", 3001))
+lines = s.makefile("r", encoding="utf-8")
+state = json.loads(lines.readline())
+assert "icons" in state.get("features", [])
+while not all("iconId" in x for x in state["defaultDevice"]["sessions"]):
+    state = json.loads(lines.readline())
+ids = [x["iconId"] for x in state["defaultDevice"]["sessions"]]
+
+request = {"protocolVersion": 7, "iconRequest": {"ids": ids, "size": 96}}
+s.sendall((json.dumps(request) + "\n").encode())
+answered = 0
+while answered < len(ids):
+    line = json.loads(lines.readline())
+    if "defaultDevice" in line:  # a full state; icon replies have "icon"
+        continue
+    icon = line["icon"]
+    answered += 1
+    if "error" in icon:
+        print(icon["id"], icon["error"])
+        continue
+    with open(f"{icon['id']}.png", "wb") as f:
+        f.write(base64.b64decode(icon["data"]))
+    print(icon["id"], f"{icon['size']}px")
+```
+
+A second `nc` connected at the same time only ever sees full states: icon
+replies go to the client that asked.
 
 ## Linux
 

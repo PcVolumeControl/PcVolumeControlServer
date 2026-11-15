@@ -10,29 +10,38 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing_subscriber::EnvFilter;
 
 /// Sets up logging (`RUST_LOG`, default `info`) and parses `[--port N]
-/// [--no-mdns]`. On a usage error, returns the exit code to end with.
-pub fn init(example: &str) -> Result<ServerConfig, ExitCode> {
+/// [--no-mdns]` plus the example's own `flags`, returning those that were
+/// given. On a usage error, returns the exit code to end with.
+pub fn init(
+    example: &str,
+    flags: &[&'static str],
+) -> Result<(ServerConfig, Vec<&'static str>), ExitCode> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     let mut config = ServerConfig::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT);
+    let mut given = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--port" => match args.next().and_then(|p| p.parse().ok()) {
                 Some(port) => config.port = port,
-                None => return Err(usage(example)),
+                None => return Err(usage(example, flags)),
             },
             "--no-mdns" => config.mdns = false,
-            _ => return Err(usage(example)),
+            other => match flags.iter().find(|f| **f == other) {
+                Some(flag) => given.push(*flag),
+                None => return Err(usage(example, flags)),
+            },
         }
     }
-    Ok(config)
+    Ok((config, given))
 }
 
-fn usage(example: &str) -> ExitCode {
-    eprintln!("usage: {example} [--port N] [--no-mdns]");
+fn usage(example: &str, flags: &[&str]) -> ExitCode {
+    let extra: String = flags.iter().map(|f| format!(" [{f}]")).collect();
+    eprintln!("usage: {example} [--port N] [--no-mdns]{extra}");
     ExitCode::from(2)
 }
 
@@ -65,6 +74,11 @@ pub async fn serve(backend: Arc<dyn AudioBackend>, config: ServerConfig, what: &
         loop {
             match events.recv().await {
                 Ok(ServerEvent::BackendError(e)) => tracing::warn!("{e}"),
+                Ok(ServerEvent::IconsRequested {
+                    client,
+                    count,
+                    size,
+                }) => tracing::info!(addr = %client.addr, count, size, "icon request"),
                 Ok(_) => {}
                 Err(RecvError::Lagged(n)) => tracing::warn!("missed {n} server events"),
                 Err(RecvError::Closed) => break,
