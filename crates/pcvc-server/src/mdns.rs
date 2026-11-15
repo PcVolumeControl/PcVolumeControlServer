@@ -206,8 +206,8 @@ mod tests {
             ["version=1", "protocol=7", "features=icons"]
         );
         assert_eq!(
-            pairs(txt_properties(&["icons", "detail"])),
-            ["version=1", "protocol=7", "features=icons,detail"]
+            pairs(txt_properties(&["icons", "future"])),
+            ["version=1", "protocol=7", "features=icons,future"]
         );
     }
 

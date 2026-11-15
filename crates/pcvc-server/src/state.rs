@@ -2,19 +2,17 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use pcvc_audio::{AudioState, Session};
 use pcvc_protocol::{
-    APPLICATION_VERSION, DeviceState, FEATURE_DETAIL, FEATURE_ICONS, FullState, IconId,
-    PROTOCOL_VERSION, SessionState, clamp_volume, session_detail,
+    APPLICATION_VERSION, DeviceState, FEATURE_ICONS, FullState, IconId, PROTOCOL_VERSION,
+    SessionState, clamp_volume, session_detail,
 };
 
 use crate::IconProvider;
 
 /// Protocol extensions a server advertises, in the full state and over
-/// mDNS, given whether it has an icon provider and sends session details.
-pub(crate) fn features(icons: bool, details: bool) -> Vec<&'static str> {
-    [(icons, FEATURE_ICONS), (details, FEATURE_DETAIL)]
-        .into_iter()
-        .filter_map(|(on, feature)| on.then_some(feature))
-        .collect()
+/// mDNS, given whether it has an icon provider. Session details need no
+/// feature.
+pub(crate) fn features(icons: bool) -> Vec<&'static str> {
+    icons.then_some(FEATURE_ICONS).into_iter().collect()
 }
 
 /// Converts a backend snapshot to the plain v7 wire full state. `None` when
@@ -25,7 +23,7 @@ pub fn to_full_state(state: &AudioState) -> Option<FullState> {
 
 /// [`to_full_state`] plus the extensions: with a provider, the `icons`
 /// feature and each session's icon id if the provider knows it; with
-/// `details`, the `detail` feature and each session's detail.
+/// `details`, each session's detail.
 pub(crate) fn to_full_state_with(
     state: &AudioState,
     icons: Option<&dyn IconProvider>,
@@ -35,7 +33,7 @@ pub(crate) fn to_full_state_with(
     Some(FullState {
         protocol_version: PROTOCOL_VERSION,
         application_version: APPLICATION_VERSION.to_owned(),
-        features: features(icons.is_some(), details)
+        features: features(icons.is_some())
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -177,20 +175,12 @@ mod tests {
             sessions.iter().map(|s| s.detail.clone()).collect()
         };
         let full = to_full_state_with(&state, None, true).unwrap();
-        assert_eq!(full.features, [FEATURE_DETAIL]);
+        assert!(full.features.is_empty(), "details are not a feature");
         assert_eq!(details(&full), [Some("Tab one".to_owned()), None, None]);
 
         let plain = to_full_state(&state).unwrap();
         assert!(plain.features.is_empty());
         assert_eq!(details(&plain), [None, None, None]);
-    }
-
-    #[test]
-    fn features_are_listed_in_a_fixed_order() {
-        assert!(features(false, false).is_empty());
-        assert_eq!(features(true, false), [FEATURE_ICONS]);
-        assert_eq!(features(false, true), [FEATURE_DETAIL]);
-        assert_eq!(features(true, true), [FEATURE_ICONS, FEATURE_DETAIL]);
     }
 
     #[test]

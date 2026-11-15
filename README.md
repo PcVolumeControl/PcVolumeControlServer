@@ -263,8 +263,9 @@ machine (or let it discover the server). Options: `--port N`, `--no-mdns`,
 
 ### Building a client against session details
 
-The mock server serves the v8 `detail` feature by default (`--no-detail`
-turns it off). Besides the demo's own Firefox session, which has no detail,
+The mock server sends the v8 session `detail` by default (`--no-detail`
+turns it off). Details are not a feature, so `features` stays `["icons"]`
+either way. Besides the demo's own Firefox session, which has no detail,
 the speakers have two more sessions named `Firefox` with a tab title as
 their detail; one of them moves on to another title every five seconds.
 With both `--no-detail` and `--no-icons` it is a plain v7 server.
@@ -288,7 +289,7 @@ cargo run -p pcvc-server --example mock_server -- --port 3001 --no-mdns
 nc localhost 3001
 ```
 
-The first line is a full state with `"features":["icons","detail"]` and an
+The first line is a full state with `"features":["icons"]` and an
 `iconId` on every session. Paste a request using one of them and the reply lines come
 back, one per id:
 

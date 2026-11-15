@@ -108,7 +108,6 @@ fn truncates_on_a_char_boundary() {
 #[test]
 fn wire_shape() {
     let mut value: Value = serde_json::from_str(README_FULL_STATE).unwrap();
-    value["features"] = json!(["icons", "detail"]);
     value["defaultDevice"]["sessions"][0]["detail"] = json!("Inbox (3) - Gmail");
     let state: FullState = serde_json::from_value(value).unwrap();
     let session = &state.default_device.sessions[0];
@@ -118,10 +117,9 @@ fn wire_shape() {
         line.contains(r#""volume":77.0,"muted":false,"detail":"Inbox (3) - Gmail"}"#),
         "{line}"
     );
-    assert!(line.contains(r#""features":["icons","detail"]"#), "{line}");
+    assert!(!line.contains("features"), "no feature needed: {line}");
 
     let mut plain = state.clone();
-    plain.features.clear();
     plain.default_device.sessions[0].detail = None;
     assert!(!encode_full_state(&plain).contains("detail"));
 }
