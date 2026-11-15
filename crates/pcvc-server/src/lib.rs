@@ -4,10 +4,12 @@
 //! from an [`AudioBackend`]: every client gets the full state on connect and
 //! again after every backend change, and client updates are turned into
 //! backend commands. The handle exposes the current audio state, the client
-//! list and an event stream for a GUI or a headless front end.
+//! list, the mDNS status and an event stream for a GUI or a headless front
+//! end.
 
 mod broadcaster;
 mod client;
+mod mdns;
 mod state;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -22,6 +24,7 @@ use tokio::sync::{Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+pub use mdns::SERVICE_TYPE as MDNS_SERVICE_TYPE;
 pub use state::to_full_state;
 
 /// Default TCP port, as used by the shipped clients.
@@ -37,14 +40,17 @@ const EVENT_CAPACITY: usize = 256;
 pub struct ServerConfig {
     pub bind: IpAddr,
     pub port: u16,
+    /// Advertise the service over mDNS while the listener runs.
+    pub mdns: bool,
     pub coalesce: Duration,
 }
 
 impl ServerConfig {
-    pub fn new(bind: IpAddr, port: u16) -> Self {
+    pub fn new(bind: IpAddr, port: u16, mdns: bool) -> Self {
         Self {
             bind,
             port,
+            mdns,
             coalesce: DEFAULT_COALESCE,
         }
     }
@@ -52,8 +58,20 @@ impl ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT)
+        Self::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_PORT, true)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdnsStatus {
+    /// Not requested, not yet registered, or withdrawn.
+    Disabled,
+    /// Advertised under this instance name, which differs from the requested
+    /// one if the mDNS stack had to resolve a name conflict.
+    Registered {
+        instance: String,
+    },
+    Failed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +135,7 @@ struct Shared {
     /// Asks the broadcaster to re-send the state even if it has not changed.
     resync: Notify,
     clients: watch::Sender<Vec<ClientInfo>>,
+    mdns: watch::Sender<MdnsStatus>,
     events: broadcast::Sender<ServerEvent>,
     next_client_id: AtomicU64,
     cancel: CancellationToken,
@@ -130,7 +149,8 @@ impl Shared {
 }
 
 /// A running server. Dropping the handle stops the server without waiting for
-/// its tasks; [`ServerHandle::stop`] waits.
+/// its tasks (the mDNS withdrawal still runs if the runtime stays up);
+/// [`ServerHandle::stop`] waits.
 pub struct ServerHandle {
     shared: Arc<Shared>,
     tracker: TaskTracker,
@@ -156,6 +176,7 @@ impl ServerHandle {
             state: watch::Sender::new(AudioState::default()),
             resync: Notify::new(),
             clients: watch::Sender::new(Vec::new()),
+            mdns: watch::Sender::new(MdnsStatus::Disabled),
             events: broadcast::Sender::new(EVENT_CAPACITY),
             next_client_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
@@ -170,6 +191,13 @@ impl ServerHandle {
             initial_ok,
         ));
         tracker.spawn(accept_loop(Arc::clone(&shared), listener, tracker.clone()));
+        if config.mdns {
+            tracker.spawn(mdns::run(
+                Arc::clone(&shared),
+                config.bind,
+                local_addr.port(),
+            ));
+        }
 
         tracing::info!(%local_addr, "server listening");
         Ok(Self {
@@ -194,11 +222,17 @@ impl ServerHandle {
         self.shared.clients.subscribe()
     }
 
+    /// mDNS advertisement state.
+    pub fn mdns(&self) -> watch::Receiver<MdnsStatus> {
+        self.shared.mdns.subscribe()
+    }
+
     pub fn events(&self) -> broadcast::Receiver<ServerEvent> {
         self.shared.events.subscribe()
     }
 
-    /// Stops listening, disconnects every client and waits for all tasks.
+    /// Stops listening, disconnects every client, withdraws the mDNS
+    /// advertisement and waits for all tasks.
     pub async fn stop(self) {
         self.shared.cancel.cancel();
         self.tracker.close();

@@ -18,7 +18,7 @@ const HEADSET: &str = "c98e4030-926b-4e62-8c83-1c529574cc51";
 async fn start() -> (Arc<MockBackend>, ServerHandle) {
     let mock = Arc::new(MockBackend::demo());
     let backend: Arc<dyn AudioBackend> = mock.clone();
-    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, false);
     let server = ServerHandle::start(backend, config).await.unwrap();
     (mock, server)
 }
@@ -391,7 +391,7 @@ async fn stop_disconnects_clients_and_closes_listener() {
 async fn no_default_device_sends_nothing_until_one_appears() {
     let mock = Arc::new(MockBackend::new(vec![], None).unwrap());
     let backend: Arc<dyn AudioBackend> = mock.clone();
-    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, false);
     let server = ServerHandle::start(backend, config).await.unwrap();
     let mut client = Client::connect(server.local_addr()).await;
 
@@ -418,7 +418,7 @@ async fn client_can_pick_a_default_device_when_there_is_none() {
     let devices = vec![pcvc_audio::Device::new("a", "A", 10.0)];
     let mock = Arc::new(MockBackend::new(devices, None).unwrap());
     let backend: Arc<dyn AudioBackend> = mock.clone();
-    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, false);
     let server = ServerHandle::start(backend, config).await.unwrap();
     let mut client = Client::connect(server.local_addr()).await;
 
