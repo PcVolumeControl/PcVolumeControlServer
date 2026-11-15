@@ -346,9 +346,9 @@ current distributions).
 
 Sinks are the devices, the default sink is the default device, and the
 application streams playing to it are its sessions (event sounds and
-streams created by server modules are left out). Streams of one application
-that look the same (same name and title, as when a browser tab plays a video
-and runs Web Audio) are shown as one session, and setting it sets them all.
+streams created by server modules are left out). Streams of one running
+application with the same name and detail (a browser tab with a video and
+Web Audio, say) are one session; a new volume or mute set on it goes to all.
 Changing the default device also moves the streams on the old default to the
 new one, as on Windows.
 

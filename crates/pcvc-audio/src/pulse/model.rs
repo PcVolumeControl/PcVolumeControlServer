@@ -22,7 +22,8 @@
 //! The session takes its id, name, detail, app hints, volume and mute from
 //! its representative, the stream with the lowest index, so a group of one
 //! has the id `"{sink name}|{sink-input index}"` and a group keeps its id
-//! while its oldest stream lives. An id naming any stream of a group
+//! while that stream lives (normally its oldest: PulseAudio and current
+//! pipewire-pulse number streams in order). An id naming any stream of a group
 //! addresses the whole group, and a volume or mute that differs from the one
 //! shown is set on every stream of it (see [`StreamGroup::changes`]).
 //!
