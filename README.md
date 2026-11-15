@@ -296,8 +296,8 @@ serve_details = false
 Then quit from the tray menu and start the app again; the settings are read
 at startup. With `serve_icons = false` sessions carry no `iconId` and every
 icon request is answered with `notFound`. With `serve_details = false` the
-app does not read stream titles at all. They have no control in the Settings page, and saving settings
-there keeps them.
+app does not read stream titles at all. These two settings have no control
+in the Settings page, and saving settings there keeps them.
 
 ## Try it with a phone
 

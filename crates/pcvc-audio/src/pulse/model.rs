@@ -972,6 +972,12 @@ mod tests {
                 },
             ]
         );
+        for s in &d.sessions {
+            assert_eq!(
+                parse_session_id(&s.id).map(|(sink, _)| sink),
+                Some("speakers")
+            );
+        }
     }
 
     #[test]

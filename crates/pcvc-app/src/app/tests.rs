@@ -551,7 +551,7 @@ fn use_detail_device(h: &mut Harness) {
         tab("firefox-4", "Radio Paradise - Main Mix", 30.0),
         tab("firefox-5", "Radio Paradise - Main Mix", 30.0),
     ];
-    h.backend.add_device(device).unwrap();
+    h.backend.add_device(device);
     h.refresh_audio();
 }
 
@@ -585,7 +585,7 @@ fn mini_harness() -> Harness {
     let mut h = Harness::new();
     let mut device = h.backend.snapshot().unwrap().default_device.unwrap();
     device.sessions[2].muted = true;
-    h.backend.add_device(device).unwrap();
+    h.backend.add_device(device);
     add_session(&mut h, "long", LONG_NAME, 31.0);
     h
 }

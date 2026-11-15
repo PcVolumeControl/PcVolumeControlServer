@@ -6,12 +6,15 @@ use std::time::Duration;
 
 use pcvc_audio::{AudioBackend, MockBackend, Session};
 use pcvc_protocol::{FullState, encode_full_state};
-use pcvc_server::{IconId, IconImage, IconProvider, ServerConfig, ServerHandle, to_full_state};
+use pcvc_server::{IconProvider, ServerConfig, ServerHandle, to_full_state};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::broadcast;
 use tokio::time::{Instant, timeout};
+
+mod common;
+use common::NoIcons;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SPEAKERS: &str = "0f4090a9-dee2-4563-ba29-0ad6b93d9e22";
@@ -38,23 +41,6 @@ async fn start_with(
     }
     let server = ServerHandle::start(backend, config).await.unwrap();
     (mock, server)
-}
-
-/// A provider that knows no icons.
-struct NoIcons(broadcast::Sender<()>);
-
-impl IconProvider for NoIcons {
-    fn icon_id(&self, _session: &Session) -> Option<IconId> {
-        None
-    }
-
-    fn icon_png(&self, _id: &IconId, _size: u32) -> Option<IconImage> {
-        None
-    }
-
-    fn subscribe(&self) -> broadcast::Receiver<()> {
-        self.0.subscribe()
-    }
 }
 
 struct Client {

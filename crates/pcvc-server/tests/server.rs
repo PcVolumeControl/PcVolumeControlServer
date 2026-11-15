@@ -217,7 +217,7 @@ async fn unchanged_state_is_not_resent() {
     // Replacing a device with an identical copy emits events but changes
     // nothing visible.
     let device = mock.snapshot().unwrap().default_device.unwrap();
-    mock.add_device(device).unwrap();
+    mock.add_device(device);
     tokio::time::sleep(Duration::from_millis(100)).await;
     mock.set_master(Some(1.0), None).unwrap();
     let next = client.read_state().await;
@@ -454,8 +454,7 @@ async fn no_default_device_sends_nothing_until_one_appears() {
         "unexpected {line}"
     );
 
-    mock.add_device(pcvc_audio::Device::new("dev", "Dev", 40.0))
-        .unwrap();
+    mock.add_device(pcvc_audio::Device::new("dev", "Dev", 40.0));
     let state = client.read_state().await;
     assert_eq!(state.default_device.device_id, "dev");
     server.stop().await;

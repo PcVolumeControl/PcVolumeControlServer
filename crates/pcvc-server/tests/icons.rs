@@ -322,7 +322,7 @@ async fn without_a_provider_there_are_no_icon_ids() {
 #[tokio::test]
 async fn provider_adds_icon_ids() {
     let provider = TestProvider::new(&DEMO_NAMES);
-    let (_mock, server) = start(Some(provider)).await;
+    let (mock, server) = start(Some(provider)).await;
     let mut client = Client::connect(server.local_addr()).await;
     let line = client.read_line().await;
     assert!(!line.contains("features"), "{line}");
@@ -333,6 +333,14 @@ async fn provider_adds_icon_ids() {
             Some(TestProvider::id_for(name).as_str())
         );
     }
+
+    // Apart from the icon ids, the state is the one served without a provider.
+    let mut stripped = state.clone();
+    for session in &mut stripped.default_device.sessions {
+        session.icon_id = None;
+    }
+    let plain = to_full_state(&mock.snapshot().unwrap()).unwrap();
+    assert_eq!(encode_full_state(&stripped), encode_full_state(&plain));
     server.stop().await;
 }
 

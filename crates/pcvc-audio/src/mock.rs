@@ -88,14 +88,20 @@ impl MockBackend {
         Self::new(devices, Some(SPEAKERS)).expect("demo data is valid")
     }
 
-    /// The session id the mock uses for `app` on `device_id`.
+    /// The session id the mock uses for `app` on `device_id`. It does not
+    /// contain the device id, so clients developed against the mock cannot
+    /// come to rely on that.
     pub fn session_id(device_id: &str, app: &str) -> String {
-        format!("{device_id}|mock/{app}")
+        // FNV-1a: stable across runs, unlike `DefaultHasher`.
+        let hash = device_id.bytes().fold(0x811c_9dc5_u32, |h, b| {
+            (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+        });
+        format!("mock-{hash:08x}-{app}")
     }
 
     /// Adds a device, or replaces the device with the same id in place. If
     /// there is no default device it becomes the default.
-    pub fn add_device(&self, mut device: Device) -> Result<(), AudioError> {
+    pub fn add_device(&self, mut device: Device) {
         normalize(&mut device);
         let default_changed = {
             let mut state = self.lock();
@@ -113,7 +119,6 @@ impl MockBackend {
         if default_changed {
             self.emit(AudioEvent::DefaultDeviceChanged);
         }
-        Ok(())
     }
 
     /// Removes a device. Removing the default device makes the first remaining
@@ -168,8 +173,8 @@ impl MockBackend {
         Ok(())
     }
 
-    /// Sets the detail of a session on any device, leaving the rest of it as
-    /// it is.
+    /// Sets the detail of a session on every device that holds it, leaving
+    /// the rest of it as it is.
     pub fn set_session_detail(
         &self,
         session_id: &str,
@@ -177,15 +182,21 @@ impl MockBackend {
     ) -> Result<(), AudioError> {
         let changed = {
             let mut state = self.lock();
-            let session = state
+            let detail = detail.map(str::to_owned);
+            let (mut found, mut changed) = (false, false);
+            for session in state
                 .devices
                 .iter_mut()
                 .flat_map(|d| d.sessions.iter_mut())
-                .find(|s| s.id == session_id)
-                .ok_or_else(|| AudioError::UnknownSession(session_id.to_owned()))?;
-            let detail = detail.map(str::to_owned);
-            let changed = session.detail != detail;
-            session.detail = detail;
+                .filter(|s| s.id == session_id)
+            {
+                found = true;
+                changed |= session.detail != detail;
+                session.detail.clone_from(&detail);
+            }
+            if !found {
+                return Err(AudioError::UnknownSession(session_id.to_owned()));
+            }
             changed
         };
         if changed {
@@ -493,6 +504,26 @@ mod tests {
             .map(|s| (s.id, s.volume, s.muted))
             .collect();
         assert_eq!(ids, [("s".into(), 1.0, false), ("t".into(), 3.0, true)]);
+
+        let speakers = MockBackend::session_id("speakers", "vlc");
+        assert!(!speakers.contains("speakers"), "{speakers}");
+        assert_ne!(speakers, MockBackend::session_id("headset", "vlc"));
+    }
+
+    #[test]
+    fn a_detail_reaches_every_device_with_the_id() {
+        let mock = MockBackend::new(
+            vec![
+                Device::new("a", "A", 1.0).with_session(Session::new("s", "S", 1.0)),
+                Device::new("b", "B", 1.0).with_session(Session::new("s", "S", 1.0)),
+            ],
+            Some("b"),
+        )
+        .unwrap();
+        mock.set_session_detail("s", Some("x")).unwrap();
+        for device in mock.lock().devices.iter() {
+            assert_eq!(device.sessions[0].detail.as_deref(), Some("x"));
+        }
     }
 
     #[test]
@@ -535,8 +566,7 @@ mod tests {
         let mock = MockBackend::demo();
         let mut rx = mock.subscribe();
         let speakers = default_device(&mock).id;
-        mock.add_device(Device::new(&speakers, "Renamed", 150.0))
-            .unwrap();
+        mock.add_device(Device::new(&speakers, "Renamed", 150.0));
         let state = mock.snapshot().unwrap();
         assert_eq!(state.devices[0].name, "Renamed");
         assert_eq!(state.default_device.unwrap().volume, 100.0);
@@ -573,7 +603,7 @@ mod tests {
             mock.set_master(Some(1.0), None),
             Err(AudioError::NoDefaultDevice)
         ));
-        mock.add_device(Device::new("b", "B", 20.0)).unwrap();
+        mock.add_device(Device::new("b", "B", 20.0));
         assert_eq!(default_device(&mock).id, "b");
     }
 }

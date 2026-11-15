@@ -6,30 +6,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use pcvc_audio::{AudioBackend, MockBackend, Session};
-use pcvc_server::{
-    IconId, IconImage, IconProvider, MDNS_SERVICE_TYPE, MdnsStatus, ServerConfig, ServerHandle,
-};
+use pcvc_audio::{AudioBackend, MockBackend};
+use pcvc_server::{MDNS_SERVICE_TYPE, MdnsStatus, ServerConfig, ServerHandle};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
+mod common;
+use common::NoIcons;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
-
-struct NoIcons(broadcast::Sender<()>);
-
-impl IconProvider for NoIcons {
-    fn icon_id(&self, _session: &Session) -> Option<IconId> {
-        None
-    }
-
-    fn icon_png(&self, _id: &IconId, _size: u32) -> Option<IconImage> {
-        None
-    }
-
-    fn subscribe(&self) -> broadcast::Receiver<()> {
-        self.0.subscribe()
-    }
-}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires multicast networking"]
