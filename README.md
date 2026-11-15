@@ -346,8 +346,11 @@ current distributions).
 
 Sinks are the devices, the default sink is the default device, and the
 application streams playing to it are its sessions (event sounds and
-streams created by server modules are left out). Changing the default device
-also moves the streams on the old default to the new one, as on Windows.
+streams created by server modules are left out). Streams of one application
+that look the same (same name and title, as when a browser tab plays a video
+and runs Web Audio) are shown as one session, and setting it sets them all.
+Changing the default device also moves the streams on the old default to the
+new one, as on Windows.
 
 To control this machine from a phone before the desktop app is ready:
 
@@ -359,7 +362,7 @@ It takes `--port N`, `--no-mdns` and `--no-detail`. `cargo run -p pcvc-audio
 --example pulse_dump` prints what the backend sees and the events it emits.
 
 The tests against the running sound server are ignored by default. They only
-change the volume of a silent stream and a temporary null sink they create,
+change the volume of silent streams and a temporary null sink they create,
 but they make the null sink the default for up to 1.5 seconds (a watchdog
 thread restores the default after that), which moves the streams on the
 real default sink there and back (see

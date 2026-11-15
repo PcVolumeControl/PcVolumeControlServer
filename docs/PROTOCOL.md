@@ -377,7 +377,8 @@ What the host sends:
   dropped: `Playback`, `Playback Stream`, `Audio Stream`, `AudioStream`,
   `AudioCallbackDriver`, `ALSA Playback`, `Simple DirectMedia Layer` (all
   ignoring case and extra whitespace) and `cpal-playback-` followed by
-  digits.
+  digits. Streams of one application instance with the same name and
+  detail are one session, with the id of its oldest stream.
 - **Windows**: none. Core Audio gives a session nothing beyond its display
   name, which is already the `name`, and a browser plays all its tabs
   through one session.
