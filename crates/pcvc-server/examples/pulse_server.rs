@@ -3,8 +3,11 @@
 //! `pipewire-pulse`).
 //!
 //! ```text
-//! cargo run -p pcvc-server --example pulse_server -- [--port N] [--no-mdns]
+//! cargo run -p pcvc-server --example pulse_server -- [--port N] [--no-mdns] [--no-detail]
 //! ```
+//!
+//! Sessions carry their stream's title as `detail` (the v8 `detail`
+//! feature) unless `--no-detail` is given.
 //!
 //! Logging follows `RUST_LOG` (default `info`).
 
@@ -19,8 +22,8 @@ async fn main() -> std::process::ExitCode {
 
     use pcvc_audio::PulseBackend;
 
-    let config = match common::init("pulse_server", &[]) {
-        Ok((config, _)) => config,
+    let config = match common::init("pulse_server", &["--no-detail"]) {
+        Ok((config, flags)) => config.with_details(!flags.contains(&"--no-detail")),
         Err(code) => return code,
     };
     // The constructor blocks briefly while it connects.

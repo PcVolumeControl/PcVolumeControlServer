@@ -22,6 +22,7 @@ fn main() -> std::process::ExitCode {
                 "name": s.name,
                 "volume": s.volume,
                 "muted": s.muted,
+                "detail": s.detail,
             })
         };
         let value = json!({

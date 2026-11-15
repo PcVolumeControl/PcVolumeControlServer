@@ -6,7 +6,7 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 use libpulse_binding::volume::Volume;
-use pcvc_protocol::clamp_volume;
+use pcvc_protocol::{clamp_volume, session_detail};
 
 use crate::{AppHint, AudioEvent, AudioState, Device, DeviceInfo, Session};
 
@@ -22,6 +22,19 @@ const ECHO_TOLERANCE: f32 = 0.5;
 
 /// Name used when a stream has no usable name property.
 pub(super) const UNKNOWN_NAME: &str = "Unknown";
+
+/// Stream names, compared in lower case, that libraries use when the
+/// application gives none. `audiostream` and `audiocallbackdriver` are
+/// Firefox's internal names. `cpal-playback-<pid>` is matched separately.
+const GENERIC_MEDIA_NAMES: [&str; 7] = [
+    "playback",
+    "playback stream",
+    "audio stream",
+    "audiostream",
+    "audiocallbackdriver",
+    "alsa playback",
+    "simple directmedia layer",
+];
 
 /// What one introspection round returned.
 #[derive(Debug, Clone, Default)]
@@ -106,6 +119,7 @@ pub(super) struct RawSinkInput {
     pub muted: bool,
     pub app: AppProps,
     pub media_name: Option<String>,
+    pub media_title: Option<String>,
     pub media_role: Option<String>,
 }
 
@@ -147,6 +161,18 @@ impl RawSinkInput {
         .to_owned()
     }
 
+    /// What tells this stream apart from others of its application: the
+    /// first of `media.name` and `media.title` that is not blank, not
+    /// `name` and not a generic stream name. Firefox, for one, names each
+    /// stream after its tab.
+    pub fn detail(&self, name: &str) -> Option<String> {
+        [&self.media_name, &self.media_title]
+            .into_iter()
+            .flatten()
+            .filter_map(|raw| session_detail(raw, name))
+            .find(|detail| !is_generic_media_name(detail))
+    }
+
     /// The stream's application properties, each missing one taken from its
     /// client.
     pub fn app_hint(&self, client: Option<&AppProps>) -> AppHint {
@@ -174,6 +200,14 @@ impl RawSinkInput {
             100.0
         }
     }
+}
+
+fn is_generic_media_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    GENERIC_MEDIA_NAMES.contains(&name.as_str())
+        || name
+            .strip_prefix("cpal-playback-")
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Average of the channel volumes as a percentage of `PA_VOLUME_NORM`,
@@ -280,9 +314,11 @@ impl RawState {
                     .sessions_on(sink)
                     .map(|i| {
                         let client = i.client.and_then(|c| self.clients.get(&c));
+                        let name = i.display_name(client);
                         Session {
                             id: session_id(&id, i.index),
-                            name: i.display_name(client),
+                            detail: i.detail(&name),
+                            name,
                             volume: i.percent(),
                             muted: i.muted,
                             app: i.app_hint(client),
@@ -508,6 +544,98 @@ mod tests {
         assert_eq!(i.display_name(Some(&client)), "Firefox");
         i.app.name = Some("Caf\u{e9} \u{fffd}".into());
         assert_eq!(i.display_name(None), "Caf\u{e9} \u{fffd}");
+    }
+
+    #[test]
+    fn detail_skips_blank_generic_and_name() {
+        let firefox = |media_name: Option<&str>, media_title: Option<&str>| RawSinkInput {
+            media_name: media_name.map(str::to_owned),
+            media_title: media_title.map(str::to_owned),
+            ..input(1, 1, "Firefox")
+        };
+        let detail = |i: &RawSinkInput| i.detail(&i.display_name(None));
+
+        let tab = "The Best Reactions in Always Sunny - YouTube";
+        assert_eq!(detail(&firefox(Some(tab), None)).as_deref(), Some(tab));
+        assert_eq!(
+            detail(&firefox(Some("Two\nlines "), None)).as_deref(),
+            Some("Two lines")
+        );
+        assert_eq!(detail(&firefox(None, None)), None);
+        assert_eq!(detail(&firefox(Some("  "), None)), None);
+        assert_eq!(detail(&firefox(Some("FIREFOX"), None)), None);
+        assert_eq!(
+            detail(&firefox(Some("Firefox"), Some("Song - Artist"))).as_deref(),
+            Some("Song - Artist")
+        );
+        assert_eq!(detail(&firefox(Some("AudioStream"), Some("Firefox"))), None);
+        for generic in [
+            "Playback",
+            "playback",
+            "Playback Stream",
+            "AudioStream",
+            "audio stream",
+            "AudioCallbackDriver",
+            "ALSA Playback",
+            "Simple DirectMedia Layer",
+            "cpal-playback-660845",
+            " Audio\tStream ",
+        ] {
+            assert_eq!(detail(&firefox(Some(generic), None)), None, "{generic:?}");
+        }
+        for specific in ["cpal-playback-", "cpal-playback-x1", "Playback 2", "Audio"] {
+            assert_eq!(
+                detail(&firefox(Some(specific), None)).as_deref(),
+                Some(specific),
+                "{specific:?}"
+            );
+        }
+
+        // A name taken from `media.name` is not repeated as the detail.
+        let unnamed = RawSinkInput {
+            app: AppProps::default(),
+            media_name: Some("Lecture 3.mkv".into()),
+            ..input(2, 1, "")
+        };
+        assert_eq!(unnamed.display_name(None), "Lecture 3.mkv");
+        assert_eq!(detail(&unnamed), None);
+    }
+
+    #[test]
+    fn sessions_carry_details_and_their_changes_are_reported() {
+        let tab = |index: u32, title: &str| RawSinkInput {
+            media_name: Some(title.to_owned()),
+            ..input(index, 1, "Firefox")
+        };
+        let mut r = raw();
+        r.inputs.push(tab(20, "Inbox - Mail"));
+        r.inputs.push(tab(21, "Radio - Player"));
+        let base = r.to_audio_state();
+        let details: Vec<_> = base
+            .default_device
+            .as_ref()
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| (s.name.as_str(), s.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            details,
+            [
+                ("Firefox", None),
+                ("Playback", None),
+                ("Firefox", Some("Inbox - Mail")),
+                ("Firefox", Some("Radio - Player")),
+            ]
+        );
+
+        r.input_mut(20).unwrap().media_name = Some("Inbox (1) - Mail".into());
+        assert_eq!(
+            diff(&base, &r.to_audio_state()),
+            vec![AudioEvent::SessionChanged {
+                id: "speakers|20".into()
+            }]
+        );
     }
 
     fn props(pairs: &[(&str, &str)]) -> AppProps {

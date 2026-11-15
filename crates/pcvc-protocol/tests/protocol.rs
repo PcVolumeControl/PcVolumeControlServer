@@ -239,6 +239,7 @@ fn current() -> FullState {
                     volume: 80.0,
                     muted: false,
                     icon_id: None,
+                    detail: None,
                 },
                 SessionState {
                     name: "Chrome".into(),
@@ -246,6 +247,7 @@ fn current() -> FullState {
                     volume: 35.0,
                     muted: false,
                     icon_id: None,
+                    detail: None,
                 },
             ],
         },

@@ -9,7 +9,8 @@
 //!
 //! With an [`IconProvider`] in the [`ServerConfig`], the server also speaks
 //! the v8 icon extension: it advertises the `icons` feature, tags sessions
-//! with icon ids and answers icon requests. Without one, its output is plain
+//! with icon ids and answers icon requests. With [`ServerConfig::details`]
+//! it also sends the v8 session details. Without either, its output is plain
 //! v7.
 
 mod broadcaster;
@@ -55,11 +56,14 @@ pub struct ServerConfig {
     pub coalesce: Duration,
     /// Serves app icons (the v8 `icons` feature) when set.
     pub icons: Option<Arc<dyn IconProvider>>,
+    /// Sends each session's detail, if the backend has one (the v8 `detail`
+    /// feature).
+    pub details: bool,
 }
 
 impl ServerConfig {
-    /// A config with mDNS enabled, the default coalescing window and no icon
-    /// provider.
+    /// A config with mDNS enabled, the default coalescing window and no
+    /// extensions.
     pub fn new(bind: IpAddr, port: u16) -> Self {
         Self {
             bind,
@@ -67,6 +71,7 @@ impl ServerConfig {
             mdns: true,
             coalesce: DEFAULT_COALESCE,
             icons: None,
+            details: false,
         }
     }
 
@@ -79,6 +84,11 @@ impl ServerConfig {
         self.icons = Some(provider);
         self
     }
+
+    pub fn with_details(mut self, enabled: bool) -> Self {
+        self.details = enabled;
+        self
+    }
 }
 
 impl fmt::Debug for ServerConfig {
@@ -89,6 +99,7 @@ impl fmt::Debug for ServerConfig {
             .field("mdns", &self.mdns)
             .field("coalesce", &self.coalesce)
             .field("icons", &self.icons.is_some())
+            .field("details", &self.details)
             .finish()
     }
 }
@@ -175,6 +186,7 @@ struct Frame {
 struct Shared {
     backend: Arc<dyn AudioBackend>,
     icons: Option<Arc<dyn IconProvider>>,
+    details: bool,
     /// Permits for concurrent `IconProvider::icon_png` calls.
     icon_renders: Arc<tokio::sync::Semaphore>,
     /// `None` while there is no default device. Each client's writer follows
@@ -199,7 +211,7 @@ impl Shared {
 
     /// Protocol extensions this server advertises.
     fn features(&self) -> Vec<&'static str> {
-        state::features(self.icons.is_some())
+        state::features(self.icons.is_some(), self.details)
     }
 }
 
@@ -229,6 +241,7 @@ impl ServerHandle {
         let shared = Arc::new(Shared {
             backend,
             icons: config.icons,
+            details: config.details,
             icon_renders: icon_replies::render_limit(),
             frames: watch::Sender::new(None),
             state: watch::Sender::new(AudioState::default()),
@@ -239,7 +252,9 @@ impl ServerHandle {
             next_client_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
         });
-        let initial_ok = broadcaster::rebuild(&shared, true).await;
+        let mut last_sent = None;
+        let initial_ok = broadcaster::rebuild(&shared, true, &mut last_sent).await
+            != broadcaster::Rebuilt::Failed;
 
         let tracker = TaskTracker::new();
         tracker.spawn(broadcaster::run(
@@ -248,6 +263,7 @@ impl ServerHandle {
             icon_events,
             config.coalesce,
             initial_ok,
+            last_sent,
         ));
         tracker.spawn(accept_loop(Arc::clone(&shared), listener, tracker.clone()));
         if config.mdns {

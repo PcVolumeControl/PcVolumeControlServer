@@ -2,39 +2,40 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use pcvc_audio::{AudioState, Session};
 use pcvc_protocol::{
-    APPLICATION_VERSION, DeviceState, FEATURE_ICONS, FullState, IconId, PROTOCOL_VERSION,
-    SessionState, clamp_volume,
+    APPLICATION_VERSION, DeviceState, FEATURE_DETAIL, FEATURE_ICONS, FullState, IconId,
+    PROTOCOL_VERSION, SessionState, clamp_volume, session_detail,
 };
 
 use crate::IconProvider;
 
-/// Protocol extensions a server with or without an icon provider advertises,
-/// in the full state and over mDNS.
-pub(crate) fn features(icons: bool) -> Vec<&'static str> {
-    if icons {
-        vec![FEATURE_ICONS]
-    } else {
-        Vec::new()
-    }
+/// Protocol extensions a server advertises, in the full state and over
+/// mDNS, given whether it has an icon provider and sends session details.
+pub(crate) fn features(icons: bool, details: bool) -> Vec<&'static str> {
+    [(icons, FEATURE_ICONS), (details, FEATURE_DETAIL)]
+        .into_iter()
+        .filter_map(|(on, feature)| on.then_some(feature))
+        .collect()
 }
 
 /// Converts a backend snapshot to the plain v7 wire full state. `None` when
 /// there is no default device, since the protocol has no way to express that.
 pub fn to_full_state(state: &AudioState) -> Option<FullState> {
-    to_full_state_with_icons(state, None)
+    to_full_state_with(state, None, false)
 }
 
-/// [`to_full_state`] plus, with a provider, the icon extension: the `icons`
-/// feature and each session's icon id, if the provider knows it.
-pub(crate) fn to_full_state_with_icons(
+/// [`to_full_state`] plus the extensions: with a provider, the `icons`
+/// feature and each session's icon id if the provider knows it; with
+/// `details`, the `detail` feature and each session's detail.
+pub(crate) fn to_full_state_with(
     state: &AudioState,
     icons: Option<&dyn IconProvider>,
+    details: bool,
 ) -> Option<FullState> {
     let device = state.default_device.as_ref()?;
     Some(FullState {
         protocol_version: PROTOCOL_VERSION,
         application_version: APPLICATION_VERSION.to_owned(),
-        features: features(icons.is_some())
+        features: features(icons.is_some(), details)
             .into_iter()
             .map(str::to_owned)
             .collect(),
@@ -57,6 +58,11 @@ pub(crate) fn to_full_state_with_icons(
                     volume: clamp_volume(s.volume),
                     muted: s.muted,
                     icon_id: icons.and_then(|icons| icon_id(icons, s)),
+                    detail: s
+                        .detail
+                        .as_deref()
+                        .filter(|_| details)
+                        .and_then(|detail| session_detail(detail, &s.name)),
                 })
                 .collect(),
         },
@@ -134,7 +140,7 @@ mod tests {
             ),
         };
         let provider = Provider(tokio::sync::broadcast::Sender::new(1));
-        let full = to_full_state_with_icons(&state, Some(&provider)).unwrap();
+        let full = to_full_state_with(&state, Some(&provider), false).unwrap();
         assert_eq!(full.features, [FEATURE_ICONS]);
         let ids: Vec<_> = full
             .default_device
@@ -153,6 +159,38 @@ mod tests {
                 .iter()
                 .all(|s| s.icon_id.is_none())
         );
+    }
+
+    #[test]
+    fn details_are_sanitised_and_only_sent_when_enabled() {
+        let state = AudioState {
+            devices: Vec::new(),
+            default_device: Some(
+                Device::new("a", "A", 50.0)
+                    .with_session(Session::new("a|1", "Firefox", 1.0).with_detail(" Tab\none "))
+                    .with_session(Session::new("a|2", "Firefox", 1.0).with_detail("firefox"))
+                    .with_session(Session::new("a|3", "Firefox", 1.0)),
+            ),
+        };
+        let details = |full: &FullState| -> Vec<Option<String>> {
+            let sessions = &full.default_device.sessions;
+            sessions.iter().map(|s| s.detail.clone()).collect()
+        };
+        let full = to_full_state_with(&state, None, true).unwrap();
+        assert_eq!(full.features, [FEATURE_DETAIL]);
+        assert_eq!(details(&full), [Some("Tab one".to_owned()), None, None]);
+
+        let plain = to_full_state(&state).unwrap();
+        assert!(plain.features.is_empty());
+        assert_eq!(details(&plain), [None, None, None]);
+    }
+
+    #[test]
+    fn features_are_listed_in_a_fixed_order() {
+        assert!(features(false, false).is_empty());
+        assert_eq!(features(true, false), [FEATURE_ICONS]);
+        assert_eq!(features(false, true), [FEATURE_DETAIL]);
+        assert_eq!(features(true, true), [FEATURE_ICONS, FEATURE_DETAIL]);
     }
 
     #[test]

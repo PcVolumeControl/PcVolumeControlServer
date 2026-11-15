@@ -107,7 +107,9 @@ impl Default for Config {
 
 impl Config {
     pub fn server_config(&self) -> ServerConfig {
-        ServerConfig::new(self.bind, self.port).with_mdns(self.mdns)
+        ServerConfig::new(self.bind, self.port)
+            .with_mdns(self.mdns)
+            .with_details(true)
     }
 
     /// Whether going from `self` to `other` needs a server restart.

@@ -76,21 +76,31 @@ pub struct Session {
     /// Percent, 0.0 to 100.0.
     pub volume: f32,
     pub muted: bool,
+    /// Tells this session apart from others of the same application, such as
+    /// a browser tab's title. The server sends it as the protocol's
+    /// `detail`, after [`pcvc_protocol::session_detail`].
+    pub detail: Option<String>,
     /// Who is playing, for presenting the session locally (icons). Not part
     /// of the protocol.
     pub app: AppHint,
 }
 
 impl Session {
-    /// An unmuted session with no application hints.
+    /// An unmuted session with no detail and no application hints.
     pub fn new(id: impl Into<String>, name: impl Into<String>, volume: f32) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             volume,
             muted: false,
+            detail: None,
             app: AppHint::default(),
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
     }
 
     pub fn with_app(mut self, app: AppHint) -> Self {

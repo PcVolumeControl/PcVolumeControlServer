@@ -281,6 +281,7 @@ extern "C" fn sink_input_cb(
                 muted: (&raw const (*p).mute).read() != 0,
                 app: AppProps::read(|key| prop(props, key)),
                 media_name: prop(props, c"media.name"),
+                media_title: prop(props, c"media.title"),
                 media_role: prop(props, c"media.role"),
             })
         });
