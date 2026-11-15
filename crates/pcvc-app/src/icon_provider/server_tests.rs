@@ -27,10 +27,14 @@ fn backend() -> Arc<dyn AudioBackend> {
     let device = Device::new("dev", "Speakers", 50.0)
         .with_session(session("Alpha", "vector"))
         .with_session(session("Beta", "raster"))
-        .with_session(Session::new("dev|Gamma", "Gamma", 50.0).with_app(AppHint {
-            process_binary: Some(Arc::from("gamma")),
-            ..AppHint::default()
-        }));
+        .with_session(
+            Session::new("dev|Gamma", "Gamma", 50.0)
+                .with_app(AppHint {
+                    process_binary: Some(Arc::from("gamma")),
+                    ..AppHint::default()
+                })
+                .with_detail("Gamma tab"),
+        );
     Arc::new(MockBackend::new(vec![device], Some("dev")).unwrap())
 }
 
@@ -157,7 +161,7 @@ async fn phone_clients_get_icons() {
 /// start and to restarts.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_server_start_serves_icons() {
+async fn every_server_start_serves_icons_and_details() {
     use iced::futures::StreamExt;
 
     use crate::inbox::{self, Inbound};
@@ -165,7 +169,8 @@ async fn every_server_start_serves_icons() {
 
     for (icons, details, expected) in [
         (icons(), false, vec!["icons"]),
-        (icons(), true, vec!["icons", "detail"]),
+        (icons(), true, vec!["icons"]),
+        (None, true, vec![]),
         (None, false, vec![]),
     ] {
         let (inbox, receiver) = inbox::channel();
@@ -186,6 +191,13 @@ async fn every_server_start_serves_icons() {
             if expected.is_empty() {
                 assert!(!line.contains("features") && !line.contains("iconId"));
             }
+            let gamma = state
+                .default_device
+                .sessions
+                .iter()
+                .find(|s| s.name == "Gamma");
+            let detail = details.then_some("Gamma tab");
+            assert_eq!(gamma.unwrap().detail.as_deref(), detail);
         }
         controller.shutdown();
     }

@@ -1,4 +1,4 @@
-//! The v8 session detail extension.
+//! The v8 session details: an optional session member with no feature name.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -6,26 +6,55 @@ use std::time::Duration;
 
 use pcvc_audio::{AudioBackend, MockBackend, Session};
 use pcvc_protocol::{FullState, encode_full_state};
-use pcvc_server::{ServerConfig, ServerHandle, to_full_state};
+use pcvc_server::{IconId, IconImage, IconProvider, ServerConfig, ServerHandle, to_full_state};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::broadcast;
 use tokio::time::{Instant, timeout};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const SPEAKERS: &str = "0f4090a9-dee2-4563-ba29-0ad6b93d9e22";
 
 async fn start(details: bool, sessions: &[Session]) -> (Arc<MockBackend>, ServerHandle) {
+    start_with(None, details, sessions).await
+}
+
+async fn start_with(
+    icons: Option<Arc<dyn IconProvider>>,
+    details: bool,
+    sessions: &[Session],
+) -> (Arc<MockBackend>, ServerHandle) {
     let mock = Arc::new(MockBackend::demo());
     for session in sessions {
         mock.add_session(SPEAKERS, session.clone()).unwrap();
     }
     let backend: Arc<dyn AudioBackend> = mock.clone();
-    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+    let mut config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
         .with_mdns(false)
         .with_details(details);
+    if let Some(icons) = icons {
+        config = config.with_icons(icons);
+    }
     let server = ServerHandle::start(backend, config).await.unwrap();
     (mock, server)
+}
+
+/// A provider that knows no icons.
+struct NoIcons(broadcast::Sender<()>);
+
+impl IconProvider for NoIcons {
+    fn icon_id(&self, _session: &Session) -> Option<IconId> {
+        None
+    }
+
+    fn icon_png(&self, _id: &IconId, _size: u32) -> Option<IconImage> {
+        None
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<()> {
+        self.0.subscribe()
+    }
 }
 
 struct Client {
@@ -71,8 +100,9 @@ fn details(state: &FullState) -> Vec<(&str, Option<&str>)> {
 }
 
 #[tokio::test]
-async fn details_are_sent_only_when_enabled() {
+async fn details_are_sent_only_when_enabled_and_are_not_a_feature() {
     let tabs = [tab("tab", "Inbox - Mail"), tab("same", " firefox ")];
+    // Without an icon provider and with details off, the line is plain v7.
     let (mock, plain) = start(false, &tabs).await;
     let mut client = Client::connect(plain.local_addr()).await;
     let line = client.read_line().await;
@@ -88,13 +118,30 @@ async fn details_are_sent_only_when_enabled() {
 
     let (_mock, server) = start(true, &tabs).await;
     let mut client = Client::connect(server.local_addr()).await;
-    let state = client.read_state().await;
-    assert_eq!(state.features, ["detail"]);
+    let line = client.read_line().await;
+    assert!(!line.contains("features"), "{line}");
+    let state: FullState = serde_json::from_str(&line).unwrap();
     assert_eq!(
         details(&state)[4..],
         [("Firefox", Some("Inbox - Mail")), ("Firefox", None)]
     );
     server.stop().await;
+}
+
+#[tokio::test]
+async fn features_list_icons_whether_or_not_details_are_sent() {
+    for details_on in [false, true] {
+        let icons: Arc<dyn IconProvider> = Arc::new(NoIcons(broadcast::Sender::new(1)));
+        let (_mock, server) = start_with(Some(icons), details_on, &[tab("tab", "Inbox")]).await;
+        let mut client = Client::connect(server.local_addr()).await;
+        let state = client.read_state().await;
+        assert_eq!(state.features, ["icons"]);
+        let id = MockBackend::session_id(SPEAKERS, "tab");
+        let tab = state.default_device.sessions.iter().find(|s| s.id == id);
+        let detail = details_on.then_some("Inbox");
+        assert_eq!(tab.unwrap().detail.as_deref(), detail);
+        server.stop().await;
+    }
 }
 
 #[tokio::test]

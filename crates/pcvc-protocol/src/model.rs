@@ -11,8 +11,7 @@ use crate::{IconId, IconRequest};
 pub struct FullState {
     pub protocol_version: u32,
     pub application_version: String,
-    /// Extensions the server supports, such as [`crate::FEATURE_ICONS`] and
-    /// [`crate::FEATURE_DETAIL`].
+    /// Features the server supports, such as [`crate::FEATURE_ICONS`].
     /// Omitted from the wire when empty, which keeps the line identical to
     /// plain v7.
     #[serde(
@@ -55,8 +54,9 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_id: Option<IconId>,
     /// Tells apart sessions of the same application, such as a browser tab's
-    /// title; see [`crate::session_detail`]. Not an identity: it may change
-    /// at any time.
+    /// title; see [`crate::session_detail`]. Optional, with no feature name:
+    /// omitted when there is nothing useful to say or the server is set not
+    /// to send details. Not an identity: it may change at any time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

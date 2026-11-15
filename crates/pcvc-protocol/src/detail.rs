@@ -1,9 +1,5 @@
-//! The session detail extension: a short secondary label that tells apart
-//! sessions of the same application.
-
-/// Feature name advertised in [`crate::FullState::features`] and in the mDNS
-/// `features` TXT record when sessions may carry a detail.
-pub const FEATURE_DETAIL: &str = "detail";
+//! Session details: a short secondary label that tells apart sessions of the
+//! same application.
 
 /// Longest detail sent, in characters (Unicode scalar values).
 pub const DETAIL_MAX_CHARS: usize = 120;

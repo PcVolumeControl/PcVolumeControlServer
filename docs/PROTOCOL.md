@@ -5,8 +5,9 @@ host ("server", running on the PC) and the phone apps ("clients"). It
 supersedes the "Client to Server Messages" section of the old
 `PcVolumeControlWindows` README, whose examples use a stale `version` field.
 
-"Protocol v8" is v7 plus optional, additive extensions (currently: app
-icons and session details). It does not change the version number on the wire: see
+"Protocol v8" is v7 plus optional, additive extensions: app icons, which a
+server announces as a feature, and session details, an optional member of
+sessions. It does not change the version number on the wire: see
 [Protocol v8 extensions](#protocol-v8-extensions). Everything before that
 section is v7 as the shipped apps speak it; the few places the extensions
 touch are marked **v8**.
@@ -79,8 +80,9 @@ state has not actually changed.
 All fields are always present. Clients must ignore fields they do not know.
 The server sends nothing while there is no default playback device.
 
-**v8:** a server with extensions adds a top-level `features` array and
-optional `iconId` and `detail` members to sessions; see
+**v8:** sessions may carry an optional `detail` member, and a server that
+serves icons adds a top-level `features` array and an optional `iconId`
+member to sessions; see
 [Protocol v8 extensions](#protocol-v8-extensions).
 
 ### Ids
@@ -164,7 +166,7 @@ While the listener is running the server advertises:
 | Port | the TCP listening port |
 | TXT `version` | `1` |
 | TXT `protocol` | `7` |
-| TXT `features` | **v8**, only when non-empty: comma-separated feature names, e.g. `icons,detail` |
+| TXT `features` | **v8**, only when non-empty: comma-separated feature names, e.g. `icons` |
 
 The advertisement is withdrawn when the server stops. The Android client
 ignores services whose `protocol` TXT record is not its own protocol version;
@@ -183,11 +185,15 @@ server, both keep working.
   from any server whose full state has another version and ignores mDNS
   adverts with another `protocol`; the shipped iOS app and the old C# server
   check the version too. Raising the number would cut them off.
-- Support is detected through feature names instead (see below). Clients must
-  ignore feature names they do not know.
-- A server with no extension enabled sends exactly the v7 bytes: no
-  `features` key, no `iconId` or `detail` keys, and no `features` TXT
-  record.
+- Behaviour a client must detect before relying on it, such as a server
+  that answers `iconRequest`, is announced through feature names instead
+  (see below). Clients must ignore feature names they do not know.
+- Optional members, such as `detail`, need no feature name: clients use
+  them when present and ignore members they do not know. Sending them to
+  a v7 client is safe for the same reason.
+- A server that serves no icons and sends no details sends exactly the v7
+  bytes: no `features` key, no `iconId` or `detail` keys, and no
+  `features` TXT record.
 - New server-to-client line types (icon replies) are only ever sent to the
   client that asked for them. The shipped apps parse every line as a full
   state, and an icon line has no `defaultDevice`, so receiving one would break
@@ -198,25 +204,27 @@ server, both keep working.
 
 ### Feature detection
 
-A server with any extension adds a top-level array to every full state:
+A server with any feature adds a top-level array to every full state:
 
 ```json
-{"protocolVersion":7,"applicationVersion":"v10","features":["icons","detail"],"deviceIds":{...},"defaultDevice":{...}}
+{"protocolVersion":7,"applicationVersion":"v10","features":["icons"],"deviceIds":{...},"defaultDevice":{...}}
 ```
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `features` | array of strings | Optional. Absent means no extensions. Unknown entries must be ignored. |
+| `features` | array of strings | Optional. Absent means no features. Unknown entries must be ignored. |
 
 The same list is advertised over mDNS as the TXT record `features`
-(comma-separated, e.g. `features=icons,detail`), so a client can show icon
+(comma-separated, e.g. `features=icons`), so a client can show icon
 support in its server list before connecting. The full state is
 authoritative.
 
 | Feature | Meaning |
 | --- | --- |
 | `icons` | Sessions may carry `iconId`, and the server answers `iconRequest`. |
-| `detail` | Sessions may carry `detail`. |
+
+Session details are not a feature: a v8 session may carry `detail`
+whatever `features` says.
 
 ### Icon ids
 
@@ -300,11 +308,12 @@ forward compatibility.
 
 ### Session details
 
-With `detail`, each session object may carry a `detail`: a short,
-human-readable label that tells it apart from other sessions of the same
-application, such as a browser tab's title or the title of what a player is
-playing. Firefox on Linux, for example, opens one stream per tab, and every
-one of them is named `Firefox`:
+Each session object may carry a `detail`, an ordinary optional member of
+v8 sessions with no feature name: a short, human-readable label that tells
+it apart from other sessions of the same application, such as a browser
+tab's title or the title of what a player is playing. Firefox on Linux, for
+example, opens one stream per tab, and every one of them is named
+`Firefox`:
 
 ```json
 "sessions": [
@@ -325,6 +334,9 @@ one of them is named `Firefox`:
   cleaning below, with zero-width joiners removed and both lower-cased;
   there is no Unicode normalisation, so `Cafe` plus a combining acute
   accent is not equal to `Café`.
+- Clients show it when present; there is nothing to detect or request. A
+  server may be configured not to send details, and then omits `detail`
+  from every session.
 - It is display text only, **not an identity**. It may change at any time
   (a tab navigating to another page), appear later or disappear. Session
   `id`, and the `name` where clients key on names, stay the keys for
@@ -366,9 +378,9 @@ What the host sends:
   `AudioCallbackDriver`, `ALSA Playback`, `Simple DirectMedia Layer` (all
   ignoring case and extra whitespace) and `cpal-playback-` followed by
   digits.
-- **Windows**: none, although the feature may be advertised. Core Audio
-  gives a session nothing beyond its display name, which is already the
-  `name`, and a browser plays all its tabs through one session.
+- **Windows**: none. Core Audio gives a session nothing beyond its display
+  name, which is already the `name`, and a browser plays all its tabs
+  through one session.
 
 ### Limits
 
@@ -412,8 +424,8 @@ Icons:
 
 Session details:
 
-- Show `detail` whenever a session has one, whatever `features` says; there
-  is nothing to request. Put it below or beside the name in a smaller or
+- Show `detail` whenever a session has one; there is nothing to detect or
+  request. Put it below or beside the name in a smaller or
   dimmer style, on one line, ellipsized at the end when it does not fit. A
   session without one shows its name alone, as in v7.
 - Do not use it to identify a session. Keep keying aliases, favourites,

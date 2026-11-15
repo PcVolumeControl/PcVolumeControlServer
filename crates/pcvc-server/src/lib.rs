@@ -10,8 +10,8 @@
 //! With an [`IconProvider`] in the [`ServerConfig`], the server also speaks
 //! the v8 icon extension: it advertises the `icons` feature, tags sessions
 //! with icon ids and answers icon requests. With [`ServerConfig::details`]
-//! it also sends the v8 session details. Without either, its output is plain
-//! v7.
+//! it also sends each session's v8 `detail` member. Without either, its
+//! output is plain v7.
 
 mod broadcaster;
 mod client;
@@ -57,7 +57,8 @@ pub struct ServerConfig {
     /// Serves app icons (the v8 `icons` feature) when set.
     pub icons: Option<Arc<dyn IconProvider>>,
     /// Sends each session's detail, if the backend has one (the v8 `detail`
-    /// feature).
+    /// member). Off keeps stream titles, browser tabs included, private:
+    /// the protocol has no authentication.
     pub details: bool,
 }
 
@@ -211,7 +212,7 @@ impl Shared {
 
     /// Protocol extensions this server advertises.
     fn features(&self) -> Vec<&'static str> {
-        state::features(self.icons.is_some(), self.details)
+        state::features(self.icons.is_some())
     }
 }
 
