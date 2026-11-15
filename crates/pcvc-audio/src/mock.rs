@@ -146,8 +146,7 @@ impl MockBackend {
     /// Adds a session to a device, or replaces the session with the same id.
     pub fn add_session(&self, device_id: &str, mut session: Session) -> Result<(), AudioError> {
         normalize_session(device_id, &mut session)?;
-        let id = session.id.clone();
-        let replaced = {
+        let event = {
             let mut state = self.lock();
             let device = state
                 .devices
@@ -156,20 +155,48 @@ impl MockBackend {
                 .ok_or_else(|| AudioError::UnknownDevice(device_id.to_owned()))?;
             match device.sessions.iter_mut().find(|s| s.id == session.id) {
                 Some(existing) => {
+                    let event = session.change_from(existing);
                     *existing = session;
-                    true
+                    event
                 }
                 None => {
+                    let id = session.id.clone();
                     device.sessions.push(session);
-                    false
+                    Some(AudioEvent::SessionAdded { id })
                 }
             }
         };
-        self.emit(if replaced {
-            AudioEvent::SessionChanged { id }
-        } else {
-            AudioEvent::SessionAdded { id }
-        });
+        if let Some(event) = event {
+            self.emit(event);
+        }
+        Ok(())
+    }
+
+    /// Sets the detail of a session on any device, leaving the rest of it as
+    /// it is.
+    pub fn set_session_detail(
+        &self,
+        session_id: &str,
+        detail: Option<&str>,
+    ) -> Result<(), AudioError> {
+        let changed = {
+            let mut state = self.lock();
+            let session = state
+                .devices
+                .iter_mut()
+                .flat_map(|d| d.sessions.iter_mut())
+                .find(|s| s.id == session_id)
+                .ok_or_else(|| AudioError::UnknownSession(session_id.to_owned()))?;
+            let detail = detail.map(str::to_owned);
+            let changed = session.detail != detail;
+            session.detail = detail;
+            changed
+        };
+        if changed {
+            self.emit(AudioEvent::SessionDetailChanged {
+                id: session_id.to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -477,6 +504,41 @@ mod tests {
                 AudioEvent::SessionAdded { id: id.clone() },
                 AudioEvent::SessionChanged { id: id.clone() },
                 AudioEvent::SessionRemoved { id }
+            ]
+        );
+    }
+
+    #[test]
+    fn detail_changes_have_their_own_event() {
+        let mock = MockBackend::demo();
+        let mut rx = mock.subscribe();
+        let device_id = default_device(&mock).id;
+        let id = MockBackend::session_id(&device_id, "tab");
+        let tab = Session::new(&id, "Firefox", 30.0).with_detail("One");
+        mock.add_session(&device_id, tab.clone()).unwrap();
+        mock.add_session(&device_id, tab.clone()).unwrap();
+        mock.add_session(&device_id, tab.clone().with_detail("Two"))
+            .unwrap();
+        mock.set_session(&id, 40.0, true).unwrap();
+        mock.set_session_detail(&id, Some("Three")).unwrap();
+        mock.set_session_detail(&id, Some("Three")).unwrap();
+        let session = default_device(&mock).sessions.pop().unwrap();
+        assert_eq!(
+            (session.volume, session.muted, session.detail.as_deref()),
+            (40.0, true, Some("Three")),
+            "the rest of the session is kept"
+        );
+        assert!(matches!(
+            mock.set_session_detail("nope", None),
+            Err(AudioError::UnknownSession(_))
+        ));
+        assert_eq!(
+            drain(&mut rx),
+            vec![
+                AudioEvent::SessionAdded { id: id.clone() },
+                AudioEvent::SessionDetailChanged { id: id.clone() },
+                AudioEvent::SessionChanged { id: id.clone() },
+                AudioEvent::SessionDetailChanged { id },
             ]
         );
     }

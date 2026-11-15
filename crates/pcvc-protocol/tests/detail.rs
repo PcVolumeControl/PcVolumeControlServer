@@ -28,6 +28,56 @@ fn makes_one_trimmed_line_without_control_characters() {
 }
 
 #[test]
+fn drops_invisible_and_bidi_formatting() {
+    for raw in [
+        "\u{200b}",
+        "\u{feff}\u{200d}",
+        "\u{ad} \u{2060}",
+        "\u{200c}\u{200d} \u{200d}",
+    ] {
+        assert_eq!(session_detail(raw, "Firefox"), None, "{raw:?}");
+    }
+    assert_eq!(session_detail("Firefox\u{200b}", "Firefox"), None);
+    assert_eq!(
+        session_detail("\u{200d}Fire\u{200d}fox\u{200c}", "Firefox"),
+        None
+    );
+    assert_eq!(
+        session_detail("\u{202e}evil\u{202c} \u{2067}title\u{2069}", "x").as_deref(),
+        Some("evil title")
+    );
+    assert_eq!(
+        session_detail("a\u{200e}b\u{200f}c\u{2066}d\u{ad}e", "x").as_deref(),
+        Some("abcde")
+    );
+    // Joiners between visible characters stay: they build emoji sequences.
+    assert_eq!(
+        session_detail(
+            "\u{200d}\u{1f468}\u{200d}\u{1f373} \u{200d}Cook\u{200d}",
+            "x"
+        )
+        .as_deref(),
+        Some("\u{1f468}\u{200d}\u{1f373} Cook")
+    );
+    // A cut never leaves a joiner before the ellipsis.
+    let long = format!(
+        "{}\u{200d}{}",
+        "a".repeat(DETAIL_MAX_CHARS - 2),
+        "b".repeat(5)
+    );
+    let cut = session_detail(&long, "x").unwrap();
+    assert_eq!(cut, format!("{}\u{2026}", "a".repeat(DETAIL_MAX_CHARS - 2)));
+}
+
+#[test]
+fn name_comparison_is_not_normalised() {
+    assert_eq!(
+        session_detail("Cafe\u{301}", "Caf\u{e9}").as_deref(),
+        Some("Cafe\u{301}")
+    );
+}
+
+#[test]
 fn drops_empty_text_and_the_name() {
     for raw in ["", "   ", "\n\t", "\u{0}\u{1}"] {
         assert_eq!(session_detail(raw, "Firefox"), None, "{raw:?}");

@@ -320,8 +320,11 @@ one of them is named `Firefox`:
 | `sessions[].detail` | string | Optional. One line of 1 to 120 characters. |
 
 - `detail` is omitted when there is nothing useful to say: no label at all,
-  a label equal to the session's `name` (ignoring case), or a generic one
-  such as `Playback`. Many sessions never have one.
+  a label equal to the session's `name`, or a generic one such as
+  `Playback`. Many sessions never have one. "Equal" means equal after the
+  cleaning below, with zero-width joiners removed and both lower-cased;
+  there is no Unicode normalisation, so `Cafe` plus a combining acute
+  accent is not equal to `Café`.
 - It is display text only, **not an identity**. It may change at any time
   (a tab navigating to another page), appear later or disappear. Session
   `id`, and the `name` where clients key on names, stay the keys for
@@ -329,16 +332,30 @@ one of them is named `Firefox`:
   favourites or hidden sessions.
 - It is a single line of at most 120 characters (Unicode scalar values),
   so at most 480 bytes of UTF-8. Runs of whitespace, line breaks and tabs
-  included, are sent as one space; other control characters are removed;
-  there is no leading or trailing whitespace. Longer text is cut on a
-  character boundary and ends with `…` (U+2026), still within 120
-  characters. A cut can still split a grapheme cluster, such as an emoji
-  sequence or a letter and its combining mark.
-- A change to a detail is broadcast like any other change. A full state
-  whose only change is in `detail` is sent no sooner than one second after
-  the previous full state, so a title that changes constantly cannot flood
-  clients; other changes are never delayed by this and carry the latest
-  details.
+  included, are sent as one space. Other control characters are removed,
+  and so are invisible formatting characters that a web page title can
+  carry: the soft hyphen (U+00AD), U+200B, the directional marks U+200E
+  and U+200F, the bidirectional embeddings and overrides U+202A to U+202E,
+  U+2060 to U+2069 (word joiner, invisible operators and the directional
+  isolates) and U+FEFF. Zero-width non-joiners and joiners (U+200C,
+  U+200D) are kept only between two visible characters, where they shape
+  emoji sequences and some scripts. There is no leading or trailing
+  whitespace. Longer text is cut on a character boundary and ends with `…`
+  (U+2026), still within 120 characters. A cut can still split a grapheme
+  cluster, such as an emoji sequence or a letter and its combining mark.
+- A change to a detail is broadcast like any other change, except that a
+  change in `detail` alone wakes connected clients no sooner than one
+  second after the server last broadcast a full state to them. A title
+  that changes constantly therefore costs each client at most one line a
+  second. Other changes are never delayed by this and carry the latest
+  details, and a client that connects meanwhile gets the latest details
+  in its first full state.
+- **Privacy:** the title of every stream that plays audio, browser tabs
+  included, is readable by every client that can reach the server's port;
+  the protocol has no authentication. Private-browsing windows are not
+  treated specially: their tabs' titles are sent like any other. Servers
+  should let users turn details off; the desktop host does with
+  `serve_details = false` (see the README).
 
 What the host sends:
 
@@ -364,7 +381,7 @@ What the host sends:
 | Server line length | Icon lines can be several hundred KiB. Clients must accept lines of at least 1 MiB. |
 | Client line length | 64 KiB, as in v7. |
 | `detail` | 120 characters, one line. |
-| Full states that only change `detail` | At most one a second. |
+| Full states that only change `detail` | At most one a second per client. |
 
 The server answers one client's ids one at a time and encodes at most a
 couple of replies ahead of what the socket has accepted, so a client that

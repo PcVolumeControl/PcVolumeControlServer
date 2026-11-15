@@ -77,22 +77,16 @@ const TAB_TITLES: [&str; 3] = [
 /// How long the demo video tab keeps each title.
 const TAB_PERIOD: Duration = Duration::from_secs(5);
 
-/// Moves the video tab on to the next title every [`TAB_PERIOD`], keeping
-/// its volume and mute. Skipped while the speakers are not the default
-/// device, since the mock only reports the default device's sessions.
+/// Moves the video tab on to the next title every [`TAB_PERIOD`].
 async fn browse(backend: Arc<MockBackend>, speakers: String) {
     let id = MockBackend::session_id(&speakers, "firefox-video");
     let mut interval = tokio::time::interval(TAB_PERIOD);
     interval.tick().await;
     for title in TAB_TITLES.iter().cycle().skip(1) {
         interval.tick().await;
-        let video = backend
-            .snapshot()
-            .ok()
-            .and_then(|s| s.default_device)
-            .and_then(|d| d.sessions.into_iter().find(|s| s.id == id));
-        if let Some(video) = video {
-            let _ = backend.add_session(&speakers, video.with_detail(*title));
+        if let Err(e) = backend.set_session_detail(&id, Some(title)) {
+            tracing::warn!("renaming the demo tab failed: {e}");
+            return;
         }
     }
 }

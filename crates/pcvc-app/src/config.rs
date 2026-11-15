@@ -126,7 +126,8 @@ pub struct FileOnly {
     /// `icons` feature). Read at startup.
     pub serve_icons: bool,
     /// Send each session's detail, such as a browser tab's title, to phone
-    /// clients (the protocol's v8 `detail` feature). Read at startup.
+    /// clients (the protocol's v8 `detail` feature). Read at startup; when
+    /// off, the audio backend does not read titles at all.
     pub serve_details: bool,
 }
 

@@ -252,9 +252,9 @@ impl ServerHandle {
             next_client_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
         });
-        let mut last_sent = None;
-        let initial_ok = broadcaster::rebuild(&shared, true, &mut last_sent).await
-            != broadcaster::Rebuilt::Failed;
+        let mut sent = broadcaster::Sent::default();
+        let initial_ok =
+            broadcaster::rebuild(&shared, true, &mut sent).await != broadcaster::Rebuilt::Failed;
 
         let tracker = TaskTracker::new();
         tracker.spawn(broadcaster::run(
@@ -263,7 +263,7 @@ impl ServerHandle {
             icon_events,
             config.coalesce,
             initial_ok,
-            last_sent,
+            sent,
         ));
         tracker.spawn(accept_loop(Arc::clone(&shared), listener, tracker.clone()));
         if config.mdns {

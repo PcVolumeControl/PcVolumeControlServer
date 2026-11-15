@@ -26,18 +26,20 @@ async fn main() -> std::process::ExitCode {
         Ok((config, flags)) => config.with_details(!flags.contains(&"--no-detail")),
         Err(code) => return code,
     };
+    let details = config.details;
     // The constructor blocks briefly while it connects.
-    let backend = match tokio::task::spawn_blocking(PulseBackend::new).await {
-        Ok(Ok(backend)) => backend,
-        Ok(Err(e)) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
-        Err(e) => {
-            eprintln!("starting the PulseAudio backend panicked: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let backend =
+        match tokio::task::spawn_blocking(move || PulseBackend::with_details(details)).await {
+            Ok(Ok(backend)) => backend,
+            Ok(Err(e)) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("starting the PulseAudio backend panicked: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
     common::serve(Arc::new(backend), config, "PulseAudio server").await
 }
 

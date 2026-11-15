@@ -73,8 +73,14 @@ pub struct PulseBackend {
 
 impl PulseBackend {
     /// Connects to the user's sound server and reads the initial state. Fails
-    /// if the server cannot be reached.
+    /// if the server cannot be reached. Sessions have no detail.
     pub fn new() -> Result<Self, AudioError> {
+        Self::with_details(false)
+    }
+
+    /// [`PulseBackend::new`], giving sessions a detail (the stream's title)
+    /// when `details` is set.
+    pub fn with_details(details: bool) -> Result<Self, AudioError> {
         let shared = Arc::new(Shared {
             state: Mutex::new(AudioState::default()),
             events: broadcast::channel(EVENT_CAPACITY).0,
@@ -87,7 +93,7 @@ impl PulseBackend {
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name("pulse".into())
-            .spawn(move || worker::run(worker_shared, requests_rx, wake_rx, ready_tx))
+            .spawn(move || worker::run(worker_shared, details, requests_rx, wake_rx, ready_tx))
             .map_err(backend_error)?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self {

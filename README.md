@@ -226,8 +226,13 @@ to clients that show it; the shipped apps ignore it. On Linux it is the
 stream's title (`media.name`, else `media.title`), which for Firefox is the
 tab's title; titles equal to the name and generic ones such as `Playback`
 are left out. Windows sends none: Core Audio has nothing per session beyond
-the name. Any client on the network can read the titles, so turn them off
-if that matters.
+the name.
+
+**Privacy:** with details on (the default), the title of every stream that
+plays audio, every browser tab included, is readable by any device that can
+reach the server's port, with no password; private-browsing windows are not
+treated differently. Turn details off with `serve_details = false` below if
+that matters on your network.
 
 To turn off icons, details or both (plain v7), add these lines near the top
 of `config.toml`, before any `[section]` such as `[window]` (a line below one
@@ -239,7 +244,8 @@ serve_details = false
 ```
 
 Then quit from the tray menu and start the app again; the settings are read
-at startup. They have no control in the Settings page, and saving settings
+at startup. With `serve_details = false` the app does not read stream titles
+at all. They have no control in the Settings page, and saving settings
 there keeps them.
 
 ## Try it with a phone

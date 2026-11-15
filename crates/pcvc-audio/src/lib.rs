@@ -103,6 +103,23 @@ impl Session {
         self
     }
 
+    /// The event for a change from `old` to `self`, if there is one.
+    pub(crate) fn change_from(&self, old: &Session) -> Option<AudioEvent> {
+        if self == old {
+            return None;
+        }
+        let id = self.id.clone();
+        let without_detail = |s: &Session| Session {
+            detail: None,
+            ..s.clone()
+        };
+        Some(if without_detail(self) == without_detail(old) {
+            AudioEvent::SessionDetailChanged { id }
+        } else {
+            AudioEvent::SessionChanged { id }
+        })
+    }
+
     pub fn with_app(mut self, app: AppHint) -> Self {
         self.app = app;
         self
@@ -138,9 +155,20 @@ pub enum AudioEvent {
     DevicesChanged,
     DefaultDeviceChanged,
     MasterChanged,
-    SessionAdded { id: String },
-    SessionRemoved { id: String },
-    SessionChanged { id: String },
+    SessionAdded {
+        id: String,
+    },
+    SessionRemoved {
+        id: String,
+    },
+    SessionChanged {
+        id: String,
+    },
+    /// Only the session's [`Session::detail`] changed. Consumers that do not
+    /// show details can ignore it.
+    SessionDetailChanged {
+        id: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

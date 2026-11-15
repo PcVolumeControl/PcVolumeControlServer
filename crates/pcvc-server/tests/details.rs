@@ -110,17 +110,28 @@ async fn detail_only_changes_are_rate_limited() {
 
     // Nothing but the detail changes: held until a second after the last
     // broadcast, then sent once with the latest title.
+    let id = MockBackend::session_id(SPEAKERS, "tab");
     for title in ["two", "three", "four"] {
-        mock.add_session(SPEAKERS, tab("tab", title)).unwrap();
+        mock.set_session_detail(&id, Some(title)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // A client that connects meanwhile starts with the newest title.
+    let mut late = Client::connect(server.local_addr()).await;
+    let first = late.read_state().await;
+    assert_eq!(details(&first).last(), Some(&("Firefox", Some("four"))));
+
     let state = client.read_state().await;
     let waited = sent.elapsed();
     assert!(waited >= Duration::from_millis(800), "{waited:?}");
     assert_eq!(details(&state).last(), Some(&("Firefox", Some("four"))));
+    assert_eq!(
+        late.read_state().await,
+        state,
+        "the broadcast reaches it too"
+    );
 
     // Any other change goes out at once and carries the pending detail.
-    mock.add_session(SPEAKERS, tab("tab", "five")).unwrap();
+    mock.set_session_detail(&id, Some("five")).unwrap();
     let changed = Instant::now();
     mock.set_master(Some(3.0), None).unwrap();
     let state = client.read_state().await;

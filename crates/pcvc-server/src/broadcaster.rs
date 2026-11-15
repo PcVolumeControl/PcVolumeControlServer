@@ -24,24 +24,39 @@ pub(crate) const DETAIL_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) enum Rebuilt {
     /// The snapshot failed.
     Failed,
-    /// Published, or nothing to publish.
+    /// Broadcast, or nothing to broadcast.
     Done,
     /// Only details changed, too soon after the last broadcast: rebuild again
     /// at this instant.
     Held(Instant),
 }
 
+/// The last state connected clients were woken for, and when.
+#[derive(Default)]
+pub(crate) struct Sent {
+    frame: Option<Arc<Frame>>,
+    at: Option<Instant>,
+}
+
+impl Sent {
+    /// Until when a change in details alone is held back.
+    fn hold_until(&self) -> Option<Instant> {
+        self.at.map(|at| at + DETAIL_INTERVAL)
+    }
+}
+
 /// Rebuilds and publishes the state at most once per `coalesce` window after
 /// any backend or icon provider event. The window starts at the first event,
 /// so a continuous stream of events (a slider being dragged) still produces
-/// regular updates. `last_sent` is when a state was last broadcast.
+/// regular updates. Changes in details alone are ignored when the server
+/// does not send details.
 pub(crate) async fn run(
     shared: Arc<Shared>,
     mut events: broadcast::Receiver<AudioEvent>,
     mut icon_events: Option<broadcast::Receiver<()>>,
     coalesce: Duration,
     initial_ok: bool,
-    mut last_sent: Option<Instant>,
+    mut sent: Sent,
 ) {
     let mut deadline = (!initial_ok).then(|| Instant::now() + RETRY_INTERVAL);
     let mut events_open = true;
@@ -50,6 +65,7 @@ pub(crate) async fn run(
         tokio::select! {
             () = shared.cancel.cancelled() => return,
             event = events.recv(), if events_open => match event {
+                Ok(AudioEvent::SessionDetailChanged { .. }) if !shared.details => {}
                 Ok(_) | Err(RecvError::Lagged(_)) => schedule(&mut deadline, coalesce),
                 Err(RecvError::Closed) => {
                     tracing::warn!("audio backend closed its event stream, polling instead");
@@ -74,7 +90,7 @@ pub(crate) async fn run(
             // The future is built even when the branch is disabled, hence the
             // placeholder instant.
             () = sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
-                deadline = match rebuild(&shared, force, &mut last_sent).await {
+                deadline = match rebuild(&shared, force, &mut sent).await {
                     Rebuilt::Failed => Some(Instant::now() + RETRY_INTERVAL),
                     Rebuilt::Done => {
                         force = false;
@@ -100,15 +116,14 @@ fn schedule(deadline: &mut Option<Instant>, delay: Duration) {
     *deadline = Some(deadline.map_or(at, |d| d.min(at)));
 }
 
-/// Snapshots the backend and publishes the state and its encoded line. An
-/// unchanged state is only re-sent to clients when `force` is set, and a
-/// state whose only change is in details is held back until
-/// [`DETAIL_INTERVAL`] after `last_sent` unless `force` is set.
-pub(crate) async fn rebuild(
-    shared: &Shared,
-    force: bool,
-    last_sent: &mut Option<Instant>,
-) -> Rebuilt {
+/// Snapshots the backend and publishes the state and its encoded line.
+///
+/// Connected clients are woken only for a state that differs from `sent`,
+/// or for any state when `force` is set. One whose only change is in details
+/// is held back until [`DETAIL_INTERVAL`] after the last broadcast unless
+/// `force` is set. Clients that connect meanwhile still get the newest
+/// state.
+pub(crate) async fn rebuild(shared: &Shared, force: bool, sent: &mut Sent) -> Rebuilt {
     let backend = Arc::clone(&shared.backend);
     let icons = shared.icons.clone();
     let details = shared.details;
@@ -143,22 +158,27 @@ pub(crate) async fn rebuild(
         *current = snapshot;
         changed
     });
-    if let Some(until) = last_sent.map(|sent| sent + DETAIL_INTERVAL)
-        && !force
-        && Instant::now() < until
-        && let (Some(old), Some(new)) = (shared.frames.borrow().as_deref(), frame.as_deref())
-        && only_details_differ(&old.state, &new.state)
-    {
-        return Rebuilt::Held(until);
+    let changed = force || sent.frame.as_ref().map(|f| &f.line) != frame.as_ref().map(|f| &f.line);
+    let held = sent
+        .hold_until()
+        .filter(|&until| !force && Instant::now() < until)
+        .filter(|_| match (sent.frame.as_deref(), frame.as_deref()) {
+            (Some(old), Some(new)) => only_details_differ(&old.state, &new.state),
+            _ => false,
+        });
+    if !changed || held.is_some() {
+        // Stored without waking anyone, for clients that connect from now on.
+        shared.frames.send_if_modified(|current| {
+            *current = frame;
+            false
+        });
+        return held.map_or(Rebuilt::Done, Rebuilt::Held);
     }
-    let sent = shared.frames.send_if_modified(|current| {
-        let changed = force || current.as_ref().map(|f| &f.line) != frame.as_ref().map(|f| &f.line);
-        *current = frame;
-        changed
-    });
-    if sent {
-        *last_sent = Some(Instant::now());
-    }
+    shared.frames.send_replace(frame.clone());
+    *sent = Sent {
+        frame,
+        at: Some(Instant::now()),
+    };
     Rebuilt::Done
 }
 
