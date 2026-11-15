@@ -9,6 +9,47 @@ Status: the protocol, server, desktop app and a mock audio backend are in
 place. Windows (Core Audio) and Linux (PulseAudio) backends come next; until
 then the app runs on the mock backend.
 
+## Install
+
+Packages for each release are on the
+[releases page](https://github.com/PcVolumeControl/PcVolumeControlServer/releases).
+
+**Windows 10 and 11 (x64).** Run `PcVolumeControl-<version>-setup.exe`. It
+installs for the current user (no administrator rights needed) unless you
+choose all users, adds a Start menu entry, and has an uninstaller in
+Settings > Apps. The portable `pcvolumecontrol-<version>-windows-x86_64.zip`
+runs from any folder. The builds are not code signed, so SmartScreen may ask
+for confirmation (More info > Run anyway). Uninstall the old C#
+PcVolumeControl first: both listen on the same port.
+
+The server listens on TCP port 3000. On first run Windows Firewall asks
+whether to allow PcVolumeControl; allow it on private networks or phones
+cannot connect. To change the answer later, open Windows Security > Firewall
+& network protection > Allow an app through firewall.
+
+**Debian, Ubuntu and derivatives (x86-64).** Install the `.deb`, which pulls
+in its dependencies:
+
+```sh
+sudo apt install ./pcvolumecontrol_<version>-1_amd64.deb
+```
+
+**Other Linux (x86-64, glibc 2.35 or newer).** Unpack
+`pcvolumecontrol-<version>-linux-x86_64.tar.gz` and copy the files into place,
+for example for the current user:
+
+```sh
+install -Dm755 pcvolumecontrol ~/.local/bin/pcvolumecontrol
+install -Dm644 pcvolumecontrol.desktop ~/.local/share/applications/pcvolumecontrol.desktop
+install -Dm644 pcvolumecontrol.svg ~/.local/share/icons/hicolor/scalable/apps/pcvolumecontrol.svg
+```
+
+It needs the PulseAudio client library (`libpulse.so.0`, also provided on
+PipeWire systems) and libxkbcommon. If a firewall is active, allow TCP port
+3000 and mDNS (UDP 5353).
+
+Releases are made as described in [docs/RELEASING.md](docs/RELEASING.md).
+
 ## Build and test
 
 ```sh
