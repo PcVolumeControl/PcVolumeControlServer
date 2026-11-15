@@ -25,7 +25,7 @@ use crate::mixer::Mixer;
 use crate::model;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
-use crate::{autostart, icons, style};
+use crate::{autostart, icons, instance, style};
 use mixer::MixerMessage;
 use settings::{Notice, SettingsForm, SettingsMessage};
 
@@ -70,30 +70,47 @@ pub struct Boot {
 }
 
 /// Quits cleanly (so mDNS sends its goodbye) on Ctrl-C or, on Unix, on
-/// SIGTERM as sent at logout.
+/// SIGTERM as sent at logout. A second signal exits at once.
 fn spawn_signal_handler(inbox: Inbox) {
     tokio::spawn(async move {
         #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            match signal(SignalKind::terminate()) {
-                Ok(mut term) => {
-                    tokio::select! {
-                        _ = tokio::signal::ctrl_c() => {}
-                        _ = term.recv() => {}
-                    }
-                }
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(term) => Some(term),
                 Err(e) => {
                     tracing::warn!("cannot listen for SIGTERM: {e}");
-                    let _ = tokio::signal::ctrl_c().await;
+                    None
                 }
+            };
+        for first in [true, false] {
+            let interrupt = async {
+                if let Err(e) = tokio::signal::ctrl_c().await {
+                    tracing::warn!("cannot listen for Ctrl-C: {e}");
+                    std::future::pending::<()>().await;
+                }
+            };
+            #[cfg(unix)]
+            let terminate = async {
+                match term.as_mut() {
+                    Some(term) => {
+                        term.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            #[cfg(not(unix))]
+            let terminate = std::future::pending::<()>();
+            tokio::select! {
+                () = interrupt => {}
+                () = terminate => {}
+            }
+            if first {
+                inbox.send(Inbound::QuitRequested);
+            } else {
+                tracing::warn!("second termination signal; exiting now");
+                std::process::exit(1);
             }
         }
-        #[cfg(not(unix))]
-        if tokio::signal::ctrl_c().await.is_err() {
-            return;
-        }
-        inbox.send(Inbound::QuitRequested);
     });
 }
 
@@ -379,6 +396,7 @@ impl App {
         }
         tracing::info!("quitting");
         self.quitting = true;
+        instance::shutting_down();
         self.server.shutdown();
         let close = match self.window {
             Some(id) => self.close_window(id),

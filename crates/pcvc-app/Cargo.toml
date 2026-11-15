@@ -3,7 +3,8 @@ name = "pcvolumecontrol"
 description = "PcVolumeControl desktop host: tray icon, server and mixer GUI"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# File::try_lock (single-instance lock) needs 1.89.
+rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
 
@@ -27,6 +28,7 @@ serde.workspace = true
 toml = "1"
 auto-launch = "0.6"
 interprocess = "2.4"
+thiserror.workspace = true
 if-addrs = "0.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
