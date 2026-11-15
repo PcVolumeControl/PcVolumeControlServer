@@ -153,7 +153,8 @@ async fn phone_clients_get_icons() {
     server.stop().await;
 }
 
-/// The controller gives the provider to the first start and to restarts.
+/// The controller gives the provider and the details switch to the first
+/// start and to restarts.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_server_start_serves_icons() {
@@ -162,10 +163,14 @@ async fn every_server_start_serves_icons() {
     use crate::inbox::{self, Inbound};
     use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 
-    for (icons, expected) in [(icons(), vec!["icons".to_owned()]), (None, vec![])] {
+    for (icons, details, expected) in [
+        (icons(), false, vec!["icons"]),
+        (icons(), true, vec!["icons", "detail"]),
+        (None, false, vec![]),
+    ] {
         let (inbox, receiver) = inbox::channel();
         let mut updates = receiver.take_stream().unwrap();
-        let controller = ServerController::spawn(backend(), icons, inbox);
+        let controller = ServerController::spawn(backend(), icons, details, inbox);
         for _ in 0..2 {
             controller.start(config());
             let addr = loop {

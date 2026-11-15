@@ -59,7 +59,8 @@ server's `IconProvider` for phone clients, so both share its desktop entry
 index and icon theme listings. `main` builds the provider (unless
 `serve_icons = false` in the config, there is no resolver for the platform,
 or its lookup thread cannot start) and hands it to `ServerController`, which
-gives it to every server start and restart. The provider looks each
+gives it to every server start and restart; `serve_details` reaches the
+server the same way. The provider looks each
 application up at 64 px on its own thread (misses again after two minutes,
 as `IconCache` decides) and names the icon by the SHA-256 of those pixels.
 Each render at another size first resolves the application at 64 px again

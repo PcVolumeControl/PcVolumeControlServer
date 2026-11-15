@@ -108,6 +108,7 @@ fn main() -> ExitCode {
         backend,
         icon_resolver,
         server_icons,
+        server_details: file_only.serve_details,
         inbox,
         inbox_rx,
         logs,
