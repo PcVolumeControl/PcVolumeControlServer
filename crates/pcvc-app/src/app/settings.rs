@@ -117,7 +117,7 @@ impl App {
         match message {
             SettingsMessage::Bind(choice) => form.bind = choice.0,
             SettingsMessage::Port(port) => {
-                form.port = port.chars().filter(char::is_ascii_digit).take(5).collect();
+                form.port = port.chars().filter(char::is_ascii_digit).collect();
             }
             SettingsMessage::Mdns(on) => form.mdns = on,
             SettingsMessage::StartOnLogin(on) => form.start_on_login = on,
@@ -143,38 +143,56 @@ impl App {
 
     fn save_settings(&mut self) -> Result<(), String> {
         let mut new = self.settings.apply_to(&self.config)?;
-        if new.start_on_login != self.config.start_on_login
-            && let Err(e) = autostart::set_enabled(new.start_on_login)
-        {
-            tracing::warn!("changing start on login failed: {e}");
-            new.start_on_login = self.config.start_on_login;
-            self.settings.start_on_login = new.start_on_login;
-            self.apply_config(new);
-            return Err(format!("Could not change start on login: {e}"));
+        let login = if new.start_on_login == self.config.start_on_login {
+            Ok(())
+        } else {
+            let result = set_start_on_login(new.start_on_login);
+            if result.is_err() {
+                new.start_on_login = self.config.start_on_login;
+            }
+            result
+        };
+        let saved = self.apply_config(new);
+        self.settings = SettingsForm::from(&self.config);
+        login.and(saved)
+    }
+
+    /// Changes start on login from the tray, where failures can only be
+    /// logged.
+    pub(super) fn toggle_start_on_login(&mut self) {
+        let enable = !self.config.start_on_login;
+        if set_start_on_login(enable).is_ok() {
+            self.settings.start_on_login = enable;
+            let new = Config {
+                start_on_login: enable,
+                ..self.config.clone()
+            };
+            let _ = self.apply_config(new);
         }
-        self.apply_config(new);
-        Ok(())
     }
 
     /// Makes `new` the active config: persists it and restarts the server
     /// if its settings changed and it is meant to be running.
-    pub(super) fn apply_config(&mut self, new: Config) {
+    pub(super) fn apply_config(&mut self, new: Config) -> Result<(), String> {
         let restart = self.config.server_changed(&new)
             && !matches!(self.server_status, ServerStatus::Stopped);
         self.config = new;
-        self.persist_config();
         if restart {
             tracing::info!("server settings changed; restarting");
             self.server.start(self.config.server_config());
         }
+        self.persist_config()
     }
 
-    pub(super) fn persist_config(&self) {
-        if let Some(path) = &self.config_path
-            && let Err(e) = config::save(path, &self.config)
-        {
+    /// Writes the config file; failures are logged and returned for display.
+    pub(super) fn persist_config(&self) -> Result<(), String> {
+        let Some(path) = &self.config_path else {
+            return Ok(());
+        };
+        config::save(path, &self.config).map_err(|e| {
             tracing::error!("saving {} failed: {e}", path.display());
-        }
+            format!("Could not save settings: {e}")
+        })
     }
 
     pub(super) fn settings_view(&self) -> Element<'_, Message> {
@@ -306,6 +324,13 @@ fn switch<'a>(
     .spacing(style::SPACE_M)
     .align_y(Center)
     .into()
+}
+
+fn set_start_on_login(enabled: bool) -> Result<(), String> {
+    autostart::set_enabled(enabled).map_err(|e| {
+        tracing::warn!("changing start on login failed: {e}");
+        format!("Could not change start on login: {e}")
+    })
 }
 
 #[cfg(test)]

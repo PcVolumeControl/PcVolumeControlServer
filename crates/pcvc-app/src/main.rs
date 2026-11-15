@@ -49,12 +49,15 @@ fn main() -> ExitCode {
 
     let (logs, _log_guard) = logging::init(paths::log_dir().as_deref());
 
-    let config_path = paths::config_file();
+    let mut config_path = paths::config_file();
     let config = match &config_path {
         Some(path) => {
             let loaded = config::load(path);
             if let Some(warning) = loaded.warning {
                 tracing::warn!("{warning}");
+            }
+            if !loaded.writable {
+                config_path = None;
             }
             loaded.config
         }

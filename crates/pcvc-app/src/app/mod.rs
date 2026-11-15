@@ -18,7 +18,7 @@ use pcvc_protocol::Command;
 use pcvc_server::{ClientInfo, MdnsStatus};
 
 use crate::audio::{self, CommandSender};
-use crate::config::Config;
+use crate::config::{Config, WindowSize};
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
 use crate::logging::LogBuffer;
 use crate::mixer::Mixer;
@@ -29,7 +29,7 @@ use crate::{autostart, icons, style};
 use mixer::MixerMessage;
 use settings::{Notice, SettingsForm, SettingsMessage};
 
-const MIN_SIZE: Size = Size::new(480.0, 400.0);
+const MIN_SIZE: Size = Size::new(WindowSize::MIN.width, WindowSize::MIN.height);
 
 /// Longest wait for the server to stop on quit before exiting anyway.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -116,6 +116,9 @@ impl App {
         match autostart::is_enabled() {
             Ok(enabled) => config.start_on_login = enabled,
             Err(e) => tracing::warn!("reading start on login failed: {e}"),
+        }
+        if config.start_on_login {
+            autostart::refresh();
         }
 
         let mut app = Self {
@@ -248,18 +251,7 @@ impl App {
                 Task::none()
             }
             TrayAction::ToggleStartOnLogin => {
-                let enable = !self.config.start_on_login;
-                match autostart::set_enabled(enable) {
-                    Ok(()) => {
-                        self.settings.start_on_login = enable;
-                        let new = Config {
-                            start_on_login: enable,
-                            ..self.config.clone()
-                        };
-                        self.apply_config(new);
-                    }
-                    Err(e) => tracing::warn!("changing start on login failed: {e}"),
-                }
+                self.toggle_start_on_login();
                 Task::none()
             }
             TrayAction::Quit => self.quit(),
@@ -344,7 +336,7 @@ impl App {
         if self.window == Some(id) {
             self.window = None;
             // Keeps the window size for next time.
-            self.persist_config();
+            let _ = self.persist_config();
         }
         window::close(id)
     }

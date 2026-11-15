@@ -46,6 +46,25 @@ pub struct WindowSize {
     pub height: f32,
 }
 
+impl WindowSize {
+    pub const MIN: Self = Self {
+        width: 480.0,
+        height: 400.0,
+    };
+    const MAX: f32 = 16384.0;
+
+    /// Within the window's limits; non-finite values give the default.
+    pub fn sanitized(self) -> Self {
+        if !(self.width.is_finite() && self.height.is_finite()) {
+            return Self::default();
+        }
+        Self {
+            width: self.width.clamp(Self::MIN.width, Self::MAX),
+            height: self.height.clamp(Self::MIN.height, Self::MAX),
+        }
+    }
+}
+
 impl Default for WindowSize {
     fn default() -> Self {
         Self {
@@ -101,6 +120,9 @@ impl Config {
 pub struct Loaded {
     pub config: Config,
     pub warning: Option<String>,
+    /// `false` when the file exists but could not be read or moved aside;
+    /// saving would then overwrite the user's settings with defaults.
+    pub writable: bool,
 }
 
 /// Reads the config at `path`. A missing file gives the defaults; an
@@ -113,38 +135,38 @@ pub fn load(path: &Path) -> Loaded {
             return Loaded {
                 config: Config::default(),
                 warning: None,
+                writable: true,
             };
         }
         Err(e) => {
             return Loaded {
                 config: Config::default(),
                 warning: Some(format!(
-                    "could not read {}: {e}; using defaults",
+                    "could not read {}: {e}; using defaults and not saving",
                     path.display()
                 )),
+                writable: false,
             };
         }
     };
     match toml::from_str::<Config>(&text) {
-        Ok(config) if config.port != 0 => Loaded {
-            config,
-            warning: None,
-        },
-        Ok(config) => Loaded {
-            config: Config {
-                port: DEFAULT_PORT,
-                ..config
-            },
-            warning: Some(format!(
-                "port 0 in {} replaced by {DEFAULT_PORT}",
-                path.display()
-            )),
-        },
+        Ok(mut config) => {
+            config.window = config.window.sanitized();
+            let warning = (config.port == 0).then(|| {
+                config.port = DEFAULT_PORT;
+                format!("port 0 in {} replaced by {DEFAULT_PORT}", path.display())
+            });
+            Loaded {
+                config,
+                warning,
+                writable: true,
+            }
+        }
         Err(e) => {
             let backup = backup_path(path);
-            let moved = match std::fs::rename(path, &backup) {
-                Ok(()) => format!("moved to {}", backup.display()),
-                Err(e) => format!("could not be moved aside: {e}"),
+            let (moved, writable) = match std::fs::rename(path, &backup) {
+                Ok(()) => (format!("moved to {}", backup.display()), true),
+                Err(e) => (format!("could not be moved aside: {e}; not saving"), false),
             };
             Loaded {
                 config: Config::default(),
@@ -152,6 +174,7 @@ pub fn load(path: &Path) -> Loaded {
                     "invalid config {} ({moved}); using defaults: {e}",
                     path.display()
                 )),
+                writable,
             }
         }
     }
@@ -164,15 +187,20 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Writes the config atomically (temporary file, then rename), creating
-/// the directory if needed.
+/// Writes the config atomically (synced temporary file, then rename),
+/// creating the directory if needed.
 pub fn save(path: &Path, config: &Config) -> io::Result<()> {
+    use std::io::Write as _;
+
     let text = toml::to_string_pretty(config).map_err(io::Error::other)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)?;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp, path)
 }
 
@@ -254,6 +282,34 @@ mod tests {
         assert_eq!(loaded.config.port, DEFAULT_PORT);
         assert!(!loaded.config.mdns);
         assert!(loaded.warning.is_some());
+    }
+
+    #[test]
+    fn window_size_is_sanitized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[window]\nwidth = 0.0\nheight = 1e9\n").unwrap();
+        let window = load(&path).config.window;
+        assert_eq!((window.width, window.height), (480.0, 16384.0));
+        assert_eq!(
+            WindowSize {
+                width: f32::NAN,
+                height: 500.0
+            }
+            .sanitized(),
+            WindowSize::default()
+        );
+    }
+
+    #[test]
+    fn unreadable_file_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+        let loaded = load(&path);
+        assert!(!loaded.writable);
+        assert!(loaded.warning.is_some());
+        assert!(path.exists());
     }
 
     #[test]

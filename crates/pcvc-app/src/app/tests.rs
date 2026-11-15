@@ -184,8 +184,8 @@ fn settings_validate_and_save() {
 }
 
 /// Renders every page in both themes into `PCVC_SNAPSHOT_DIR` for a manual
-/// look. Run with `--ignored`. Existing images in the directory are
-/// replaced.
+/// look. Run with `--ignored`. Earlier renders (`mixer-*.png`,
+/// `status-*.png`, `settings-*.png`) in the directory are replaced.
 #[test]
 #[ignore = "writes PNG files for manual inspection"]
 fn render_pages() {
@@ -218,8 +218,12 @@ fn render_pages() {
     h.app.local_ips = vec![Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(10, 8, 0, 2)];
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "png") {
-            std::fs::remove_file(path).unwrap();
+        let name = path.file_name().unwrap().to_string_lossy();
+        let ours = ["mixer-", "status-", "settings-"]
+            .iter()
+            .any(|p| name.starts_with(p));
+        if ours && name.ends_with(".png") {
+            std::fs::remove_file(&path).unwrap();
         }
     }
     let id = window::Id::unique();
