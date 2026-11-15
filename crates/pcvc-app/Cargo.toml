@@ -50,7 +50,6 @@ windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 tempfile = "3"
 iced_test = "0.14"
 
-
 [package.metadata.deb]
 maintainer = "PcVolumeControl <https://github.com/PcVolumeControl/PcVolumeControlServer/issues>"
 copyright = "2017 Adam Brown"
@@ -63,10 +62,12 @@ computer's volume over the local network: master volume, mute, the default \
 output device and per-application volume. It lives in the system tray, \
 advertises itself over mDNS so phones find it, and has a window with a local \
 mixer, connection status and settings."""
-# $auto covers what the binary links. winit and wgpu dlopen the rest:
-# libxkbcommon always, then the Wayland or X11 libraries and EGL.
-depends = "$auto, libpulse0, libxkbcommon0"
-recommends = "libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxi6, libwayland-client0, libwayland-egl1, libegl1"
+# $auto cannot see dlopened libraries. winit loads libxkbcommon and the X11
+# libraries (enough on Wayland sessions too, through XWayland) and prefers the
+# Wayland ones when present; wgpu loads EGL and iced falls back to software
+# rendering without it.
+depends = "$auto, libpulse0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxi6"
+recommends = "libwayland-client0, libwayland-egl1, libegl1, libegl-mesa0"
 assets = [
     ["target/release/pcvolumecontrol", "usr/bin/", "755"],
     ["../../packaging/linux/pcvolumecontrol.desktop", "usr/share/applications/", "644"],
