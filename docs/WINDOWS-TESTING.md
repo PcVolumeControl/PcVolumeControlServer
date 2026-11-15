@@ -130,8 +130,11 @@ fixes:
   session-created notifications.
 - **Sessions of exited apps**: Core Audio keeps them as inactive, so the
   backend checks every 2 s whether a session's process has exited and drops
-  it, as the C# server effectively did. Sessions spanning several processes,
-  or whose process could not be opened, stay until Windows expires them.
+  it, as the C# server effectively did; it comes back only if it plays again.
+  Sessions spanning several processes, or whose process could not be opened,
+  stay until Windows expires them. A leftover session whose process id has
+  been reused by another process at start-up is shown under that process's
+  name.
 - **Session names**: elevated or protected processes may refuse
   `OpenProcess`, which makes a session without a display name show as
   `Unknown`.

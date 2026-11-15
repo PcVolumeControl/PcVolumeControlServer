@@ -172,6 +172,53 @@ impl Dirty {
     }
 }
 
+/// Where a session control came from during a session-list refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSource {
+    /// `OnSessionCreated`: definitely a new session.
+    Created {
+        /// The known session with the same id has this very control.
+        same_control: bool,
+    },
+    /// The session enumerator, which also lists inactive sessions of apps
+    /// that have exited.
+    Enumerated {
+        /// Its id belongs to a session dropped because its process exited.
+        exited_before: bool,
+        /// It is playing.
+        active: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionAction {
+    Skip,
+    Add,
+    /// Re-open the known session with this control: the app re-created its
+    /// stream under the same id and the old control is about to expire.
+    Replace,
+}
+
+/// What to do with a session control found during a session-list refresh,
+/// given whether a session with its id is already `known`.
+pub(crate) fn session_action(known: bool, source: SessionSource) -> SessionAction {
+    match source {
+        SessionSource::Created { same_control } => match (known, same_control) {
+            (false, _) => SessionAction::Add,
+            (true, false) => SessionAction::Replace,
+            (true, true) => SessionAction::Skip,
+        },
+        SessionSource::Enumerated { .. } if known => SessionAction::Skip,
+        // An exited app's leftover session only comes back once something
+        // plays in it again.
+        SessionSource::Enumerated {
+            exited_before: true,
+            active: false,
+        } => SessionAction::Skip,
+        SessionSource::Enumerated { .. } => SessionAction::Add,
+    }
+}
+
 /// Stable-sorts `items` into the order their ids had in `previous`, with ids
 /// not in `previous` after the others in their current order. Keeps the
 /// phones' session list from reordering when a device's sessions are re-read
@@ -381,6 +428,31 @@ mod tests {
         }
         dirty.merge(other);
         assert_eq!(dirty, Dirty::all());
+    }
+
+    #[test]
+    fn session_actions() {
+        use SessionAction::*;
+        let created = |same_control| SessionSource::Created { same_control };
+        let enumerated = |exited_before, active| SessionSource::Enumerated {
+            exited_before,
+            active,
+        };
+        assert_eq!(session_action(false, created(false)), Add);
+        assert_eq!(session_action(true, created(false)), Replace);
+        assert_eq!(session_action(true, created(true)), Skip);
+        for exited_before in [false, true] {
+            for active in [false, true] {
+                assert_eq!(
+                    session_action(true, enumerated(exited_before, active)),
+                    Skip
+                );
+            }
+        }
+        assert_eq!(session_action(false, enumerated(false, false)), Add);
+        assert_eq!(session_action(false, enumerated(false, true)), Add);
+        assert_eq!(session_action(false, enumerated(true, false)), Skip);
+        assert_eq!(session_action(false, enumerated(true, true)), Add);
     }
 
     #[test]

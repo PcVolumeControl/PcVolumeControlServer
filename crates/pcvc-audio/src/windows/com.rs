@@ -11,11 +11,14 @@ use std::iter;
 use std::marker::PhantomData;
 
 use ::windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use ::windows::Win32::Foundation::{ERROR_NOT_FOUND, HANDLE, WAIT_OBJECT_0};
+use ::windows::Win32::Foundation::{
+    ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND, HANDLE, WAIT_OBJECT_0,
+};
 use ::windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use ::windows::Win32::Media::Audio::{
-    AudioSessionStateExpired, DEVICE_STATE_ACTIVE, IAudioSessionControl2, IAudioSessionManager2,
-    IMMDevice, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eMultimedia, eRender,
+    AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE_ACTIVE, IAudioSessionControl2,
+    IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+    eMultimedia, eRender,
 };
 use ::windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PropVariantClear, PropVariantToStringAlloc,
@@ -29,7 +32,7 @@ use ::windows::Win32::System::Threading::{
     QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use ::windows::Win32::UI::Shell::SHLoadIndirectString;
-use ::windows::core::{GUID, Interface, Owned, PCWSTR, PWSTR, Result};
+use ::windows::core::{GUID, IUnknown, Interface, Owned, PCWSTR, PWSTR, Result};
 
 use super::logic;
 
@@ -219,6 +222,20 @@ pub(super) fn is_listed(control: &IAudioSessionControl2) -> Result<bool> {
     Ok(!system && state != AudioSessionStateExpired)
 }
 
+/// Whether the session is playing.
+pub(super) fn is_active(control: &IAudioSessionControl2) -> Result<bool> {
+    // SAFETY: no pointer arguments.
+    Ok(unsafe { control.GetState() }? == AudioSessionStateActive)
+}
+
+/// Whether two interface pointers refer to the same COM object.
+pub(super) fn same_object(a: &impl Interface, b: &impl Interface) -> bool {
+    match (a.cast::<IUnknown>(), b.cast::<IUnknown>()) {
+        (Ok(a), Ok(b)) => a.as_raw() == b.as_raw(),
+        _ => false,
+    }
+}
+
 /// The session instance identifier, which is the protocol session id.
 pub(super) fn session_instance_id(control: &IAudioSessionControl2) -> Result<String> {
     // SAFETY: no pointer arguments. The result is a CoTaskMemAlloc string
@@ -276,35 +293,73 @@ pub(super) fn load_indirect_string(source: &str) -> Option<String> {
 
 /// A handle to a process that can tell whether it has exited, which a process
 /// id cannot once the id is reused.
-pub(super) struct Process(Owned<HANDLE>);
+pub(super) struct Process {
+    handle: Owned<HANDLE>,
+    /// Opened with SYNCHRONIZE, so exit can be detected.
+    can_wait: bool,
+}
+
+/// The outcome of opening a process by id.
+pub(super) enum OpenedProcess {
+    Open(Process),
+    /// No process has this id: it has exited.
+    NoSuchProcess,
+    /// It exists but may not be opened.
+    Denied,
+}
 
 impl Process {
-    /// `None` if the process has already gone or may not be opened.
-    pub fn open(pid: u32) -> Option<Self> {
-        // SAFETY: plain Win32 call with no pointer arguments.
-        let handle = unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                false,
-                pid,
-            )
+    pub fn open(pid: u32) -> OpenedProcess {
+        match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE) {
+            Ok(handle) => OpenedProcess::Open(Self {
+                handle,
+                can_wait: true,
+            }),
+            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => {
+                OpenedProcess::NoSuchProcess
+            }
+            // Some processes grant querying but not waiting; the name is
+            // still worth having.
+            Err(_) => match open_process(pid, PROCESS_QUERY_LIMITED_INFORMATION) {
+                Ok(handle) => OpenedProcess::Open(Self {
+                    handle,
+                    can_wait: false,
+                }),
+                Err(_) => OpenedProcess::Denied,
+            },
         }
-        .ok()?;
-        // SAFETY: OpenProcess returned a fresh handle that nothing else closes.
-        Some(Self(unsafe { Owned::new(handle) }))
     }
 
+    /// False when unknown.
     pub fn has_exited(&self) -> bool {
-        // SAFETY: the handle is open and has SYNCHRONIZE access; a zero
-        // timeout never blocks. A process handle is signalled once it exits.
-        let event = unsafe { WaitForSingleObject(*self.0, 0) };
+        if !self.can_wait {
+            return false;
+        }
+        // SAFETY: the handle is open with SYNCHRONIZE access; a zero timeout
+        // never blocks. A process handle is signalled once it exits.
+        let event = unsafe { WaitForSingleObject(*self.handle, 0) };
         event == WAIT_OBJECT_0
+    }
+
+    /// Whether exit can be detected at all.
+    pub fn can_wait(&self) -> bool {
+        self.can_wait
     }
 
     /// The image file stem (`chrome` for `...\chrome.exe`).
     pub fn image_stem(&self) -> Option<String> {
-        image_stem(*self.0)
+        image_stem(*self.handle)
     }
+}
+
+fn open_process(
+    pid: u32,
+    access: ::windows::Win32::System::Threading::PROCESS_ACCESS_RIGHTS,
+) -> Result<Owned<HANDLE>> {
+    // SAFETY: plain Win32 call with no pointer arguments.
+    let handle = unsafe { OpenProcess(access, false, pid) }?;
+    // SAFETY: OpenProcess returned a fresh handle that nothing else closes.
+    Ok(unsafe { Owned::new(handle) })
 }
 
 fn image_stem(handle: HANDLE) -> Option<String> {
