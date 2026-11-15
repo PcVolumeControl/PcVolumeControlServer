@@ -48,9 +48,7 @@ impl<K: Eq + Hash + Clone, V> Lru<K, V> {
     }
 
     pub fn insert(&mut self, key: K, value: V, weight: usize) {
-        if let Some(old) = self.entries.remove(&key) {
-            self.weight -= old.weight;
-        }
+        self.remove(&key);
         if weight > self.max_weight {
             return;
         }
@@ -69,10 +67,18 @@ impl<K: Eq + Hash + Clone, V> Lru<K, V> {
                 .min_by_key(|(_, e)| e.used)
                 .map(|(key, _)| key.clone());
             let Some(oldest) = oldest else { break };
-            if let Some(old) = self.entries.remove(&oldest) {
-                self.weight -= old.weight;
-            }
+            self.remove(&oldest);
         }
+    }
+
+    pub fn remove(&mut self, key: &K) {
+        if let Some(old) = self.entries.remove(key) {
+            self.weight -= old.weight;
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter().map(|(key, entry)| (key, &entry.value))
     }
 
     #[cfg(test)]

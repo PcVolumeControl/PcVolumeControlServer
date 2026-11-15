@@ -341,6 +341,13 @@ fn changed_icons_get_new_ids() {
     assert_eq!(drain(&mut changed), 1);
     let new = icons.icon_id(&app).unwrap();
     assert_eq!(new, content_id(&solid(BLUE, REFERENCE_EDGE)));
+    let calls = resolver.calls().len();
+    assert_eq!(icons.icon_png(&old, 128), None);
+    assert_eq!(
+        resolver.calls().len(),
+        calls,
+        "the app is no longer tried for the old id"
+    );
     assert_eq!(icons.icon_png(&new, 128).unwrap().size, 128);
     // What was already rendered for the old id stays valid for it.
     assert!(icons.icon_png(&old, REFERENCE_EDGE).is_some());
@@ -362,13 +369,30 @@ fn shared_ids_render_from_the_first_app_seen() {
 }
 
 #[test]
+fn fallback_apps_do_not_cap_the_id() {
+    let resolver = FakeResolver::new(&[("svg", RED, None), ("png", RED, Some(32))]);
+    let icons = provider(&resolver);
+    let id = resolved_id(&icons, &session("Vector", "svg"));
+    assert_eq!(resolved_id(&icons, &session("Raster", "png")), id);
+    // The vector app cannot be resolved for a moment: the raster one
+    // answers, capped.
+    resolver.icons.lock().unwrap().remove("svg");
+    assert_eq!(icons.icon_png(&id, 256).unwrap().size, 64);
+    resolver.set_icon("svg", (RED, None));
+    assert_eq!(icons.icon_png(&id, 256).unwrap().size, 256);
+}
+
+#[test]
 fn full_queues_drop_lookups_without_recording_misses() {
     let resolver = FakeResolver::new(&[("red", RED, None)]);
     let icons = provider(&resolver);
+    let changed = icons.subscribe();
     resolver.set_gate(false);
-    let sessions: Vec<Session> = (0..QUEUE_CAPACITY + 2)
-        .map(|i| session(&format!("App{i}"), "red"))
+    // Misses, which notify nobody, then one app with an icon.
+    let mut sessions: Vec<Session> = (0..QUEUE_CAPACITY + 1)
+        .map(|i| session(&format!("App{i}"), "unknown"))
         .collect();
+    sessions.push(session("Last", "red"));
     for s in &sessions {
         assert_eq!(icons.icon_id(s), None);
     }
@@ -378,6 +402,7 @@ fn full_queues_drop_lookups_without_recording_misses() {
         "dropped, so the next rebuild asks again"
     );
     resolver.set_gate(true);
+    wait_until("a rebuild for the dropped lookup", || !changed.is_empty());
     wait_until("the dropped lookup", || {
         icons.icon_id(sessions.last().unwrap()).is_some()
     });

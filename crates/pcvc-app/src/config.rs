@@ -213,6 +213,19 @@ pub fn load(path: &Path) -> Loaded {
     }
 }
 
+/// Adds the keys of `old` that `new` lacks, in nested tables too.
+fn keep_missing(new: &mut toml::Table, old: toml::Table) {
+    for (key, old_value) in old {
+        match (new.get_mut(&key), old_value) {
+            (None, old_value) => {
+                new.insert(key, old_value);
+            }
+            (Some(toml::Value::Table(new)), toml::Value::Table(old)) => keep_missing(new, old),
+            (Some(_), _) => {}
+        }
+    }
+}
+
 fn backup_path(path: &Path) -> PathBuf {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -221,19 +234,18 @@ fn backup_path(path: &Path) -> PathBuf {
 }
 
 /// Writes the config atomically (synced temporary file, then rename),
-/// creating the directory if needed. Top-level keys in the existing file
-/// that `config` does not have ([`FileOnly`] settings, or settings of a
-/// newer version) are kept.
+/// creating the directory if needed. Keys in the existing file that
+/// `config` does not have ([`FileOnly`] settings, or settings of a newer
+/// version) are kept.
 pub fn save(path: &Path, config: &Config) -> io::Result<()> {
     use std::io::Write as _;
 
     let mut table = toml::Table::try_from(config).map_err(io::Error::other)?;
-    let old = std::fs::read_to_string(path)
+    if let Some(old) = std::fs::read_to_string(path)
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
-        .unwrap_or_default();
-    for (key, value) in old {
-        table.entry(key).or_insert(value);
+    {
+        keep_missing(&mut table, old);
     }
     let text = toml::to_string_pretty(&table).map_err(io::Error::other)?;
     if let Some(dir) = path.parent() {
@@ -326,7 +338,11 @@ mod tests {
         assert!(loaded.file_only.serve_icons, "on by default");
         assert!(loaded.warning.is_none());
 
-        std::fs::write(&path, "port = 4000\nserve_icons = false\nfuture = 1\n").unwrap();
+        std::fs::write(
+            &path,
+            "port = 4000\nserve_icons = false\nfuture = 1\n[window]\nwidth = 900.0\nlater = true\n",
+        )
+        .unwrap();
         let loaded = load(&path);
         assert_eq!(loaded.config.port, 4000);
         assert!(!loaded.file_only.serve_icons);
@@ -339,11 +355,9 @@ mod tests {
         let loaded = load(&path);
         assert_eq!(loaded.config, edited);
         assert!(!loaded.file_only.serve_icons);
-        assert!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("future = 1")
-        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("future = 1"));
+        assert!(text.contains("later = true"), "nested keys too:\n{text}");
 
         std::fs::write(&path, "port = 4000\nserve_icons = \"no\"\n").unwrap();
         let loaded = load(&path);

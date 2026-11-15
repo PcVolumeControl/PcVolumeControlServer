@@ -22,6 +22,7 @@ mod server_tests;
 mod tests;
 
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Instant;
 
@@ -56,7 +57,8 @@ const APPS_PER_ID: usize = 4;
 const PNG_CAPACITY: usize = 256;
 const PNG_CACHE_BYTES: usize = 16 * 1024 * 1024;
 /// Lookups waiting for the background thread. A lookup that does not fit
-/// is dropped and requested again on a later state rebuild.
+/// is dropped and requested again on the state rebuild the thread asks for
+/// once it has made room.
 const QUEUE_CAPACITY: usize = 256;
 
 /// The icon provider for the server, or `None` when icons are not served:
@@ -89,6 +91,8 @@ struct Inner {
     resolver: Arc<dyn Resolver>,
     state: Mutex<State>,
     changed: broadcast::Sender<()>,
+    /// A lookup was dropped because the queue was full.
+    dropped: AtomicBool,
 }
 
 struct State {
@@ -98,22 +102,19 @@ struct State {
     ids: Lru<IconId, IdEntry>,
     /// By id and served edge.
     pngs: Lru<(IconId, u32), IconImage>,
-    /// Ticks whenever an application is seen with an id, to tell which
-    /// application of an id was seen least recently.
-    clock: u64,
 }
 
 impl State {
     fn saw(&mut self, id: &IconId, app: &IconKey) {
-        self.clock += 1;
-        let clock = self.clock;
         match self.ids.get_mut(id) {
-            Some(entry) => entry.saw(app, clock),
+            Some(entry) => entry.saw(app),
             None => {
-                let entry = IdEntry {
-                    apps: vec![(app.clone(), clock)],
+                let mut entry = IdEntry {
+                    apps: Lru::new(APPS_PER_ID, usize::MAX),
+                    next: 0,
                     max_edge: None,
                 };
+                entry.saw(app);
                 self.ids.insert(id.clone(), entry, 1);
             }
         }
@@ -121,31 +122,31 @@ impl State {
 }
 
 struct IdEntry {
-    /// Applications seen with this id, in the order first seen, with the
-    /// clock when last seen. Renders come from the first that still draws
-    /// the id, so they do not depend on which was seen last.
-    apps: Vec<(IconKey, u64)>,
-    /// Served edges are capped here once a request was answered smaller
-    /// than asked (a small raster source).
+    /// Applications seen with this id, the least recently seen dropped
+    /// first, so that the id stays renderable from running applications (on
+    /// Linux a Steam game's lookup depends on its process). Each maps to
+    /// when it was first seen: renders come from the earliest that still
+    /// draws the id, so they do not depend on which was seen last.
+    apps: Lru<IconKey, u64>,
+    next: u64,
+    /// Served edges are capped here once the first application answered a
+    /// request smaller than asked (a small raster source).
     max_edge: Option<u32>,
 }
 
 impl IdEntry {
-    /// Records `app` as seen at `clock`. A new application replaces the
-    /// least recently seen one when the entry is full, so an id stays
-    /// renderable from running applications (on Linux a Steam game's
-    /// lookup depends on its process).
-    fn saw(&mut self, app: &IconKey, clock: u64) {
-        if let Some(seen) = self.apps.iter_mut().find(|(a, _)| a == app) {
-            seen.1 = clock;
-            return;
+    fn saw(&mut self, app: &IconKey) {
+        if self.apps.get(app).is_none() {
+            self.apps.insert(app.clone(), self.next, 1);
+            self.next += 1;
         }
-        if self.apps.len() >= APPS_PER_ID
-            && let Some(oldest) = (0..self.apps.len()).min_by_key(|&i| self.apps[i].1)
-        {
-            self.apps.remove(oldest);
-        }
-        self.apps.push((app.clone(), clock));
+    }
+
+    /// The applications, earliest seen first.
+    fn render_order(&self) -> Vec<IconKey> {
+        let mut apps: Vec<(&IconKey, &u64)> = self.apps.iter().collect();
+        apps.sort_by_key(|(_, first)| **first);
+        apps.into_iter().map(|(app, _)| app.clone()).collect()
     }
 }
 
@@ -165,9 +166,9 @@ impl ResolverIcons {
                 apps: IconCache::new(APP_CAPACITY),
                 ids: Lru::new(ID_CAPACITY, usize::MAX),
                 pngs: Lru::new(PNG_CAPACITY, PNG_CACHE_BYTES),
-                clock: 0,
             }),
             changed: broadcast::Sender::new(16),
+            dropped: AtomicBool::new(false),
         });
         let (lookups, queue) = mpsc::sync_channel::<IconKey>(QUEUE_CAPACITY);
         let worker = Arc::clone(&inner);
@@ -181,6 +182,9 @@ impl ResolverIcons {
                     match found {
                         Some(found) => worker.record(app, found),
                         None => worker.state().apps.finish(app, None, Instant::now()),
+                    }
+                    if worker.dropped.swap(false, Ordering::Relaxed) {
+                        let _ = worker.changed.send(());
                     }
                 }
             })?;
@@ -210,7 +214,7 @@ impl Inner {
                 && *old != id
                 && let Some(entry) = state.ids.get_mut(old)
             {
-                entry.apps.retain(|(a, _)| *a != app);
+                entry.apps.remove(&app);
             }
             state
                 .apps
@@ -307,7 +311,10 @@ impl IconProvider for ResolverIcons {
         if look_up && let Err(e) = self.lookups.try_send(app) {
             let mut state = self.inner.state();
             match e {
-                mpsc::TrySendError::Full(app) => state.apps.forget(&app),
+                mpsc::TrySendError::Full(app) => {
+                    state.apps.forget(&app);
+                    self.inner.dropped.store(true, Ordering::Relaxed);
+                }
                 // The thread is gone, so no lookup will ever finish.
                 mpsc::TrySendError::Disconnected(app) => state.apps.finish(app, None, now),
             }
@@ -324,14 +331,14 @@ impl IconProvider for ResolverIcons {
             if let Some(image) = state.pngs.get(&(id.clone(), edge)) {
                 return Some(image.clone());
             }
-            let apps: Vec<IconKey> = entry.apps.iter().map(|(app, _)| app.clone()).collect();
-            (apps, edge)
+            (entry.render_order(), edge)
         };
-        for app in apps {
-            match self.inner.render(id, &app, edge) {
+        for (index, app) in apps.iter().enumerate() {
+            match self.inner.render(id, app, edge) {
                 Render::Image(image) => {
                     let mut state = self.inner.state();
-                    if image.size < edge
+                    if index == 0
+                        && image.size < edge
                         && let Some(entry) = state.ids.get_mut(id)
                     {
                         entry.max_edge = Some(image.size);
@@ -342,7 +349,12 @@ impl IconProvider for ResolverIcons {
                         .insert((id.clone(), image.size), image.clone(), weight);
                     return Some(image);
                 }
-                Render::Moved | Render::Failed => {}
+                Render::Moved => {
+                    if let Some(entry) = self.inner.state().ids.get_mut(id) {
+                        entry.apps.remove(app);
+                    }
+                }
+                Render::Failed => {}
             }
         }
         None
