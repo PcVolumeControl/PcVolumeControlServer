@@ -6,6 +6,9 @@ pub const APP: &[u8] = include_bytes!("../assets/app.svg");
 pub const TRAY_OFFLINE: &[u8] = include_bytes!("../assets/tray-offline.svg");
 pub const TRAY_ONLINE: &[u8] = include_bytes!("../assets/tray-online.svg");
 pub const TRAY_CLIENTS: &[u8] = include_bytes!("../assets/tray-clients.svg");
+/// Monochrome icons, drawn in the theme's text colour.
+pub const OPEN_WINDOW: &[u8] = include_bytes!("../assets/open-window.svg");
+pub const CLOSE: &[u8] = include_bytes!("../assets/close.svg");
 
 /// Straight (not premultiplied) RGBA pixels.
 pub struct Rgba {
@@ -69,7 +72,14 @@ mod tests {
 
     #[test]
     fn all_icons_render() {
-        for svg in [APP, TRAY_OFFLINE, TRAY_ONLINE, TRAY_CLIENTS] {
+        for svg in [
+            APP,
+            TRAY_OFFLINE,
+            TRAY_ONLINE,
+            TRAY_CLIENTS,
+            OPEN_WINDOW,
+            CLOSE,
+        ] {
             let icon = rasterize(svg, 32).unwrap();
             assert_eq!(icon.pixels.len(), 32 * 32 * 4);
             assert!(icon.pixels.chunks(4).any(|p| p[3] == 255));

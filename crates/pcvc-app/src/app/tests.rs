@@ -75,6 +75,25 @@ impl Harness {
         id
     }
 
+    /// Opens the mini mixer with a tray click, at scale 1.
+    fn open_mini(&mut self) -> window::Id {
+        self.run(vec![Message::Inbound(Inbound::Tray(TrayAction::Click(
+            tray_icon::MouseButton::Left,
+        )))]);
+        let id = self.app.mini.id().expect("the click opens the mini mixer");
+        self.run(vec![Message::ScaleFactor(id, 1.0)]);
+        id
+    }
+
+    /// The mini mixer's view at its window size.
+    fn mini_ui(&self) -> Simulator<'_, Message> {
+        Simulator::with_size(
+            iced::Settings::default(),
+            Size::new(style::MINI_WIDTH, self.app.mini_height),
+            self.app.mini_view(),
+        )
+    }
+
     fn sessions(&self) -> Vec<pcvc_audio::Session> {
         self.backend
             .snapshot()
@@ -480,5 +499,336 @@ fn render_real_mixer() {
         );
         let path = format!("{dir}/real-mixer-{name}.png");
         assert!(ui.snapshot(&theme).unwrap().matches_image(&path).unwrap());
+    }
+}
+
+/// Adds a session to the default device and delivers the new snapshot.
+fn add_session(h: &mut Harness, app: &str, name: &str, volume: f32) {
+    let device = h.backend.snapshot().unwrap().default_device.unwrap().id;
+    let id = MockBackend::session_id(&device, app);
+    h.backend
+        .add_session(&device, pcvc_audio::Session::new(id, name, volume))
+        .unwrap();
+    h.refresh_audio();
+}
+
+const LONG_NAME: &str = "A very long application name that does not fit in its column at all";
+
+/// The demo sessions plus one with a long name, with Discord muted.
+fn mini_harness() -> Harness {
+    let mut h = Harness::new();
+    let mut device = h.backend.snapshot().unwrap().default_device.unwrap();
+    device.sessions[2].muted = true;
+    h.backend.add_device(device).unwrap();
+    add_session(&mut h, "long", LONG_NAME, 31.0);
+    h
+}
+
+/// Vertical centre of the text found by `selector`.
+fn middle(ui: &mut Simulator<'_, Message>, selector: &str) -> f32 {
+    let bounds = ui.find(selector).unwrap().bounds();
+    bounds.y + bounds.height / 2.0
+}
+
+#[test]
+fn mini_opens_beside_the_full_window_and_fits_its_rows() {
+    let mut h = Harness::new();
+    let main = h.open_window();
+    let mini = h.open_mini();
+    assert_ne!(main, mini);
+    assert_eq!(h.app.window, Some(main));
+    assert_eq!(h.app.mini_height, crate::mini::height(4));
+    assert_eq!(h.app.title(mini), "PcVolumeControl Mixer");
+    // Each window shows its own view.
+    simulator(h.app.view(main)).find("Status").unwrap();
+    let mut ui = simulator(h.app.view(mini));
+    ui.find("Output device").unwrap();
+    assert!(ui.find("Status").is_err());
+    drop(ui);
+
+    // Both follow the audio state; the mini mixer grows and shrinks.
+    add_session(&mut h, "vlc", "VLC", 30.0);
+    assert_eq!(h.app.mini_height, crate::mini::height(5));
+    simulator(h.app.view(main)).find("VLC").unwrap();
+    simulator(h.app.view(mini)).find("VLC").unwrap();
+    for session in h.sessions() {
+        h.backend.remove_session(&session.id).unwrap();
+    }
+    h.refresh_audio();
+    assert_eq!(h.app.mini_height, crate::mini::height(0));
+
+    // Icons are rendered for the sharpest open window.
+    h.run(vec![Message::ScaleFactor(mini, 2.0)]);
+    assert_eq!(h.app.icon_size(), Some(48));
+    h.run(vec![Message::Escape(mini)]);
+    assert_eq!(h.app.mini.id(), None);
+    assert_eq!(h.app.icon_size(), Some(24));
+    assert_eq!(h.app.window, Some(main));
+}
+
+#[test]
+fn mini_closes_and_opens_the_full_window() {
+    let mut h = Harness::new();
+    let tray = |action| Message::Inbound(Inbound::Tray(action));
+
+    // The menu item toggles it; Escape elsewhere does nothing.
+    h.run(vec![tray(TrayAction::Mixer)]);
+    let mini = h.app.mini.id().unwrap();
+    h.run(vec![Message::Escape(window::Id::unique())]);
+    assert!(h.app.mini.is(mini));
+    h.run(vec![tray(TrayAction::Mixer)]);
+    assert_eq!(h.app.mini.id(), None);
+
+    // Its button opens the full window and closes it.
+    h.open_mini();
+    h.run(vec![Message::Mini(MiniMessage::OpenFull)]);
+    assert_eq!(h.app.mini.id(), None);
+    let main = h.app.window.unwrap();
+
+    // Closing it never quits, even without a tray; the close button too.
+    let mini = h.open_mini();
+    h.run(vec![Message::WindowCloseRequested(mini)]);
+    assert_eq!(h.app.mini.id(), None);
+    assert!(!h.app.quitting);
+    h.open_mini();
+    h.run(vec![Message::Mini(MiniMessage::Close)]);
+    assert_eq!(h.app.mini.id(), None);
+
+    // A second launch shows the full window and leaves the mini mixer.
+    let mini = h.open_mini();
+    h.run(vec![Message::Inbound(Inbound::ShowRequested)]);
+    assert!(h.app.mini.is(mini));
+    assert_eq!(h.app.window, Some(main));
+
+    // A double click opens the full window and closes the mini mixer.
+    h.run(vec![tray(TrayAction::DoubleClick)]);
+    assert_eq!(h.app.mini.id(), None);
+    assert_eq!(h.app.window, Some(main));
+
+    // Focus changes of the full window leave it alone.
+    std::thread::sleep(crate::mini::DOUBLE_CLICK_QUIET);
+    let mini = h.open_mini();
+    h.run(vec![
+        Message::WindowFocus(mini, true),
+        Message::WindowFocus(main, false),
+    ]);
+    assert!(h.app.mini.is(mini));
+}
+
+#[test]
+fn mini_shows_the_mixer_rows() {
+    let mut h = mini_harness();
+    h.open_mini();
+    let sessions = h.sessions();
+    let red = image::Handle::from_rgba(1, 1, vec![255, 0, 0, 255]);
+    h.resolve_icon(&sessions[0], Some(red));
+    h.resolve_icon(&sessions[1], None);
+    assert_eq!(h.app.mini_height, crate::mini::height(5));
+
+    let mut ui = h.mini_ui();
+    for name in ["Output device", "Master", "Firefox", "Spotify", "Discord"] {
+        ui.find(name).unwrap();
+    }
+    ui.find(icon_id("image", &sessions[0])).unwrap();
+    ui.find(icon_id("fallback", &sessions[1])).unwrap();
+    // Discord is muted: the only Unmute.
+    let unmute = ui.find("Unmute").unwrap().bounds();
+    let discord = middle(&mut ui, "Discord");
+    assert!((unmute.y + unmute.height / 2.0 - discord).abs() < 1.0);
+    // The long name is shortened; the columns line up.
+    let (name, bounds) = ui
+        .find(|c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text {
+                content, bounds, ..
+            } if content.starts_with("A very") => Some((content.to_owned(), bounds)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(name.ends_with('\u{2026}'), "{name:?}");
+    let spotify = ui.find("Spotify").unwrap().bounds();
+    assert_eq!(bounds.x, spotify.x);
+    let long_percent = ui.find("31%").unwrap().bounds();
+    let master_percent = ui.find("80%").unwrap().bounds();
+    assert_eq!(long_percent.x, master_percent.x);
+    assert!(long_percent.x + long_percent.width < style::MINI_WIDTH);
+    // Rows are evenly spaced, and the window is as tall as its rows.
+    let rows: Vec<f32> = ["100%", "65%", "40%", "55%", "31%"]
+        .iter()
+        .map(|p| middle(&mut ui, p))
+        .collect();
+    let step = style::MINI_ROW + style::COMPACT.row_spacing;
+    for pair in rows.windows(2) {
+        assert!((pair[1] - pair[0] - step).abs() < 0.5, "{rows:?}");
+    }
+    let bottom = rows[4] + style::MINI_ROW / 2.0 + style::MINI_PADDING.bottom;
+    assert!((bottom - h.app.mini_height).abs() < 0.5, "{bottom}");
+}
+
+#[test]
+fn mini_without_applications() {
+    let mut h = Harness::new();
+    for session in h.sessions() {
+        h.backend.remove_session(&session.id).unwrap();
+    }
+    h.refresh_audio();
+    h.open_mini();
+    assert_eq!(h.app.mini_height, crate::mini::height(0));
+    let mut ui = h.mini_ui();
+    ui.find("Master").unwrap();
+    let note = middle(&mut ui, "No applications are playing audio");
+    let bottom = note + style::MINI_ROW / 2.0 + style::MINI_PADDING.bottom;
+    assert!((bottom - h.app.mini_height).abs() < 0.5, "{bottom}");
+}
+
+/// Messages from clicking at `point`.
+fn click_at(mut ui: Simulator<'_, Message>, point: iced::Point) -> Vec<String> {
+    ui.point_at(point);
+    ui.simulate(iced_test::simulator::click());
+    ui.into_messages().map(|m| format!("{m:?}")).collect()
+}
+
+/// Where the Spotify row's slider middle and mute button are in a view
+/// whose rows are `width` wide at `density`.
+fn spotify_controls(
+    ui: &mut Simulator<'_, Message>,
+    h: &Harness,
+    width: f32,
+    density: &style::Density,
+) -> (iced::Point, iced::Point) {
+    let icon = ui
+        .find(icon_id("pending", &h.sessions()[1]))
+        .unwrap()
+        .bounds();
+    let percent = ui.find("65%").unwrap().bounds();
+    let y = percent.y + percent.height / 2.0;
+    let cols = mixer::MixerColumns::new(width, density);
+    let slider_start = icon.x + cols.label + density.spacing;
+    let slider_end = percent.x - density.spacing;
+    let mute = percent.x + percent.width + density.spacing + density.mute_width / 2.0;
+    (
+        iced::Point::new((slider_start + slider_end) / 2.0, y),
+        iced::Point::new(mute, y),
+    )
+}
+
+#[test]
+fn mini_sends_the_same_messages_as_the_mixer() {
+    let mut h = Harness::new();
+    h.open_window();
+    h.open_mini();
+    let full_size = Size::new(800.0, 600.0);
+    let full_ui = || Simulator::with_size(iced::Settings::default(), full_size, h.app.mixer_view());
+    let mini_width = style::MINI_WIDTH - style::MINI_PADDING.left - style::MINI_PADDING.right;
+
+    // The master's mute button comes first in both.
+    let clicks = |mut ui: Simulator<'_, Message>| {
+        ui.click("Mute").unwrap();
+        ui.into_messages()
+            .map(|m| format!("{m:?}"))
+            .collect::<Vec<_>>()
+    };
+    let master = clicks(full_ui());
+    assert_eq!(master, ["Mixer(ToggleMute(Master))"]);
+    assert_eq!(clicks(h.mini_ui()), master);
+
+    let (full_slider, full_mute) =
+        spotify_controls(&mut full_ui(), &h, full_size.width, &style::REGULAR);
+    let (mini_slider, mini_mute) =
+        spotify_controls(&mut h.mini_ui(), &h, mini_width, &style::COMPACT);
+    let mute = click_at(full_ui(), full_mute);
+    assert_eq!(mute.len(), 1);
+    assert!(mute[0].contains("ToggleMute(Session("), "{mute:?}");
+    assert_eq!(click_at(h.mini_ui(), mini_mute), mute);
+    let slide = click_at(full_ui(), full_slider);
+    assert_eq!(slide.len(), 2, "{slide:?}");
+    assert!(slide[0].contains("Slide(Session(") && slide[0].contains("50.0"));
+    assert!(slide[1].contains("Release(Session("));
+    assert_eq!(click_at(h.mini_ui(), mini_slider), slide);
+}
+
+/// Renders `element` at `size` and `scale` into a PNG at `path`.
+/// `Simulator::snapshot` always renders at scale 2.
+fn render_png(element: Element<'_, Message>, size: Size, scale: f32, theme: &Theme, path: &str) {
+    use iced::theme::Base;
+    use iced_test::core::renderer::{Headless, Style};
+    use iced_test::runtime::user_interface::{Cache, UserInterface};
+    use resvg::tiny_skia::{IntSize, Pixmap};
+
+    let mut renderer = iced_test::futures::futures::executor::block_on(
+        <iced_test::renderer::Renderer as Headless>::new(
+            iced::Font::with_name("Fira Sans"),
+            iced::Pixels(style::TEXT_DEFAULT),
+            None,
+        ),
+    )
+    .unwrap();
+    let mut ui = UserInterface::build(element, size, Cache::default(), &mut renderer);
+    let cursor = iced::mouse::Cursor::Unavailable;
+    let redraw = iced::Event::Window(window::Event::RedrawRequested(iced::time::Instant::now()));
+    let _ = ui.update(
+        &[redraw],
+        cursor,
+        &mut renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut Vec::new(),
+    );
+    let base = theme.base();
+    ui.draw(
+        &mut renderer,
+        theme,
+        &Style {
+            text_color: base.text_color,
+        },
+        cursor,
+    );
+    let (width, height) = (
+        (size.width * scale).round() as u32,
+        (size.height * scale).round() as u32,
+    );
+    let rgba = renderer.screenshot(iced::Size::new(width, height), scale, base.background_color);
+    // Opaque pixels read the same premultiplied.
+    let pixmap = Pixmap::from_vec(rgba, IntSize::from_wh(width, height).unwrap()).unwrap();
+    pixmap.save_png(path).unwrap();
+}
+
+/// Renders the mini mixer in both themes at scales 1 and 2 into
+/// `PCVC_SNAPSHOT_DIR` (`mini-*.png`) for a manual look. Run with
+/// `--ignored`.
+#[test]
+#[ignore = "writes PNG files for manual inspection"]
+fn render_mini() {
+    let Ok(dir) = std::env::var("PCVC_SNAPSHOT_DIR") else {
+        return;
+    };
+    let mut h = mini_harness();
+    let mut device = h.backend.snapshot().unwrap().default_device.unwrap();
+    device.name = "Arctis Nova Pro Wireless Analog Stereo".into();
+    h.backend.add_device(device).unwrap();
+    h.refresh_audio();
+    let id = h.open_mini();
+    let sessions = h.sessions();
+    let app = icons::rasterize(icons::APP, style::APP_ICON as u32).unwrap();
+    h.resolve_icon(
+        &sessions[0],
+        Some(image::Handle::from_rgba(app.width, app.height, app.pixels)),
+    );
+    for session in &sessions[1..4] {
+        h.resolve_icon(session, None);
+    }
+    let mut empty = Harness::new();
+    for session in empty.sessions() {
+        empty.backend.remove_session(&session.id).unwrap();
+    }
+    empty.refresh_audio();
+    let empty_id = empty.open_mini();
+    for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+        for scale in [1.0, 2.0] {
+            let size = Size::new(style::MINI_WIDTH, h.app.mini_height);
+            let path = format!("{dir}/mini-{name}-{scale}x.png");
+            render_png(h.app.view(id), size, scale, &theme, &path);
+            let size = Size::new(style::MINI_WIDTH, empty.app.mini_height);
+            let path = format!("{dir}/mini-empty-{name}-{scale}x.png");
+            render_png(empty.app.view(empty_id), size, scale, &theme, &path);
+        }
     }
 }

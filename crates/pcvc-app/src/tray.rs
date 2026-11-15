@@ -12,8 +12,13 @@ use crate::inbox::{Inbound, Inbox};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
-    /// Left click on the icon.
-    Activate,
+    /// A left or middle click on the icon (on Linux, the host's activate
+    /// and secondary activate).
+    Click(MouseButton),
+    /// A double click on the icon (Windows only).
+    DoubleClick,
+    /// The menu's Mixer item.
+    Mixer,
     Open,
     ToggleMute,
     ToggleServer,
@@ -21,6 +26,7 @@ pub enum TrayAction {
     Quit,
 }
 
+const ID_MIXER: &str = "mixer";
 const ID_OPEN: &str = "open";
 const ID_MUTE: &str = "mute";
 const ID_SERVER: &str = "server";
@@ -30,6 +36,7 @@ const ID_QUIT: &str = "quit";
 impl TrayAction {
     fn from_menu_id(id: &MenuId) -> Option<Self> {
         Some(match id.as_ref() {
+            ID_MIXER => Self::Mixer,
             ID_OPEN => Self::Open,
             ID_MUTE => Self::ToggleMute,
             ID_SERVER => Self::ToggleServer,
@@ -38,20 +45,30 @@ impl TrayAction {
             _ => return None,
         })
     }
+
+    fn from_icon_event(event: &TrayIconEvent) -> Option<Self> {
+        match *event {
+            TrayIconEvent::Click {
+                button: button @ (MouseButton::Left | MouseButton::Middle),
+                button_state: MouseButtonState::Up,
+                ..
+            } => Some(Self::Click(button)),
+            TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => Some(Self::DoubleClick),
+            _ => None,
+        }
+    }
 }
 
 /// Routes tray clicks and menu choices into the inbox. Call once, before the
 /// tray is created.
 pub fn install_event_handlers(inbox: &Inbox) {
     let tray_inbox = inbox.clone();
-    TrayIconEvent::set_event_handler(Some(move |event| {
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } = event
-        {
-            tray_inbox.send(Inbound::Tray(TrayAction::Activate));
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        if let Some(action) = TrayAction::from_icon_event(&event) {
+            tray_inbox.send(Inbound::Tray(action));
         }
     }));
     let menu_inbox = inbox.clone();
@@ -125,6 +142,7 @@ impl Core {
         let online = load_icon(icons::TRAY_ONLINE)?;
         let clients = load_icon(icons::TRAY_CLIENTS)?;
 
+        let mixer = MenuItem::with_id(ID_MIXER, "Mixer", true, None);
         let open = MenuItem::with_id(ID_OPEN, "Open", true, None);
         let mute = MenuItem::with_id(
             ID_MUTE,
@@ -137,6 +155,7 @@ impl Core {
             CheckMenuItem::with_id(ID_LOGIN, "Start on login", true, model.start_on_login, None);
         let quit = MenuItem::with_id(ID_QUIT, "Quit", true, None);
         let menu = Menu::with_items(&[
+            &mixer,
             &open,
             &PredefinedMenuItem::separator(),
             &mute,

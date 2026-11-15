@@ -15,6 +15,7 @@ mod icons;
 mod inbox;
 mod instance;
 mod logging;
+mod mini;
 mod mixer;
 mod model;
 mod paths;

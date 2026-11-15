@@ -1,5 +1,6 @@
 //! The iced daemon: state, messages, update and subscriptions.
 
+mod mini;
 mod mixer;
 mod settings;
 mod status;
@@ -12,8 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use iced::keyboard::{self, key};
 use iced::widget::{button, column, container, image, row, text};
-use iced::{Element, Length, Size, Subscription, Task, Theme, window};
+use iced::{Element, Length, Size, Subscription, Task, Theme, event, window};
 use pcvc_audio::{AudioBackend, AudioState};
 use pcvc_protocol::Command;
 use pcvc_server::{ClientInfo, IconProvider, MdnsStatus};
@@ -23,11 +25,13 @@ use crate::audio::{self, CommandSender};
 use crate::config::{Config, WindowSize};
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
 use crate::logging::LogBuffer;
+use crate::mini::{CloseReason, Event as MiniEvent, MiniWindow};
 use crate::mixer::Mixer;
 use crate::model;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
 use crate::{autostart, icons, instance, style};
+use mini::MiniMessage;
 use mixer::MixerMessage;
 use settings::{Notice, SettingsForm, SettingsMessage};
 
@@ -54,13 +58,34 @@ pub enum Message {
     WindowClosed(window::Id),
     WindowResized(window::Id, Size),
     ScaleFactor(window::Id, f32),
+    /// A window gained (`true`) or lost focus.
+    WindowFocus(window::Id, bool),
+    /// Escape was pressed in a window and no widget took it.
+    Escape(window::Id),
     ShowPage(Page),
     ToggleServer,
     Mixer(MixerMessage),
+    Mini(MiniMessage),
     Settings(SettingsMessage),
     /// Periodic refresh of time-dependent views.
     Tick,
     ForceExit,
+}
+
+/// Window events not covered by iced's own subscriptions.
+fn window_event(event: iced::Event, status: event::Status, id: window::Id) -> Option<Message> {
+    match event {
+        iced::Event::Window(window::Event::Rescaled(factor)) => {
+            Some(Message::ScaleFactor(id, factor))
+        }
+        iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(id, true)),
+        iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(id, false)),
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(key::Named::Escape),
+            ..
+        }) if status == event::Status::Ignored => Some(Message::Escape(id)),
+        _ => None,
+    }
 }
 
 /// What `main` prepares before the daemon starts.
@@ -138,16 +163,23 @@ pub struct App {
     /// The icon key of each shown session (by session id), and the key it
     /// had at the previous icon size, shown until the new one resolves.
     session_icons: HashMap<String, (IconKey, Option<IconKey>)>,
-    /// The window's scale factor, for rendering icons at physical size;
-    /// unknown until a window has reported it.
+    /// The largest scale factor of the open windows, for rendering icons at
+    /// physical size; the last one known while none has reported, and
+    /// unknown until a window has.
     scale_factor: Option<f32>,
+    /// Scale factors reported by the open windows.
+    window_scales: HashMap<window::Id, f32>,
     /// When the pending mixer wake-up fires, if one is scheduled.
     mixer_timer: Option<std::time::Instant>,
     local_ips: Vec<Ipv4Addr>,
     /// The last interface listing error, so a persistent one is logged once.
     local_ips_error: Option<String>,
     tray: Option<Tray>,
+    /// The full window.
     window: Option<window::Id>,
+    mini: MiniWindow,
+    /// The height last given to the mini mixer.
+    mini_height: f32,
     config: Config,
     config_path: Option<PathBuf>,
     settings: SettingsForm,
@@ -201,11 +233,14 @@ impl App {
             icons: IconCache::new(ICON_CACHE_CAPACITY),
             session_icons: HashMap::new(),
             scale_factor: None,
+            window_scales: HashMap::new(),
             mixer_timer: None,
             local_ips: Vec::new(),
             local_ips_error: None,
             tray: None,
             window: None,
+            mini: MiniWindow::default(),
+            mini_height: 0.0,
             settings: SettingsForm::from(&config),
             notice: None,
             config,
@@ -225,8 +260,12 @@ impl App {
         (app, Task::batch([Task::done(Message::CreateTray), open]))
     }
 
-    pub fn title(&self, _window: window::Id) -> String {
-        "PcVolumeControl".to_owned()
+    pub fn title(&self, window: window::Id) -> String {
+        if self.mini.is(window) {
+            "PcVolumeControl Mixer".to_owned()
+        } else {
+            "PcVolumeControl".to_owned()
+        }
     }
 
     pub fn theme(&self, _window: window::Id) -> Option<Theme> {
@@ -259,7 +298,7 @@ impl App {
                 self.mixer.on_state(&state);
                 self.audio = Some(state);
                 self.request_icons();
-                Task::none()
+                self.fit_mini()
             }
             Message::Inbound(Inbound::AppIcon(resolved)) => {
                 self.icons
@@ -272,7 +311,8 @@ impl App {
                 if self.window == Some(id) {
                     self.window = None;
                 }
-                Task::none()
+                self.forget_window(id);
+                self.mini_event(MiniEvent::Closed(id))
             }
             Message::WindowResized(id, size) => {
                 // Minimising reports a zero size on some platforms.
@@ -286,12 +326,25 @@ impl App {
                 Task::none()
             }
             Message::ScaleFactor(id, factor) => {
-                if self.window == Some(id) && factor.is_finite() && factor > 0.0 {
-                    self.scale_factor = Some(factor);
-                    self.request_icons();
+                let ours = self.window == Some(id) || self.mini.is(id);
+                if ours && factor.is_finite() && factor > 0.0 {
+                    self.window_scales.insert(id, factor);
+                    self.update_scale_factor();
                 }
                 Task::none()
             }
+            Message::WindowFocus(id, focused) => {
+                if !self.mini.is(id) {
+                    return Task::none();
+                }
+                self.mini_event(if focused {
+                    MiniEvent::Focused(id)
+                } else {
+                    MiniEvent::Unfocused(id)
+                })
+            }
+            Message::Escape(id) => self.mini_event(MiniEvent::Escape(id)),
+            Message::Mini(message) => self.mini_update(message),
             Message::ShowPage(page) => {
                 self.page = page;
                 Task::none()
@@ -317,10 +370,19 @@ impl App {
 
     fn tray_action(&mut self, action: TrayAction) -> Task<Message> {
         match action {
-            TrayAction::Activate => match self.window {
-                Some(id) => self.close_window(id),
-                None => self.open_window(),
-            },
+            TrayAction::Click(button) => {
+                tracing::debug!("tray: {button:?} click");
+                self.mini_event(MiniEvent::Toggle)
+            }
+            TrayAction::Mixer => {
+                tracing::debug!("tray: Mixer menu item");
+                self.mini_event(MiniEvent::Toggle)
+            }
+            TrayAction::DoubleClick => {
+                tracing::debug!("tray: double click");
+                let close = self.mini_event(MiniEvent::DoubleClick);
+                Task::batch([close, self.open_window()])
+            }
             TrayAction::Open => self.open_window(),
             TrayAction::ToggleMute => {
                 if let Some(device) = self.audio.as_ref().and_then(|a| a.default_device.as_ref()) {
@@ -420,10 +482,27 @@ impl App {
         Some((style::APP_ICON * scale).ceil() as u32)
     }
 
+    /// Uses the largest scale factor of the open windows, so icons are
+    /// sharp in each, and looks icons up again when it changes.
+    fn update_scale_factor(&mut self) {
+        let largest = self.window_scales.values().copied().reduce(f32::max);
+        if largest.is_some() && largest != self.scale_factor {
+            self.scale_factor = largest;
+            self.request_icons();
+        }
+    }
+
+    /// Drops what is kept about a window that is closing or closed.
+    fn forget_window(&mut self, id: window::Id) {
+        if self.window_scales.remove(&id).is_some() {
+            self.update_scale_factor();
+        }
+    }
+
     /// Starts lookups for the icons of the shown sessions that are not
-    /// known yet. Nothing is looked up while the window is closed.
+    /// known yet. Nothing is looked up while both windows are closed.
     fn request_icons(&mut self) {
-        if self.window.is_none() {
+        if self.window.is_none() && self.mini.id().is_none() {
             return;
         }
         let (Some(size), Some(device)) = (
@@ -464,8 +543,12 @@ impl App {
         }
     }
 
-    /// Closing the window hides the app to the tray, or quits without one.
+    /// Closing the full window hides the app to the tray, or quits without
+    /// one. Closing the mini mixer never quits.
     fn close_requested(&mut self, id: window::Id) -> Task<Message> {
+        if self.mini.is(id) {
+            return self.mini_event(MiniEvent::Close(CloseReason::CloseRequest));
+        }
         if self.tray.is_none() {
             return self.quit();
         }
@@ -475,6 +558,7 @@ impl App {
     fn close_window(&mut self, id: window::Id) -> Task<Message> {
         if self.window == Some(id) {
             self.window = None;
+            self.forget_window(id);
             // Keeps the window size for next time.
             let _ = self.persist_config();
         }
@@ -493,8 +577,9 @@ impl App {
             Some(id) => self.close_window(id),
             None => Task::none(),
         };
+        let close_mini = self.mini_event(MiniEvent::Close(CloseReason::Quit));
         let deadline = Task::perform(tokio::time::sleep(QUIT_TIMEOUT), |()| Message::ForceExit);
-        Task::batch([close, deadline])
+        Task::batch([close, close_mini, deadline])
     }
 
     fn exit(&mut self) -> Task<Message> {
@@ -540,17 +625,15 @@ impl App {
             window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
-            iced::event::listen_with(|event, _, id| match event {
-                iced::Event::Window(window::Event::Rescaled(factor)) => {
-                    Some(Message::ScaleFactor(id, factor))
-                }
-                _ => None,
-            }),
+            event::listen_with(window_event),
             tick,
         ])
     }
 
     pub fn view(&self, id: window::Id) -> Element<'_, Message> {
+        if self.mini.is(id) {
+            return self.mini_view();
+        }
         if self.window != Some(id) {
             return text("").into();
         }

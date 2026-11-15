@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Container, Scrollable, button as btn, container, scrollable, slider, text};
+use iced::widget::{
+    Container, Scrollable, button as btn, container, scrollable, slider, svg, text,
+};
 use iced::{Border, Color, Element, Fill, Padding, Theme};
 
 pub const SPACE_XS: f32 = 4.0;
@@ -57,6 +59,8 @@ pub struct Density {
     /// The slider keeps at least this much before the label shrinks below
     /// its minimum.
     pub slider_min: f32,
+    /// Every row's height, when fixed.
+    pub row_height: Option<f32>,
 }
 
 /// The window's Mixer page.
@@ -79,7 +83,59 @@ pub const REGULAR: Density = Density {
     label_min: 120.0,
     label_max: 260.0,
     slider_min: 80.0,
+    row_height: None,
 };
+
+/// The mini mixer. Rows have a fixed height, so the window can be sized
+/// for its rows before it is drawn.
+pub const COMPACT: Density = Density {
+    text: TEXT_COMPACT,
+    master_text: TEXT_COMPACT,
+    spacing: SPACE_S,
+    row_spacing: SPACE_XS,
+    inset: 0.0,
+    mute_width: 70.0,
+    mute_padding: Padding {
+        top: 3.0,
+        right: SPACE_S,
+        bottom: 3.0,
+        left: SPACE_S,
+    },
+    percent_width: 38.0,
+    picker_padding: Padding {
+        top: SPACE_XS,
+        right: SPACE_S,
+        bottom: SPACE_XS,
+        left: SPACE_S,
+    },
+    label_share: 0.5,
+    label_min: 100.0,
+    label_max: 160.0,
+    slider_min: 80.0,
+    row_height: Some(MINI_ROW),
+};
+
+pub const TEXT_COMPACT: f32 = 14.0;
+
+/// The mini mixer: a fixed width, and a height that follows its rows up to
+/// `MINI_MAX_HEIGHT` (see `mini::height`).
+pub const MINI_WIDTH: f32 = 400.0;
+pub const MINI_MAX_HEIGHT: f32 = 460.0;
+pub const MINI_ROW: f32 = 32.0;
+/// Inside the frame. On the right the scroll gutter, which every row
+/// keeps, does the padding; one pixel clears the frame's border.
+pub const MINI_PADDING: Padding = Padding {
+    top: SPACE_M,
+    right: 1.0,
+    bottom: SPACE_M,
+    left: SCROLL_GUTTER,
+};
+/// Between the header, the device picker, the master row, the divider and
+/// the application list.
+pub const MINI_GAP: f32 = SPACE_S;
+pub const MINI_HEADER: f32 = 24.0;
+pub const MINI_HEADER_ICON: f32 = 14.0;
+pub const MINI_DIVIDER: f32 = 1.0;
 
 /// Application icons in the Mixer.
 pub const APP_ICON: f32 = 24.0;
@@ -115,6 +171,8 @@ pub enum Button {
     Danger,
     /// A navigation entry; `true` when selected.
     Nav(bool),
+    /// A bare icon that shows a background when hovered or pressed.
+    Icon,
 }
 
 /// A built-in button style with rounded corners.
@@ -126,6 +184,19 @@ pub fn button(kind: Button) -> impl Fn(&Theme, btn::Status) -> btn::Style {
             Button::Success => btn::success(theme, status),
             Button::Danger => btn::danger(theme, status),
             Button::Nav(false) => btn::text(theme, status),
+            Button::Icon => {
+                let palette = theme.extended_palette();
+                let background = match status {
+                    btn::Status::Hovered => Some(palette.background.weak.color.into()),
+                    btn::Status::Pressed => Some(palette.background.strong.color.into()),
+                    btn::Status::Active | btn::Status::Disabled => None,
+                };
+                btn::Style {
+                    background,
+                    text_color: palette.background.base.text,
+                    ..btn::Style::default()
+                }
+            }
         };
         btn::Style {
             border: Border {
@@ -146,6 +217,28 @@ pub fn card(theme: &Theme) -> container::Style {
             ..base.border
         },
         ..base
+    }
+}
+
+/// The mini mixer's window: the page background inside a hairline border,
+/// which sets the borderless window apart from what is behind it.
+pub fn mini_frame(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.base.color.into()),
+        border: Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// An icon in the mini mixer's header, in the text colour.
+pub fn header_icon(theme: &Theme, _status: svg::Status) -> svg::Style {
+    svg::Style {
+        color: Some(theme.extended_palette().background.base.text),
     }
 }
 

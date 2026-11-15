@@ -1,5 +1,6 @@
-//! Mixer view and its message handling. The rows are built at a
-//! [`Density`].
+//! Mixer view and its message handling. The device picker, master row and
+//! application rows are shared with the mini mixer (`app::mini`), which
+//! builds them at another [`Density`].
 
 use std::borrow::Cow;
 use std::time::Instant;
@@ -239,10 +240,12 @@ impl App {
         density: &Density,
     ) -> Element<'a, Message> {
         if device.sessions.is_empty() {
-            return text("No applications are playing audio")
-                .size(density.text)
-                .style(style::muted_text)
-                .into();
+            return fixed_height(
+                text("No applications are playing audio")
+                    .size(density.text)
+                    .style(style::muted_text),
+                density,
+            );
         }
         column(device.sessions.iter().map(|s| {
             let target = Target::Session(s.id.clone());
@@ -345,15 +348,17 @@ impl App {
         } else {
             percent
         };
-        row![
-            container(label).width(cols.label).clip(true),
-            fader,
-            percent,
-            mute
-        ]
-        .spacing(density.spacing)
-        .align_y(Center)
-        .into()
+        fixed_height(
+            row![
+                container(label).width(cols.label).clip(true),
+                fader,
+                percent,
+                mute
+            ]
+            .spacing(density.spacing)
+            .align_y(Center),
+            density,
+        )
     }
 }
 
@@ -381,15 +386,29 @@ pub(super) fn device_picker<'a>(
     .text_size(density.text)
     .padding(density.picker_padding)
     .width(Fill);
-    row![
-        container(text("Output device").size(density.text))
-            .width(cols.label)
-            .clip(true),
-        with_tooltip(list, full_name),
-    ]
-    .spacing(density.spacing)
-    .align_y(Center)
-    .into()
+    fixed_height(
+        row![
+            container(text("Output device").size(density.text))
+                .width(cols.label)
+                .clip(true),
+            with_tooltip(list, full_name),
+        ]
+        .spacing(density.spacing)
+        .align_y(Center),
+        density,
+    )
+}
+
+/// `content` vertically centred in the density's row height, when it has
+/// one.
+pub(super) fn fixed_height<'a>(
+    content: impl Into<Element<'a, Message>>,
+    density: &Density,
+) -> Element<'a, Message> {
+    match density.row_height {
+        Some(height) => container(content).height(height).align_y(Center).into(),
+        None => content.into(),
+    }
 }
 
 /// A session name fitted to `width`, with the full name in a tooltip when
@@ -404,7 +423,7 @@ fn session_name<'a>(name: &'a str, width: f32, density: &Density) -> Element<'a,
 }
 
 /// `content`, with `full` in a tooltip on hover when given.
-fn with_tooltip<'a>(
+pub(super) fn with_tooltip<'a>(
     content: impl Into<Element<'a, Message>>,
     full: Option<&'a str>,
 ) -> Element<'a, Message> {
@@ -428,11 +447,11 @@ fn with_tooltip<'a>(
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct MixerColumns {
     /// The label column: "Output device", "Master", or icon and name.
-    label: f32,
+    pub(super) label: f32,
     /// Room for a session name after its icon.
-    name: f32,
+    pub(super) name: f32,
     /// Room for the device name inside the picker, beside its arrow.
-    picker_text: f32,
+    pub(super) picker_text: f32,
 }
 
 impl MixerColumns {
