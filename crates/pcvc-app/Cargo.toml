@@ -67,11 +67,11 @@ computer's volume over the local network: master volume, mute, the default \
 output device and per-application volume. It lives in the system tray, \
 advertises itself over mDNS so phones find it, and has a window with a local \
 mixer, connection status and settings."""
-# $auto cannot see dlopened libraries. winit loads libxkbcommon and the X11
+# $auto finds linked libraries (libpulse0) but cannot see dlopened ones. winit loads libxkbcommon and the X11
 # libraries (enough on Wayland sessions too, through XWayland) and prefers the
 # Wayland ones when present; wgpu loads EGL and iced falls back to software
 # rendering without it.
-depends = "$auto, libpulse0, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxi6"
+depends = "$auto, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libx11-xcb1, libxcursor1, libxi6"
 recommends = "libwayland-client0, libwayland-egl1, libegl1, libegl-mesa0"
 assets = [
     ["target/release/pcvolumecontrol", "usr/bin/", "755"],
