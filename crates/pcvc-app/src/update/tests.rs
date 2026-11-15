@@ -187,7 +187,7 @@ fn publish(server: &Server, installer: &[u8]) {
 
 fn available(server: &Server) -> Release {
     match check(server, "1.2.2") {
-        Ok(CheckOutcome::Available(release)) => release,
+        Ok(CheckOutcome::Available(release)) => *release,
         other => panic!("{other:?}"),
     }
 }

@@ -127,24 +127,28 @@ impl App {
         );
 
         style::scroll_area(
-            column![
-                indicator,
-                section("Listening on", addresses),
-                section("mDNS", text(mdns)),
-                section("Connected clients", client_rows),
-                section(
-                    "Recent log",
-                    container(logs)
-                        .padding(style::SPACE_M)
-                        .width(Fill)
-                        .style(style::card)
-                ),
-                text(versions)
-                    .size(style::TEXT_SMALL)
-                    .style(style::muted_text),
-            ]
-            .spacing(style::SPACE_L)
-            .padding(iced::Padding::ZERO.bottom(style::SPACE_M)),
+            column![]
+                .push(self.update_banner())
+                .push(indicator)
+                .extend([
+                    section("Listening on", addresses),
+                    section("mDNS", text(mdns)),
+                    section("Connected clients", client_rows),
+                    section("Updates", self.update_status()),
+                    section(
+                        "Recent log",
+                        container(logs)
+                            .padding(style::SPACE_M)
+                            .width(Fill)
+                            .style(style::card),
+                    ),
+                    text(versions)
+                        .size(style::TEXT_SMALL)
+                        .style(style::muted_text)
+                        .into(),
+                ])
+                .spacing(style::SPACE_L)
+                .padding(iced::Padding::ZERO.bottom(style::SPACE_M)),
         )
         .into()
     }

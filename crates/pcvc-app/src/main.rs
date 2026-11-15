@@ -23,7 +23,6 @@ mod placement;
 mod server_ctl;
 mod style;
 mod tray;
-#[allow(dead_code, reason = "the app uses it once the scheduler is in place")]
 mod update;
 
 use std::process::ExitCode;
@@ -115,6 +114,11 @@ fn main() -> ExitCode {
         inbox,
         inbox_rx,
         logs,
+        update_context: Some(update::Context::github(
+            update::detect_install_kind(),
+            paths::updates_dir(),
+        )),
+        update_state: paths::update_state_file(),
     }));
     let result = iced::daemon(
         move || {

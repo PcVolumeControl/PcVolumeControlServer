@@ -237,11 +237,21 @@ impl App {
             switch("Show window on launch", form.show_on_launch, move |on| {
                 msg(SettingsMessage::ShowOnLaunch(on))
             }),
-            switch(
-                "Check for updates on launch",
-                form.check_for_updates,
-                move |on| msg(SettingsMessage::CheckForUpdates(on)),
-            ),
+            column![
+                switch(
+                    "Check for updates automatically",
+                    form.check_for_updates,
+                    move |on| msg(SettingsMessage::CheckForUpdates(on)),
+                ),
+                text(if self.updates.official {
+                    "Contacts GitHub once a day to look for a new release."
+                } else {
+                    "Contacts GitHub once a day to look for a new release (not in development builds)."
+                })
+                .size(style::TEXT_SMALL)
+                .style(style::muted_text),
+            ]
+            .spacing(style::SPACE_XS),
             setting(
                 "Theme",
                 pick_list(ThemeChoice::ALL, Some(form.theme), move |t| {

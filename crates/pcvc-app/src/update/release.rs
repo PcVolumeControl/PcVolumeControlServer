@@ -45,6 +45,7 @@ impl Endpoints {
 /// How this copy of the app was installed, which decides the asset it is
 /// updated from and whether it can install updates itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "each platform detects only its own kinds")]
 pub enum InstallKind {
     /// By the Windows installer; `all_users` for an install in Program
     /// Files, for which the installer asks for elevation.
@@ -109,7 +110,7 @@ pub enum CheckOutcome {
     UpToDate {
         latest: ReleaseVersion,
     },
-    Available(Release),
+    Available(Box<Release>),
     /// The repository has no published stable release.
     NoReleases,
 }
@@ -194,13 +195,13 @@ pub fn parse_latest(
                 name,
             })
     };
-    Ok(CheckOutcome::Available(Release {
+    Ok(CheckOutcome::Available(Box::new(Release {
         page_url: format!("{}/{tag}", endpoints.page),
         asset: find(kind.asset_name(&latest)),
         checksums: find(CHECKSUMS.to_owned()),
         signature: find(SIGNATURE.to_owned()),
         version: latest,
-    }))
+    })))
 }
 
 #[cfg(test)]

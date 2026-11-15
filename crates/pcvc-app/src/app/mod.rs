@@ -6,6 +6,9 @@ mod settings;
 mod status;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod update_tests;
+mod updates;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -35,6 +38,7 @@ use crate::{autostart, icons, instance, style};
 use mini::MiniMessage;
 use mixer::MixerMessage;
 use settings::{Notice, SettingsForm, SettingsMessage};
+use updates::{UpdateMessage, Updates};
 
 const MIN_SIZE: Size = Size::new(WindowSize::MIN.width, WindowSize::MIN.height);
 
@@ -68,6 +72,7 @@ pub enum Message {
     Mixer(MixerMessage),
     Mini(MiniMessage),
     Settings(SettingsMessage),
+    Update(UpdateMessage),
     /// Periodic refresh of time-dependent views.
     Tick,
     ForceExit,
@@ -104,6 +109,10 @@ pub struct Boot {
     pub inbox: Inbox,
     pub inbox_rx: InboxReceiver,
     pub logs: LogBuffer,
+    /// The update worker's setup; `None` runs no checks.
+    pub update_context: Option<crate::update::Context>,
+    /// Where update state is kept; `None` keeps it in memory only.
+    pub update_state: Option<PathBuf>,
 }
 
 /// Quits cleanly (so mDNS sends its goodbye) on Ctrl-C or, on Unix, on
@@ -199,6 +208,7 @@ pub struct App {
     notice: Option<Notice>,
     page: Page,
     logs: LogBuffer,
+    updates: Updates,
     quitting: bool,
 }
 
@@ -216,8 +226,19 @@ impl App {
             inbox,
             inbox_rx,
             logs,
+            update_context,
+            update_state,
         } = boot;
         let icon_worker = IconWorker::spawn(icon_resolver, inbox.clone());
+        let update_kind = update_context
+            .as_ref()
+            .map_or_else(crate::update::detect_install_kind, |c| c.kind);
+        let updates = Updates::new(
+            update_context.map(|c| crate::update::Worker::spawn(c, inbox.clone())),
+            update_kind,
+            update_state,
+            crate::update::OFFICIAL_BUILD,
+        );
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
         spawn_signal_handler(inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
@@ -265,6 +286,7 @@ impl App {
             config_path,
             page: Page::Mixer,
             logs,
+            updates,
             quitting: false,
         };
         app.refresh_local_ips();
@@ -312,6 +334,8 @@ impl App {
             Message::Inbound(Inbound::Tray(action)) => self.tray_action(action),
             Message::Inbound(Inbound::ShowRequested) => self.open_window(),
             Message::Inbound(Inbound::QuitRequested) => self.quit(),
+            Message::Inbound(Inbound::Update(event)) => self.update_event(event),
+            Message::Update(message) => self.update_message(message),
             Message::Inbound(Inbound::Audio(state)) => {
                 self.mixer.on_state(&state);
                 self.audio = Some(state);
@@ -423,6 +447,11 @@ impl App {
             TrayAction::ToggleStartOnLogin => {
                 self.toggle_start_on_login();
                 Task::none()
+            }
+            TrayAction::ShowUpdate => {
+                let open = self.open_window();
+                self.page = Page::Status;
+                open
             }
             TrayAction::Quit => self.quit(),
         }
@@ -625,6 +654,11 @@ impl App {
                 ServerStatus::Running(_) | ServerStatus::Starting
             ),
             start_on_login: self.config.start_on_login,
+            update: self
+                .updates
+                .updater
+                .offered()
+                .map(|r| r.version.to_string()),
         }
     }
 
@@ -650,6 +684,7 @@ impl App {
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
             event::listen_with(window_event),
             tick,
+            self.update_subscription(),
         ])
     }
 

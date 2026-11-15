@@ -18,8 +18,8 @@ use crate::inbox;
 use crate::mini::{Body, height};
 use crate::mixer::Target;
 
-struct Harness {
-    app: App,
+pub(super) struct Harness {
+    pub(super) app: App,
     backend: Arc<MockBackend>,
     /// Entered around every update, as iced does. Nothing drives it, so the
     /// server and watcher tasks spawned at boot never actually run.
@@ -27,7 +27,7 @@ struct Harness {
 }
 
 impl Harness {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -47,6 +47,8 @@ impl Harness {
             inbox,
             inbox_rx,
             logs: LogBuffer::new(10),
+            update_context: None,
+            update_state: None,
         });
         // The real locator would read this machine's display.
         app.mini_locator = None;
@@ -64,7 +66,7 @@ impl Harness {
         self.run(vec![Message::Inbound(Inbound::Audio(state))]);
     }
 
-    fn run(&mut self, messages: Vec<Message>) {
+    pub(super) fn run(&mut self, messages: Vec<Message>) {
         let _guard = self.runtime.enter();
         for message in messages {
             let _ = self.app.update(message);
@@ -72,7 +74,7 @@ impl Harness {
     }
 
     /// Pretends a window at scale 1 is open, so the Mixer shows icons.
-    fn open_window(&mut self) -> window::Id {
+    pub(super) fn open_window(&mut self) -> window::Id {
         let id = window::Id::unique();
         self.app.window = Some(id);
         self.run(vec![Message::ScaleFactor(id, 1.0)]);

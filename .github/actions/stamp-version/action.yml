@@ -1,5 +1,5 @@
 name: Stamp the release version
-description: Sets the workspace package version to the release version.
+description: Sets the workspace package version to the release version and marks the build as official.
 inputs:
   version:
     description: The version to build, without the leading v.
@@ -24,3 +24,6 @@ runs:
           cargo update --workspace
         fi
         echo "building version $VERSION (Cargo.toml had $current)"
+        # Marks the build as official (crates/pcvc-app/build.rs): it checks
+        # for updates by itself and can install them.
+        echo "PCVC_OFFICIAL_BUILD=1" >> "$GITHUB_ENV"

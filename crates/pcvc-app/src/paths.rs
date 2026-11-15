@@ -17,3 +17,13 @@ pub fn config_file() -> Option<PathBuf> {
 pub fn log_dir() -> Option<PathBuf> {
     project_dirs().map(|d| d.data_local_dir().join("logs"))
 }
+
+/// What the update feature keeps between runs, next to the config.
+pub fn update_state_file() -> Option<PathBuf> {
+    project_dirs().map(|d| d.config_dir().join("update-state.toml"))
+}
+
+/// Where update installers are downloaded, private to the user.
+pub fn updates_dir() -> Option<PathBuf> {
+    project_dirs().map(|d| d.data_local_dir().join("updates"))
+}

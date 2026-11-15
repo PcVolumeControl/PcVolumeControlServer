@@ -30,6 +30,8 @@ pub const NAV_WIDTH: f32 = 150.0;
 /// Labels of the Settings rows.
 pub const LABEL_WIDTH: f32 = 140.0;
 pub const STATUS_ICON: f32 = 64.0;
+/// The update download's progress bar.
+pub const PROGRESS_GIRTH: f32 = 6.0;
 
 /// Sizes of the Mixer rows, which are built by the same code at every
 /// density. Application icons keep one size (`APP_ICON`) at all densities,

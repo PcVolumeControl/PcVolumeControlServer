@@ -1,10 +1,21 @@
-//! Embeds the application icon and version information in the Windows
-//! executable.
+//! Marks builds made by the release workflow, and embeds the application
+//! icon and version information in the Windows executable.
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+    official_build();
     #[cfg(windows)]
     windows_resources();
+}
+
+/// The release workflow's stamp-version action sets PCVC_OFFICIAL_BUILD=1;
+/// only such builds check for updates on their own and install them.
+fn official_build() {
+    println!("cargo::rerun-if-env-changed=PCVC_OFFICIAL_BUILD");
+    println!("cargo::rustc-check-cfg=cfg(pcvc_official_build)");
+    if std::env::var("PCVC_OFFICIAL_BUILD").as_deref() == Ok("1") {
+        println!("cargo::rustc-cfg=pcvc_official_build");
+    }
 }
 
 /// Runs only on a Windows host, where the resource compiler is available.

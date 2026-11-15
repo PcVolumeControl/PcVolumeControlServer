@@ -28,6 +28,8 @@ pub enum TrayAction {
     ToggleMute,
     ToggleServer,
     ToggleStartOnLogin,
+    /// The item shown while an update is available.
+    ShowUpdate,
     Quit,
 }
 
@@ -37,6 +39,7 @@ const ID_MUTE: &str = "mute";
 const ID_SERVER: &str = "server";
 const ID_LOGIN: &str = "login";
 const ID_QUIT: &str = "quit";
+const ID_UPDATE: &str = "update";
 
 impl TrayAction {
     fn from_menu_id(id: &MenuId) -> Option<Self> {
@@ -46,6 +49,7 @@ impl TrayAction {
             ID_MUTE => Self::ToggleMute,
             ID_SERVER => Self::ToggleServer,
             ID_LOGIN => Self::ToggleStartOnLogin,
+            ID_UPDATE => Self::ShowUpdate,
             ID_QUIT => Self::Quit,
             _ => return None,
         })
@@ -117,6 +121,8 @@ pub struct TrayModel {
     pub muted: Option<bool>,
     pub server_running: bool,
     pub start_on_login: bool,
+    /// The version of an available update, which adds a menu item.
+    pub update: Option<String>,
 }
 
 /// The icon and menu items, living on whichever thread may touch them.
@@ -128,9 +134,17 @@ struct Core {
     mute: MenuItem,
     server: MenuItem,
     login: CheckMenuItem,
+    /// At the top of the menu, with its separator, only while an update is
+    /// available.
+    update: MenuItem,
+    update_separator: PredefinedMenuItem,
     // Keeps the menu alive; the items above are views into it.
-    _menu: Menu,
+    menu: Menu,
     last: TrayModel,
+}
+
+fn update_label(version: &str) -> String {
+    format!("Update available: {version}")
 }
 
 #[cfg(target_os = "windows")]
@@ -205,7 +219,7 @@ impl Core {
             .build()
             .map_err(|e| e.to_string())?;
 
-        Ok(Self {
+        let mut core = Self {
             icon,
             offline,
             online,
@@ -213,9 +227,39 @@ impl Core {
             mute,
             server,
             login,
-            _menu: menu,
-            last: model,
-        })
+            update: MenuItem::with_id(ID_UPDATE, "", true, None),
+            update_separator: PredefinedMenuItem::separator(),
+            menu,
+            last: TrayModel {
+                update: None,
+                ..model.clone()
+            },
+        };
+        core.apply_update(model.update.as_deref());
+        core.last = model;
+        Ok(core)
+    }
+
+    fn apply_update(&mut self, version: Option<&str>) {
+        let result = match (self.last.update.is_some(), version) {
+            (false, Some(version)) => {
+                self.update.set_text(update_label(version));
+                self.menu
+                    .insert_items(&[&self.update, &self.update_separator], 0)
+            }
+            (true, Some(version)) => {
+                self.update.set_text(update_label(version));
+                Ok(())
+            }
+            (true, None) => self
+                .menu
+                .remove(&self.update)
+                .and_then(|()| self.menu.remove(&self.update_separator)),
+            (false, None) => Ok(()),
+        };
+        if let Err(e) = result {
+            tracing::warn!("changing the tray menu's update item failed: {e}");
+        }
     }
 
     fn apply(&mut self, model: TrayModel) {
@@ -245,6 +289,9 @@ impl Core {
         // compare against the item rather than the last model.
         if self.login.is_checked() != model.start_on_login {
             self.login.set_checked(model.start_on_login);
+        }
+        if model.update != self.last.update {
+            self.apply_update(model.update.as_deref());
         }
         self.last = model;
     }
@@ -428,6 +475,7 @@ mod tests {
         let action = |id: &str| TrayAction::from_menu_id(&MenuId::new(id));
         assert_eq!(action(ID_MIXER), Some(TrayAction::Mixer));
         assert_eq!(action(ID_OPEN), Some(TrayAction::Open));
+        assert_eq!(action(ID_UPDATE), Some(TrayAction::ShowUpdate));
         assert_eq!(action("other"), None);
     }
 }
