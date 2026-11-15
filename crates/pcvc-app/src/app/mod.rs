@@ -1,5 +1,7 @@
 //! The iced daemon: state, messages, update and subscriptions.
 
+mod status;
+
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +16,7 @@ use crate::audio::{self, CommandSender};
 use crate::config::Config;
 use crate::icons;
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
+use crate::logging::LogBuffer;
 use crate::model;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
@@ -39,6 +42,8 @@ pub enum Message {
     WindowResized(window::Id, Size),
     ShowPage(Page),
     ToggleServer,
+    /// Periodic refresh of time-dependent views.
+    Tick,
     ForceExit,
 }
 
@@ -49,6 +54,7 @@ pub struct Boot {
     pub backend: Arc<dyn AudioBackend>,
     pub inbox: Inbox,
     pub inbox_rx: InboxReceiver,
+    pub logs: LogBuffer,
 }
 
 pub struct App {
@@ -65,6 +71,7 @@ pub struct App {
     window: Option<window::Id>,
     config: Config,
     page: Page,
+    logs: LogBuffer,
     quitting: bool,
 }
 
@@ -77,6 +84,7 @@ impl App {
             backend,
             inbox,
             inbox_rx,
+            logs,
         } = boot;
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
@@ -97,6 +105,7 @@ impl App {
             window: None,
             config,
             page: Page::Mixer,
+            logs,
             quitting: false,
         };
         let open = if show_window {
@@ -168,6 +177,12 @@ impl App {
                 self.toggle_server();
                 Task::none()
             }
+            Message::Tick => {
+                if self.page == Page::Status {
+                    self.local_ips = model::local_ipv4s();
+                }
+                Task::none()
+            }
             Message::ForceExit => {
                 tracing::warn!("server did not shut down in time; exiting anyway");
                 self.exit()
@@ -210,6 +225,7 @@ impl App {
             }
             ServerUpdate::Clients(clients) => self.clients = clients,
             ServerUpdate::Mdns(mdns) => self.mdns = mdns,
+            // The server logs these itself.
             ServerUpdate::Event(event) => tracing::debug!("server event: {event:?}"),
             ServerUpdate::ShutDown => return self.exit(),
         }
@@ -309,11 +325,17 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
+        let tick = if self.window.is_some() && self.page == Page::Status {
+            iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             self.inbox_rx.subscription().map(Message::Inbound),
             window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
+            tick,
         ])
     }
 
@@ -340,11 +362,7 @@ impl App {
         .width(140);
         let body: Element<'_, Message> = match self.page {
             Page::Mixer => text("Mixer").into(),
-            Page::Status => column![
-                text(format!("{:?}", self.server_status)),
-                button(text("Start/Stop")).on_press(Message::ToggleServer),
-            ]
-            .into(),
+            Page::Status => self.status_view(),
             Page::Settings => text("Settings").into(),
         };
         row![

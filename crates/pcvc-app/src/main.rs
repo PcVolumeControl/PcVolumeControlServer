@@ -9,7 +9,9 @@ mod cli;
 mod config;
 mod icons;
 mod inbox;
+mod logging;
 mod model;
+mod paths;
 mod server_ctl;
 mod tray;
 
@@ -20,9 +22,6 @@ use app::{App, Boot};
 use audio::BackendChoice;
 use cli::Parsed;
 use config::Config;
-use tracing_subscriber::EnvFilter;
-
-const DEFAULT_LOG_FILTER: &str = "info,iced_winit=warn,iced_wgpu=warn,wgpu_core=error,wgpu_hal=error,naga=warn,sctk_adwaita=error";
 
 fn main() -> ExitCode {
     let parsed = cli::parse(std::env::args().skip(1));
@@ -45,11 +44,7 @@ fn main() -> ExitCode {
         }
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| DEFAULT_LOG_FILTER.into()),
-        )
-        .init();
+    let (logs, _log_guard) = logging::init(paths::log_dir().as_deref());
 
     let config = Config::default();
     let backend = audio::create_backend(if args.mock_audio {
@@ -66,6 +61,7 @@ fn main() -> ExitCode {
         backend,
         inbox,
         inbox_rx,
+        logs,
     }));
     let result = iced::daemon(
         move || {

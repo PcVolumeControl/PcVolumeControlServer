@@ -1,6 +1,9 @@
 //! Pure reductions from app state to what the tray and views display.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::{Duration, SystemTime};
+
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::server_ctl::ServerStatus;
 use crate::tray::TrayState;
@@ -88,6 +91,24 @@ pub fn tooltip(status: &ServerStatus, clients: usize, local: &[Ipv4Addr]) -> Str
     }
 }
 
+/// For example "45s", "3m 05s" or "2h 07m".
+pub fn format_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
+        _ => format!("{}h {:02}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+/// Local wall-clock time of `since` and how long ago it was, for example
+/// "14:03:27 (3m 05s ago)".
+pub fn connected_since(since: SystemTime, now: SystemTime, offset: UtcOffset) -> String {
+    let (h, m, s) = OffsetDateTime::from(since).to_offset(offset).to_hms();
+    let ago = now.duration_since(since).unwrap_or_default();
+    format!("{h:02}:{m:02}:{s:02} ({} ago)", format_elapsed(ago))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +173,23 @@ mod tests {
         assert_eq!(
             tooltip(&ServerStatus::Stopped, 0, &[LAN]),
             "PcVolumeControl: stopped"
+        );
+    }
+
+    #[test]
+    fn elapsed_and_since() {
+        assert_eq!(format_elapsed(Duration::from_secs(45)), "45s");
+        assert_eq!(format_elapsed(Duration::from_secs(185)), "3m 05s");
+        assert_eq!(format_elapsed(Duration::from_secs(7620)), "2h 07m");
+        let since = SystemTime::UNIX_EPOCH + Duration::from_secs(14 * 3600 + 3 * 60 + 27);
+        let offset = UtcOffset::from_hms(2, 0, 0).unwrap();
+        assert_eq!(
+            connected_since(since, since + Duration::from_secs(185), offset),
+            "16:03:27 (3m 05s ago)"
+        );
+        assert_eq!(
+            connected_since(since, SystemTime::UNIX_EPOCH, UtcOffset::UTC),
+            "14:03:27 (0s ago)"
         );
     }
 
