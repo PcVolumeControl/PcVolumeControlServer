@@ -463,12 +463,14 @@ impl Connection {
             self.ctx,
         )?;
         let sinks_op = Op::new(
+            // SAFETY: as for the server info operation.
             unsafe {
                 sys::pa_context_get_sink_info_list(self.ctx, Some(sink_cb), sinks.userdata())
             },
             self.ctx,
         )?;
         let inputs_op = Op::new(
+            // SAFETY: as for the server info operation.
             unsafe {
                 sys::pa_context_get_sink_input_info_list(
                     self.ctx,

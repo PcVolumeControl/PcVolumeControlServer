@@ -43,6 +43,14 @@ impl Client {
         self.writer.write_all(b"\n").await.unwrap();
     }
 
+    /// Sends a line the server is expected to hang up on. The server may
+    /// close the socket before the whole line is written, so write errors
+    /// are ignored.
+    async fn send_rejected(&mut self, line: &str) {
+        let _ = self.writer.write_all(line.as_bytes()).await;
+        let _ = self.writer.write_all(b"\n").await;
+    }
+
     async fn read_state(&mut self) -> FullState {
         let mut line = String::new();
         let n = timeout(TIMEOUT, self.reader.read_line(&mut line))
@@ -79,7 +87,13 @@ impl Client {
             .expect("server did not close the connection")
         {
             Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::ConnectionReset => {}
+            // A close with unread input pending surfaces as a reset on Unix
+            // and as an abort on Windows.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+                ) => {}
             Err(e) => panic!("unexpected error: {e}"),
         }
     }
@@ -314,7 +328,7 @@ async fn overlong_line_closes_the_client() {
     let (_mock, server) = start().await;
     let mut client = Client::connect(server.local_addr()).await;
     client.read_state().await;
-    client.send(&"x".repeat(MAX_LINE_LEN + 1)).await;
+    client.send_rejected(&"x".repeat(MAX_LINE_LEN + 1)).await;
     client.assert_closed().await;
     server.stop().await;
 }
