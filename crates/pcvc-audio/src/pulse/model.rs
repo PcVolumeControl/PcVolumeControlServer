@@ -15,6 +15,10 @@ const NORMAL: u32 = Volume::NORMAL.0;
 /// Separates the sink name from the sink-input index in a session id.
 const ID_SEPARATOR: char = '|';
 
+/// Largest difference, in percent, between a requested and the current
+/// volume that [`volume_matches`] still treats as no change.
+const ECHO_TOLERANCE: f32 = 0.5;
+
 /// Name used when a stream has no usable name property.
 pub(super) const UNKNOWN_NAME: &str = "Unknown";
 
@@ -115,6 +119,13 @@ pub(super) fn percent_to_volume(percent: f32) -> u32 {
     (percent * f64::from(NORMAL) / 100.0).round() as u32
 }
 
+/// Whether a requested volume is close enough to the current one (in
+/// percent) to count as unchanged. Clients echo the levels they were sent,
+/// possibly rounded, for sessions the user did not touch.
+pub(super) fn volume_matches(requested: f32, current: f32) -> bool {
+    (clamp_volume(requested) - current).abs() < ECHO_TOLERANCE
+}
+
 pub(super) fn session_id(sink_name: &str, input_index: u32) -> String {
     format!("{sink_name}{ID_SEPARATOR}{input_index}")
 }
@@ -146,6 +157,14 @@ impl RawState {
 
     pub fn sink_by_id(&self, id: &str) -> Option<&RawSink> {
         self.addressable_sinks().find(|s| s.id() == id)
+    }
+
+    pub fn sink_mut(&mut self, index: u32) -> Option<&mut RawSink> {
+        self.sinks.iter_mut().find(|s| s.index == index)
+    }
+
+    pub fn input_mut(&mut self, index: u32) -> Option<&mut RawSinkInput> {
+        self.inputs.iter_mut().find(|i| i.index == index)
     }
 
     /// User streams playing to `sink`, in server order.
@@ -341,6 +360,16 @@ mod tests {
             let back = volume_to_percent(&[percent_to_volume(percent)]);
             assert!((back - percent).abs() < 0.001, "{percent} -> {back}");
         }
+    }
+
+    #[test]
+    fn volume_matches_tolerates_echoes() {
+        assert!(volume_matches(75.0, 75.3));
+        assert!(volume_matches(49.99, 50.0));
+        assert!(volume_matches(150.0, 100.0));
+        assert!(!volume_matches(74.0, 75.0));
+        assert!(!volume_matches(f32::NAN, 1.0));
+        assert!(volume_matches(f32::NAN, 0.0));
     }
 
     #[test]

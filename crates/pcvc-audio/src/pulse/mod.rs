@@ -16,7 +16,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pcvc_protocol::Command;
 use tokio::sync::broadcast;
@@ -25,8 +25,13 @@ use crate::{AudioBackend, AudioError, AudioEvent, AudioState};
 
 const EVENT_CAPACITY: usize = 64;
 
-/// How long a caller waits for the worker to apply a command. The worker
-/// gives up on its own operations a little earlier.
+/// How long the worker may spend on a command, counted from when it was
+/// requested. A command still queued after this is dropped unapplied.
+const COMMAND_BUDGET: Duration = Duration::from_secs(4);
+
+/// How long a caller waits for the worker's answer. Longer than
+/// [`COMMAND_BUDGET`], so a command never takes effect after its caller was
+/// told it failed.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// State shared between the worker and [`PulseBackend`].
@@ -42,15 +47,22 @@ impl Shared {
 }
 
 enum Request {
-    Command(Command, mpsc::Sender<Result<(), AudioError>>),
+    Command {
+        command: Command,
+        deadline: Instant,
+        reply: mpsc::Sender<Result<(), AudioError>>,
+    },
     Shutdown,
 }
 
 /// [`AudioBackend`] for PulseAudio and PipeWire (via `pipewire-pulse`).
 ///
-/// [`snapshot`](AudioBackend::snapshot) never blocks on the sound server. If
-/// the connection drops, the worker reconnects with backoff; meanwhile
-/// snapshots return the last known state and commands fail.
+/// [`snapshot`](AudioBackend::snapshot) never blocks on the sound server: it
+/// returns a cache that is refreshed whenever the server reports a change, so
+/// the effect of a command shows up shortly after the call returns, together
+/// with the matching [`AudioEvent`]s. If the connection drops, the worker
+/// reconnects with backoff; meanwhile snapshots return the last known state
+/// and commands fail.
 pub struct PulseBackend {
     shared: Arc<Shared>,
     requests: mpsc::Sender<Request>,
@@ -103,7 +115,11 @@ impl PulseBackend {
     fn request(&self, command: Command) -> Result<(), AudioError> {
         let (reply, reply_rx) = mpsc::channel();
         self.requests
-            .send(Request::Command(command, reply))
+            .send(Request::Command {
+                command,
+                deadline: Instant::now() + COMMAND_BUDGET,
+                reply,
+            })
             .map_err(|_| backend_error("PulseAudio worker has stopped"))?;
         self.wake();
         match reply_rx.recv_timeout(COMMAND_TIMEOUT) {

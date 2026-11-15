@@ -2559,6 +2559,7 @@ dependencies = [
  "libpulse-binding",
  "libpulse-sys",
  "pcvc-protocol",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

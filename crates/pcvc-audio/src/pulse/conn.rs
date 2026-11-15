@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use libpulse_binding::error::PAErr;
 use libpulse_binding::mainloop::standard::Mainloop;
 use libpulse_binding::time::MicroSeconds;
+use libpulse_binding::volume::{ChannelVolumes, Volume};
 use libpulse_sys as sys;
 
 use super::model::{RawSink, RawSinkInput, RawState};
@@ -171,16 +172,16 @@ fn channel_volumes(cv: &sys::pa_cvolume) -> Vec<u32> {
     cv.values[..n].to_vec()
 }
 
-/// A volume with every channel at `value`. Fails for a channel count the
-/// server would reject.
-pub(super) fn uniform_cvolume(channels: usize, value: u32) -> Option<sys::pa_cvolume> {
+/// A volume with every channel at `value`, or `None` for a channel count
+/// libpulse rejects. The count is checked up front because `pa_cvolume_set`
+/// aborts the process on an invalid one.
+pub(super) fn uniform_volume(channels: usize, value: u32) -> Option<ChannelVolumes> {
     let channels = u8::try_from(channels)
         .ok()
         .filter(|c| (1..=sys::PA_CHANNELS_MAX).contains(c))?;
-    Some(sys::pa_cvolume {
-        channels,
-        values: [value; sys::PA_CHANNELS_MAX as usize],
-    })
+    let mut cv = ChannelVolumes::default();
+    cv.set(channels, Volume(value));
+    cv.is_valid().then_some(cv)
 }
 
 /// Collects the items of a list query.
@@ -413,6 +414,10 @@ impl Connection {
 
     /// Returns whether a change was reported since the last call, and clears
     /// the flag.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.get()
+    }
+
     pub fn take_dirty(&self) -> bool {
         self.dirty.replace(false)
     }
@@ -504,11 +509,11 @@ impl Connection {
         mainloop: &mut Mainloop,
         deadline: Instant,
         index: u32,
-        volume: &sys::pa_cvolume,
+        volume: &ChannelVolumes,
     ) -> Result<(), OpError> {
         // SAFETY: ctx is live; libpulse copies the volume before returning.
         self.run(mainloop, deadline, |cb, ud| unsafe {
-            sys::pa_context_set_sink_volume_by_index(self.ctx, index, volume, cb, ud)
+            sys::pa_context_set_sink_volume_by_index(self.ctx, index, volume.as_ref(), cb, ud)
         })
     }
 
@@ -530,11 +535,11 @@ impl Connection {
         mainloop: &mut Mainloop,
         deadline: Instant,
         index: u32,
-        volume: &sys::pa_cvolume,
+        volume: &ChannelVolumes,
     ) -> Result<(), OpError> {
         // SAFETY: ctx is live; libpulse copies the volume before returning.
         self.run(mainloop, deadline, |cb, ud| unsafe {
-            sys::pa_context_set_sink_input_volume(self.ctx, index, volume, cb, ud)
+            sys::pa_context_set_sink_input_volume(self.ctx, index, volume.as_ref(), cb, ud)
         })
     }
 
@@ -583,12 +588,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uniform_cvolume_validates_channels() {
-        assert!(uniform_cvolume(0, 1).is_none());
-        assert!(uniform_cvolume(33, 1).is_none());
-        let cv = uniform_cvolume(2, 1234).unwrap();
-        assert_eq!(channel_volumes(&cv), vec![1234, 1234]);
-        assert_eq!(uniform_cvolume(32, 7).unwrap().channels, 32);
+    fn uniform_volume_validates_channels() {
+        assert!(uniform_volume(0, 1).is_none());
+        assert!(uniform_volume(33, 1).is_none());
+        assert!(uniform_volume(300, 1).is_none());
+        let cv = uniform_volume(2, 1234).unwrap();
+        assert_eq!(channel_volumes(cv.as_ref()), vec![1234, 1234]);
+        assert_eq!(uniform_volume(32, 7).unwrap().len(), 32);
     }
 
     #[test]

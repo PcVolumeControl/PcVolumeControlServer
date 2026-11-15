@@ -1,46 +1,47 @@
-//! Prints what the PulseAudio backend sees, then the events it emits.
+//! Prints what the PulseAudio backend sees as JSON, then the events it emits.
 //!
 //! ```text
 //! cargo run -p pcvc-audio --example pulse_dump -- [SECONDS]
 //! ```
 //!
-//! Watches for events for `SECONDS` (default 10), printing the default
-//! device again after each burst.
+//! Watches for events for `SECONDS` (default 10), printing the state again
+//! whenever a burst of events changed it.
 
 #[cfg(target_os = "linux")]
 fn main() -> std::process::ExitCode {
     use std::time::{Duration, Instant};
 
-    use pcvc_audio::{AudioBackend, AudioState, PulseBackend};
+    use pcvc_audio::{AudioBackend, AudioState, PulseBackend, Session};
+    use serde_json::json;
     use tokio::sync::broadcast::error::TryRecvError;
 
     fn print_state(state: &AudioState) {
-        println!("{{");
-        println!("  \"devices\": [");
-        for d in &state.devices {
-            println!("    {{ \"id\": {:?}, \"name\": {:?} }},", d.id, d.name);
+        let session = |s: &Session| {
+            json!({
+                "id": s.id,
+                "name": s.name,
+                "volume": s.volume,
+                "muted": s.muted,
+            })
+        };
+        let value = json!({
+            "devices": state
+                .devices
+                .iter()
+                .map(|d| json!({ "id": d.id, "name": d.name }))
+                .collect::<Vec<_>>(),
+            "defaultDevice": state.default_device.as_ref().map(|d| json!({
+                "id": d.id,
+                "name": d.name,
+                "volume": d.volume,
+                "muted": d.muted,
+                "sessions": d.sessions.iter().map(session).collect::<Vec<_>>(),
+            })),
+        });
+        match serde_json::to_string_pretty(&value) {
+            Ok(text) => println!("{text}"),
+            Err(e) => eprintln!("cannot encode the state: {e}"),
         }
-        println!("  ],");
-        match &state.default_device {
-            None => println!("  \"defaultDevice\": null"),
-            Some(d) => {
-                println!("  \"defaultDevice\": {{");
-                println!("    \"id\": {:?},", d.id);
-                println!("    \"name\": {:?},", d.name);
-                println!("    \"volume\": {:.2},", d.volume);
-                println!("    \"muted\": {},", d.muted);
-                println!("    \"sessions\": [");
-                for s in &d.sessions {
-                    println!(
-                        "      {{ \"id\": {:?}, \"name\": {:?}, \"volume\": {:.2}, \"muted\": {} }},",
-                        s.id, s.name, s.volume, s.muted
-                    );
-                }
-                println!("    ]");
-                println!("  }}");
-            }
-        }
-        println!("}}");
     }
 
     let seconds = match std::env::args().nth(1).map(|s| s.parse::<u64>()) {
