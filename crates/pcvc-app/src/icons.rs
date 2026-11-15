@@ -16,7 +16,32 @@ pub struct Rgba {
 
 /// Renders an SVG into a `size` x `size` RGBA image.
 pub fn rasterize(svg: &[u8], size: u32) -> Result<Rgba, String> {
-    let pixmap = render(svg, size)?;
+    render(svg, size).map(to_rgba)
+}
+
+/// Renders an SVG (or SVGZ) centred into a `size` x `size` pixmap, keeping
+/// its aspect ratio.
+pub fn render(svg: &[u8], size: u32) -> Result<tiny_skia::Pixmap, String> {
+    let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).map_err(|e| e.to_string())?;
+    let mut pixmap =
+        tiny_skia::Pixmap::new(size, size).ok_or_else(|| format!("invalid icon size {size}"))?;
+    let natural = tree.size();
+    let (scale, dx, dy) = fit(natural.width(), natural.height(), size);
+    let transform = tiny_skia::Transform::from_translate(dx, dy).pre_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Ok(pixmap)
+}
+
+/// Scale and offset that fit a `w` x `h` image centred in a `size` square.
+pub fn fit(w: f32, h: f32, size: u32) -> (f32, f32, f32) {
+    let size = size as f32;
+    let scale = size / w.max(h).max(f32::EPSILON);
+    (scale, (size - w * scale) / 2.0, (size - h * scale) / 2.0)
+}
+
+/// Straight-alpha pixels of a premultiplied pixmap.
+pub fn to_rgba(pixmap: tiny_skia::Pixmap) -> Rgba {
+    let (width, height) = (pixmap.width(), pixmap.height());
     let pixels = pixmap
         .pixels()
         .iter()
@@ -25,24 +50,11 @@ pub fn rasterize(svg: &[u8], size: u32) -> Result<Rgba, String> {
             [c.red(), c.green(), c.blue(), c.alpha()]
         })
         .collect();
-    Ok(Rgba {
+    Rgba {
         pixels,
-        width: size,
-        height: size,
-    })
-}
-
-fn render(svg: &[u8], size: u32) -> Result<tiny_skia::Pixmap, String> {
-    let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).map_err(|e| e.to_string())?;
-    let mut pixmap =
-        tiny_skia::Pixmap::new(size, size).ok_or_else(|| format!("invalid icon size {size}"))?;
-    let natural = tree.size();
-    let transform = tiny_skia::Transform::from_scale(
-        size as f32 / natural.width(),
-        size as f32 / natural.height(),
-    );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    Ok(pixmap)
+        width,
+        height,
+    }
 }
 
 /// The window icon, or `None` if it cannot be rendered.

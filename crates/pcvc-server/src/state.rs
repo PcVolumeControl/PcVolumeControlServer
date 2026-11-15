@@ -74,7 +74,7 @@ fn icon_id(icons: &dyn IconProvider, session: &Session) -> Option<IconId> {
 
 #[cfg(test)]
 mod tests {
-    use pcvc_audio::{Device, DeviceInfo, Session};
+    use pcvc_audio::{AppHint, Device, DeviceInfo, Session};
 
     use super::*;
 
@@ -152,6 +152,30 @@ mod tests {
                 .sessions
                 .iter()
                 .all(|s| s.icon_id.is_none())
+        );
+    }
+
+    #[test]
+    fn app_hints_stay_local() {
+        let state = |app: AppHint| AudioState {
+            devices: vec![],
+            default_device: Some(
+                Device::new("a", "A", 50.0)
+                    .with_session(Session::new("a|s", "S", 1.0).with_app(app)),
+            ),
+        };
+        let plain = to_full_state(&state(AppHint::default())).unwrap();
+        let hinted = to_full_state(&state(AppHint {
+            icon_name: Some("firefox".into()),
+            process_binary: Some("firefox".into()),
+            process_id: Some(42),
+            app_id: Some("org.mozilla.firefox".into()),
+        }))
+        .unwrap();
+        assert_eq!(plain, hinted);
+        assert_eq!(
+            pcvc_protocol::encode_full_state(&plain),
+            pcvc_protocol::encode_full_state(&hinted)
         );
     }
 }

@@ -2,12 +2,15 @@
 
 use std::time::Instant;
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, slider, text};
+use iced::widget::{
+    Space, button, column, container, image, pick_list, row, scrollable, slider, text,
+};
 use iced::{Center, Element, Fill, Task};
-use pcvc_audio::{Device, DeviceInfo};
+use pcvc_audio::{Device, DeviceInfo, Session};
 use pcvc_protocol::Command;
 
 use super::{App, Message};
+use crate::app_icons::{Slot, fallback};
 use crate::mixer::{Target, control};
 use crate::style::{self, Button};
 
@@ -18,6 +21,25 @@ pub enum MixerMessage {
     Release(Target),
     ToggleMute(Target),
     Tick,
+}
+
+/// Gives an icon tile an id the view tests can find it by.
+#[cfg(test)]
+fn tagged<'a>(
+    tile: container::Container<'a, Message>,
+    kind: &str,
+    session: &Session,
+) -> container::Container<'a, Message> {
+    tile.id(format!("app-icon-{kind}:{}", session.id))
+}
+
+#[cfg(not(test))]
+fn tagged<'a>(
+    tile: container::Container<'a, Message>,
+    _: &str,
+    _: &Session,
+) -> container::Container<'a, Message> {
+    tile
 }
 
 /// A pick-list entry for a playback device.
@@ -182,12 +204,13 @@ impl App {
                 .into()
         } else {
             column(device.sessions.iter().map(|s| {
-                self.volume_row(
-                    text(&s.name).wrapping(text::Wrapping::None),
-                    Target::Session(s.id.clone()),
-                    s.volume,
-                    s.muted,
-                )
+                let label = row![
+                    self.app_icon(s),
+                    text(&s.name).wrapping(text::Wrapping::None)
+                ]
+                .spacing(style::SPACE_S)
+                .align_y(Center);
+                self.volume_row(label, Target::Session(s.id.clone()), s.volume, s.muted)
             }))
             .spacing(style::SPACE_M)
             .into()
@@ -209,6 +232,46 @@ impl App {
         ]
         .spacing(style::SPACE_M)
         .into()
+    }
+
+    /// The session's icon once found, the fallback tile when there is
+    /// none, and an empty tile of the same size while it is looked up.
+    fn app_icon(&self, session: &Session) -> Element<'_, Message> {
+        let size = style::APP_ICON;
+        match self.session_icon(&session.id) {
+            Slot::Ready(Some(handle)) => tagged(
+                container(
+                    image(handle.clone())
+                        .width(size)
+                        .height(size)
+                        .border_radius(style::APP_ICON_RADIUS),
+                ),
+                "image",
+                session,
+            )
+            .into(),
+            Slot::Ready(None) => {
+                let index = fallback::color_index(&session.name);
+                let letter = text(fallback::initial(&session.name))
+                    .size(style::APP_ICON_LETTER)
+                    .style(move |theme| text::Style {
+                        color: Some(fallback::colors(theme, index).text),
+                    });
+                let tile = container(letter)
+                    .center(size)
+                    .style(move |theme| style::icon_tile(fallback::colors(theme, index).color));
+                tagged(tile, "fallback", session).into()
+            }
+            Slot::Pending => tagged(
+                container(Space::new())
+                    .width(size)
+                    .height(size)
+                    .style(style::icon_placeholder),
+                "pending",
+                session,
+            )
+            .into(),
+        }
     }
 
     fn volume_row<'a>(

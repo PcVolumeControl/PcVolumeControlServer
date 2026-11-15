@@ -346,9 +346,9 @@ impl Process {
         self.can_wait
     }
 
-    /// The image file stem (`chrome` for `...\chrome.exe`).
-    pub fn image_stem(&self) -> Option<String> {
-        image_stem(*self.handle)
+    /// The full Win32 path of the process image.
+    pub fn image_path(&self) -> Option<String> {
+        image_path(*self.handle)
     }
 }
 
@@ -362,7 +362,7 @@ fn open_process(
     Ok(unsafe { Owned::new(handle) })
 }
 
-fn image_stem(handle: HANDLE) -> Option<String> {
+fn image_path(handle: HANDLE) -> Option<String> {
     let mut buf = vec![0u16; 1024];
     let mut len = buf.len() as u32;
     // SAFETY: `buf` is writable for `len` u16s; on success `len` holds the
@@ -376,6 +376,5 @@ fn image_stem(handle: HANDLE) -> Option<String> {
         )
     }
     .ok()?;
-    let path = String::from_utf16_lossy(buf.get(..len as usize)?);
-    logic::process_stem(&path)
+    logic::non_blank(&String::from_utf16_lossy(buf.get(..len as usize)?))
 }

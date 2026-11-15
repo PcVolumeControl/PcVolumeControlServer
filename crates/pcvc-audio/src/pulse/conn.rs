@@ -13,6 +13,7 @@
 //! callback points at goes out of scope (see [`Op`]).
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
 use std::time::{Duration, Instant};
@@ -23,7 +24,7 @@ use libpulse_binding::time::MicroSeconds;
 use libpulse_binding::volume::{ChannelVolumes, Volume};
 use libpulse_sys as sys;
 
-use super::model::{RawSink, RawSinkInput, RawState};
+use super::model::{AppProps, RawSink, RawSinkInput, RawState};
 
 /// Client name shown by the sound server.
 const CLIENT_NAME: &CStr = c"PcVolumeControl";
@@ -278,11 +279,28 @@ extern "C" fn sink_input_cb(
                 has_volume: (&raw const (*p).has_volume).read() != 0,
                 volume_writable: (&raw const (*p).volume_writable).read() != 0,
                 muted: (&raw const (*p).mute).read() != 0,
-                application_name: prop(props, c"application.name"),
+                app: AppProps::read(|key| prop(props, key)),
                 media_name: prop(props, c"media.name"),
-                process_binary: prop(props, c"application.process.binary"),
                 media_role: prop(props, c"media.role"),
             })
+        });
+    }
+}
+
+extern "C" fn client_cb(
+    _: *mut sys::pa_context,
+    info: *const sys::pa_client_info,
+    eol: i32,
+    userdata: *mut c_void,
+) {
+    // SAFETY: as for `sink_cb`, with a ListAcc<(u32, AppProps)>.
+    unsafe {
+        list_item(info, eol, userdata, |p| {
+            let props = (&raw const (*p).proplist).read();
+            Some((
+                (&raw const (*p).index).read(),
+                AppProps::read(|key| prop(props, key)),
+            ))
         });
     }
 }
@@ -323,21 +341,37 @@ extern "C" fn success_cb(_: *mut sys::pa_context, success: i32, userdata: *mut c
     }
 }
 
-extern "C" fn subscribe_cb(_: *mut sys::pa_context, _: u32, _: u32, userdata: *mut c_void) {
-    // SAFETY: userdata is the connection's boxed dirty flag, which outlives
+extern "C" fn subscribe_cb(
+    _: *mut sys::pa_context,
+    event: sys::pa_subscription_event_type_t,
+    _: u32,
+    userdata: *mut c_void,
+) {
+    // SAFETY: userdata is the connection's boxed dirty flags, which outlive
     // the callback registration.
-    if let Some(dirty) = unsafe { userdata.cast::<Cell<bool>>().as_ref() } {
-        dirty.set(true);
+    if let Some(dirty) = unsafe { userdata.cast::<Dirty>().as_ref() } {
+        dirty.state.set(true);
+        if event & sys::PA_SUBSCRIPTION_EVENT_FACILITY_MASK == sys::PA_SUBSCRIPTION_EVENT_CLIENT {
+            dirty.clients.set(true);
+        }
     }
 }
 
-/// A connected context subscribed to sink, sink-input and server changes.
+/// What the server reported as changed since it was last read.
+struct Dirty {
+    state: Cell<bool>,
+    /// A client appeared, went away or changed its properties.
+    clients: Cell<bool>,
+}
+
+/// A connected context subscribed to sink, sink-input, client and server
+/// changes.
 ///
 /// It must be dropped before the main loop it was created on.
 pub(super) struct Connection {
     ctx: *mut sys::pa_context,
     /// Set by the subscription callback; boxed so its address is stable.
-    dirty: Box<Cell<bool>>,
+    dirty: Box<Dirty>,
 }
 
 impl Connection {
@@ -354,9 +388,12 @@ impl Connection {
         // From here on, Drop releases the context.
         let conn = Self {
             ctx,
-            dirty: Box::new(Cell::new(true)),
+            dirty: Box::new(Dirty {
+                state: Cell::new(true),
+                clients: Cell::new(true),
+            }),
         };
-        // SAFETY: ctx is live; the flag outlives the registration, which Drop
+        // SAFETY: ctx is live; the flags outlive the registration, which Drop
         // removes before freeing the box.
         unsafe {
             sys::pa_context_set_subscribe_callback(
@@ -390,6 +427,7 @@ impl Connection {
         }
         let mask = sys::PA_SUBSCRIPTION_MASK_SINK
             | sys::PA_SUBSCRIPTION_MASK_SINK_INPUT
+            | sys::PA_SUBSCRIPTION_MASK_CLIENT
             | sys::PA_SUBSCRIPTION_MASK_SERVER;
         // SAFETY: ctx is live; `run` keeps the userdata alive until the
         // operation finishes or is cancelled.
@@ -415,11 +453,11 @@ impl Connection {
     /// Returns whether a change was reported since the last call, and clears
     /// the flag.
     pub fn is_dirty(&self) -> bool {
-        self.dirty.get()
+        self.dirty.state.get()
     }
 
     pub fn take_dirty(&self) -> bool {
-        self.dirty.replace(false)
+        self.dirty.state.replace(false)
     }
 
     /// Starts an operation with a success callback via `start(callback,
@@ -444,8 +482,17 @@ impl Connection {
         }
     }
 
-    /// Reads the default sink, the sinks and the sink-inputs.
-    pub fn query(&self, mainloop: &mut Mainloop, deadline: Instant) -> Result<RawState, OpError> {
+    /// Reads the default sink, the sinks and the sink-inputs. The clients
+    /// are re-read only when one changed or a stream refers to one not in
+    /// `known_clients`; they only provide names and hints, so failing to read
+    /// them keeps `known_clients` rather than failing the read.
+    pub fn query(
+        &self,
+        mainloop: &mut Mainloop,
+        deadline: Instant,
+        known_clients: &HashMap<u32, AppProps>,
+    ) -> Result<RawState, OpError> {
+        let clients_dirty = self.dirty.clients.replace(false);
         let server = ServerAcc::default();
         let sinks = ListAcc::<RawSink>::new();
         let inputs = ListAcc::<RawSinkInput>::new();
@@ -487,11 +534,44 @@ impl Connection {
         if server.failed.get() {
             return Err(OpError::Failed(sys::PA_ERR_UNKNOWN as i32));
         }
+        let inputs = inputs.finish()?;
+        let unknown_client = inputs
+            .iter()
+            .filter_map(|i| i.client)
+            .any(|c| !known_clients.contains_key(&c));
+        let clients = if clients_dirty || unknown_client {
+            self.query_clients(mainloop, deadline).unwrap_or_else(|e| {
+                tracing::debug!("reading PulseAudio clients failed: {e}");
+                self.dirty.clients.set(true);
+                known_clients.clone()
+            })
+        } else {
+            known_clients.clone()
+        };
         Ok(RawState {
             default_sink: server.default_sink.into_inner(),
             sinks: sinks.finish()?,
-            inputs: inputs.finish()?,
+            inputs,
+            clients,
         })
+    }
+
+    fn query_clients(
+        &self,
+        mainloop: &mut Mainloop,
+        deadline: Instant,
+    ) -> Result<HashMap<u32, AppProps>, OpError> {
+        let clients = ListAcc::<(u32, AppProps)>::new();
+        let op = Op::new(
+            // SAFETY: ctx is live and the accumulator outlives the operation.
+            unsafe {
+                sys::pa_context_get_client_info_list(self.ctx, Some(client_cb), clients.userdata())
+            },
+            self.ctx,
+        )?;
+        op.wait(mainloop, deadline)?;
+        drop(op);
+        Ok(clients.finish()?.into_iter().collect())
     }
 
     pub fn set_default_sink(

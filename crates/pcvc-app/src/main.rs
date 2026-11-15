@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod app_icons;
 mod audio;
 mod autostart;
 mod cli;
@@ -99,6 +100,7 @@ fn main() -> ExitCode {
         config,
         config_path,
         backend,
+        icon_resolver: app_icons::system_resolver(),
         inbox,
         inbox_rx,
         logs,

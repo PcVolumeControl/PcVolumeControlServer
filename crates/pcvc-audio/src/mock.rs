@@ -3,7 +3,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use pcvc_protocol::clamp_volume;
 use tokio::sync::broadcast;
 
-use crate::{AudioBackend, AudioError, AudioEvent, AudioState, Device, DeviceInfo, Session};
+use crate::{
+    AppHint, AudioBackend, AudioError, AudioEvent, AudioState, Device, DeviceInfo, Session,
+};
 
 const EVENT_CAPACITY: usize = 64;
 
@@ -70,7 +72,10 @@ impl MockBackend {
         const HEADPHONES: &str = "c5a32106-264d-40b2-a2e0-74eda397454c";
         const HEADSET: &str = "c98e4030-926b-4e62-8c83-1c529574cc51";
         let session = |device: &str, app: &str, name: &str, volume: f32| {
-            Session::new(Self::session_id(device, app), name, volume)
+            Session::new(Self::session_id(device, app), name, volume).with_app(AppHint {
+                process_binary: Some(app.into()),
+                ..AppHint::default()
+            })
         };
         let devices = vec![
             Device::new(SPEAKERS, "Speakers (Mock Audio)", 80.0)

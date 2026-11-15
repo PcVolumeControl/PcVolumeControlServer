@@ -15,6 +15,8 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub use self::windows::WindowsBackend;
 pub use mock::MockBackend;
+use std::sync::Arc;
+
 use pcvc_protocol::Command;
 #[cfg(target_os = "linux")]
 pub use pulse::PulseBackend;
@@ -74,17 +76,48 @@ pub struct Session {
     /// Percent, 0.0 to 100.0.
     pub volume: f32,
     pub muted: bool,
+    /// Who is playing, for presenting the session locally (icons). Not part
+    /// of the protocol.
+    pub app: AppHint,
 }
 
 impl Session {
-    /// An unmuted session.
+    /// An unmuted session with no application hints.
     pub fn new(id: impl Into<String>, name: impl Into<String>, volume: f32) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             volume,
             muted: false,
+            app: AppHint::default(),
         }
+    }
+
+    pub fn with_app(mut self, app: AppHint) -> Self {
+        self.app = app;
+        self
+    }
+}
+
+/// What the platform says about the application behind a session. Every
+/// field is optional; values are shared, so cloning is cheap.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct AppHint {
+    /// An icon the application declared: a freedesktop icon name or an
+    /// absolute file path (Linux `application.icon_name`).
+    pub icon_name: Option<Arc<str>>,
+    /// The executable. Linux: `application.process.binary`, usually a bare
+    /// file name. Windows: the full image path.
+    pub process_binary: Option<Arc<str>>,
+    pub process_id: Option<u32>,
+    /// A desktop application id (Linux `application.id`, or the Flatpak app
+    /// id of a sandboxed client).
+    pub app_id: Option<Arc<str>>,
+}
+
+impl AppHint {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
     }
 }
 
