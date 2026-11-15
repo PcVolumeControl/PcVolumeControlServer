@@ -1,17 +1,21 @@
 //! Turns an icon file into a square RGBA image of a given size.
 
+#[cfg(any(target_os = "linux", test))]
 use std::path::Path;
 
 use resvg::tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
 
 use crate::icons::{Rgba, fit, to_rgba};
 
+#[cfg(any(target_os = "linux", test))]
 /// Larger files are not icons worth reading.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
+#[cfg(any(target_os = "linux", test))]
 /// Larger PNGs are refused before decoding.
 const MAX_PNG_EDGE: u32 = 2048;
 
+#[cfg(any(target_os = "linux", test))]
 /// Reads `path` (PNG, SVG or SVGZ, by extension) and renders it centred into
 /// a `size` x `size` image, keeping its aspect ratio. Other formats and
 /// unreadable files give `None`.
@@ -36,6 +40,7 @@ pub fn load(path: &Path, size: u32) -> Option<Rgba> {
     pixmap.map(to_rgba)
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub fn png(data: &[u8], size: u32) -> Option<Pixmap> {
     let (w, h) = png_dimensions(data)?;
     if w == 0 || h == 0 || w > MAX_PNG_EDGE || h > MAX_PNG_EDGE {
@@ -43,6 +48,16 @@ pub fn png(data: &[u8], size: u32) -> Option<Pixmap> {
     }
     let source = Pixmap::decode_png(data).ok()?;
     fit_pixmap(source, size)
+}
+
+#[cfg(any(target_os = "windows", test))]
+/// `rgba` centred into a `size` square, keeping its aspect ratio.
+pub fn fit_rgba(rgba: &Rgba, size: u32) -> Option<Rgba> {
+    let source = Pixmap::from_vec(
+        premultiplied(&rgba.pixels),
+        IntSize::from_wh(rgba.width, rgba.height)?,
+    )?;
+    fit_pixmap(source, size).map(to_rgba)
 }
 
 /// Draws `source` centred into a `size` square, keeping its aspect ratio.
@@ -69,6 +84,7 @@ pub fn fit_pixmap(mut source: Pixmap, size: u32) -> Option<Pixmap> {
     Some(out)
 }
 
+#[cfg(any(target_os = "linux", test))]
 /// Width and height from a PNG's IHDR chunk.
 fn png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
@@ -180,6 +196,25 @@ mod tests {
         }
         assert!(load(&dir.path().join("missing.png"), 32).is_none());
         assert!(load(dir.path(), 32).is_none());
+    }
+
+    #[test]
+    fn fits_rgba() {
+        let rgba = Rgba {
+            pixels: [255, 0, 0, 255].repeat(32 * 16),
+            width: 32,
+            height: 16,
+        };
+        let fitted = fit_rgba(&rgba, 48).unwrap();
+        assert_eq!((fitted.width, fitted.height), (48, 48));
+        assert_eq!(alpha_at(&fitted, 24, 2), 0);
+        assert_eq!(&fitted.pixels[(24 * 48 + 24) * 4..][..4], &[255, 0, 0, 255]);
+        let empty = Rgba {
+            pixels: vec![],
+            width: 0,
+            height: 0,
+        };
+        assert!(fit_rgba(&empty, 48).is_none());
     }
 
     #[test]

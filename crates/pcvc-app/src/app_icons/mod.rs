@@ -1,17 +1,22 @@
 //! Application icons for the Mixer's session rows.
 //!
 //! A [`Resolver`] turns what a session says about its application
-//! ([`pcvc_audio::AppHint`]) into a square RGBA image; on Linux it searches
-//! desktop entries and icon themes. Resolution blocks on the file system,
-//! so [`IconWorker`] runs it on a background thread and posts each result
-//! to the inbox. [`IconCache`] remembers results, including misses.
+//! ([`pcvc_audio::AppHint`]) into a square RGBA image: on Linux from
+//! desktop entries and icon themes, on Windows from the executable.
+//! Resolution blocks on the file system, so [`IconWorker`] runs it on a
+//! background thread and posts each result to the inbox. [`IconCache`]
+//! remembers results, including misses.
 
 mod cache;
 pub mod fallback;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 mod raster;
+#[cfg(any(target_os = "windows", test))]
+mod win_pixels;
+#[cfg(target_os = "windows")]
+mod windows;
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, mpsc};
@@ -60,7 +65,7 @@ pub trait Resolver: Send + Sync {
 /// Finds nothing; every session gets the fallback tile.
 #[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(
-    all(target_os = "linux", not(test)),
+    all(any(target_os = "linux", target_os = "windows"), not(test)),
     expect(dead_code, reason = "the fallback on other platforms and in tests")
 )]
 pub struct NoIcons;
@@ -75,7 +80,9 @@ impl Resolver for NoIcons {
 pub fn system_resolver() -> Arc<dyn Resolver> {
     #[cfg(target_os = "linux")]
     return Arc::new(linux::LinuxResolver::new(linux::Dirs::from_env()));
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    return Arc::new(windows::WindowsResolver);
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     return Arc::new(NoIcons);
 }
 

@@ -40,6 +40,18 @@ Ctrl-C / SIGTERM   --QuitRequested-------------+
 Widget messages (`Message::Mixer`, `Message::Settings`, navigation) come
 from the view as usual.
 
+## Application icons
+
+`app_icons::IconWorker` resolves icons on its own thread, one at a time, and
+posts each result to the inbox (`Inbound::AppIcon`). The app requests the
+icons of the shown sessions after each audio snapshot and when the window's
+scale factor becomes known or changes; `IconCache` keeps results and misses
+(up to 256 keys) so each application is looked up once. The resolver is
+injected through `Boot`, which lets the view tests use `NoIcons` and deliver
+results by hand. The key holds everything the lookup reads (name, hints,
+pixel size, and on Linux the process id), so equal keys always resolve
+alike.
+
 ## Mixer
 
 Slider drags send at most one command per 30 ms per control, always send
@@ -58,3 +70,4 @@ the user's value until the backend reports it back or 300 ms pass
 | `logging.rs` | stderr, rolling file and the ring buffer behind the Status log |
 | `style.rs` | Spacing, sizes and widget styles over iced's built-in themes |
 | `icons.rs` | Embedded SVG icons, rasterised with resvg |
+| `app_icons/` | Application icons for the Mixer: lookup per platform, rasterising, the result cache and the fallback tile |

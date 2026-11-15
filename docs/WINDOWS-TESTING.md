@@ -116,6 +116,28 @@ since the phone apps depend on their format.
 - [ ] Switching the default device from the phone works and the session list
       follows.
 
+## 5. Application icons in the Mixer
+
+```powershell
+$env:RUST_LOG = "info,pcvolumecontrol::app_icons=debug"
+cargo run -p pcvolumecontrol -- --show
+```
+
+The log has one `application icon lookup` line per application, with the
+executable path and whether an icon was found.
+
+- [ ] Each application row starts with that program's icon (browser, media
+      player, Discord, a game), drawn crisply and with transparent corners,
+      not on a black or white square.
+- [ ] At 150 % or 200 % display scaling the icons are sharp, and moving the
+      window between monitors with different scaling keeps them shown.
+- [ ] A session whose process could not be opened (an elevated app, or the
+      system sounds session if listed) shows a coloured letter tile instead.
+- [ ] Store (UWP/MSIX) apps such as Media Player or Spotify from the Store
+      show a generic program icon or a letter tile, not an error. Note which.
+- [ ] Rows keep the same height with and without an icon, and the window
+      stays responsive while the icons appear.
+
 ## Known risk areas
 
 These could not be checked without Windows and are the most likely to need
@@ -140,6 +162,10 @@ fixes:
   `Unknown`.
 - **Shutdown**: dropping the backend waits up to 5 s for the Core Audio thread
   and then detaches it with a warning; a warning there means a COM call hung.
+- **Icon pixels**: the icon is read with `GetIconInfo` and `GetDIBits` and its
+  alpha is taken as straight (not premultiplied); icons without alpha use
+  their mask. Wrong colours, dark fringes or opaque backgrounds point at
+  `crates/pcvc-app/src/app_icons/windows.rs`.
 - **Tray timing** (once the GUI is wired up): the tray icon must be created
   after the GUI's event loop is running. The audio backend runs on its own
   MTA thread and does not depend on the GUI thread's COM apartment.

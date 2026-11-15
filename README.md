@@ -112,6 +112,46 @@ Ubuntu's GNOME and most other desktops show it; stock GNOME needs the
 extension. Without a tray the window opens at launch and closing it quits.
 `packaging/linux/` has the desktop entry and icon for packages.
 
+### Application icons
+
+Each row in the Mixer shows the application's icon. Lookups run in the
+background and only while the window is open; a row shows an empty tile
+until its lookup finishes, and a tile with the first letter of the
+application's name when nothing was found. Icons are only shown locally;
+the phones get the same state as before. Nothing is fetched from the
+network.
+
+On Linux the app tries, in order:
+
+1. the icon the stream declares (`application.icon_name`);
+2. the desktop entry whose id is the stream's application id
+   (`application.id`, or the Flatpak app id);
+3. for Steam games (Proton included), `steam_icon_<app id>` with the
+   `SteamAppId` from the process environment, the icon Steam's shortcuts use;
+4. the desktop entry for the process binary (by id, `StartupWMClass` or the
+   program its `Exec` line runs), then for the application name.
+
+Desktop entries are read from `$XDG_DATA_HOME/applications`, each
+`$XDG_DATA_DIRS/applications`, and the Flatpak and Snap export directories.
+Icon names are resolved in the current icon theme (from `gsettings`, the GTK
+`settings.ini` or `kdeglobals`, depending on the desktop), the themes it
+inherits, `hicolor`, then `/usr/share/pixmaps`, preferring SVG and the
+smallest size not below what the window needs at its scale factor. PNG, SVG
+and SVGZ are supported; XPM icons are skipped. Desktop entries and themes
+are re-read after a minute, and a missing icon is looked up again after two
+minutes, so newly installed applications get theirs.
+
+Limits: a stream whose properties name neither an icon, an application id,
+a binary nor a name that matches a desktop entry gets a letter tile (some
+games and command line players). Sandboxed clients report their binary as
+seen inside the sandbox. The Steam lookup needs the game's environment to be
+readable, which it is for the user's own processes.
+
+On Windows the icon comes from the session's executable: its own icon at the
+needed size, else the icon Explorer shows for it. Packaged (Store) apps keep
+their logos outside the executable, so they get a generic program icon or a
+letter tile. Sessions whose process cannot be opened get a letter tile.
+
 ## Try it with a phone
 
 Run the desktop app above, or the server alone without a GUI:
