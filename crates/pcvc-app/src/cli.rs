@@ -3,7 +3,8 @@
 pub const USAGE: &str = "\
 usage: pcvolumecontrol [--show] [--mock-audio]
 
-  --show         open the window on launch
+  --show         open the window on launch (a second launch always shows
+                 the running instance's window and exits)
   --mock-audio   use the scripted mock audio backend instead of the system one
   --version      print the version and exit
   --help         print this help and exit

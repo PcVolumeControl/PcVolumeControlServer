@@ -10,6 +10,7 @@ mod cli;
 mod config;
 mod icons;
 mod inbox;
+mod instance;
 mod logging;
 mod mixer;
 mod model;
@@ -25,6 +26,7 @@ use app::{App, Boot};
 use audio::BackendChoice;
 use cli::Parsed;
 use config::Config;
+use instance::Instance;
 
 fn main() -> ExitCode {
     let parsed = cli::parse(std::env::args().skip(1));
@@ -48,6 +50,18 @@ fn main() -> ExitCode {
     };
 
     let (logs, _log_guard) = logging::init(paths::log_dir().as_deref());
+
+    let listener = match instance::acquire() {
+        Ok(Instance::Secondary) => {
+            tracing::info!("PcVolumeControl is already running; asked it to show its window");
+            return ExitCode::SUCCESS;
+        }
+        Ok(Instance::Primary(listener)) => Some(listener),
+        Err(e) => {
+            tracing::warn!("single-instance check failed, running anyway: {e}");
+            None
+        }
+    };
 
     let mut config_path = paths::config_file();
     let config = match &config_path {
@@ -73,6 +87,7 @@ fn main() -> ExitCode {
     });
     let (inbox, inbox_rx) = inbox::channel();
     tray::install_event_handlers(&inbox);
+    let _instance = listener.map(|listener| instance::serve(listener, inbox.clone()));
 
     let boot = Mutex::new(Some(Boot {
         show_window: args.show || config.show_on_launch,

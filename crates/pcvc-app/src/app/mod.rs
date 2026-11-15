@@ -69,6 +69,34 @@ pub struct Boot {
     pub logs: LogBuffer,
 }
 
+/// Quits cleanly (so mDNS sends its goodbye) on Ctrl-C or, on Unix, on
+/// SIGTERM as sent at logout.
+fn spawn_signal_handler(inbox: Inbox) {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            match signal(SignalKind::terminate()) {
+                Ok(mut term) => {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = term.recv() => {}
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("cannot listen for SIGTERM: {e}");
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        inbox.send(Inbound::QuitRequested);
+    });
+}
+
 pub struct App {
     inbox: Inbox,
     inbox_rx: InboxReceiver,
@@ -108,6 +136,7 @@ impl App {
             logs,
         } = boot;
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
+        spawn_signal_handler(inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
         let server = ServerController::spawn(backend, inbox.clone());
         server.start(config.server_config());
@@ -183,6 +212,8 @@ impl App {
                 self.open_window()
             }
             Message::Inbound(Inbound::Tray(action)) => self.tray_action(action),
+            Message::Inbound(Inbound::ShowRequested) => self.open_window(),
+            Message::Inbound(Inbound::QuitRequested) => self.quit(),
             Message::Inbound(Inbound::Audio(state)) => {
                 self.mixer.on_state(&state);
                 self.audio = Some(state);
@@ -305,6 +336,7 @@ impl App {
         if let Some(id) = self.window {
             return window::gain_focus(id);
         }
+        tracing::debug!("opening the window");
         self.page = Page::Mixer;
         self.settings = SettingsForm::from(&self.config);
         self.notice = None;
