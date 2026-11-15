@@ -1,6 +1,9 @@
 //! The iced daemon: state, messages, update and subscriptions.
 
+mod mixer;
 mod status;
+#[cfg(test)]
+mod tests;
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -14,12 +17,17 @@ use pcvc_server::{ClientInfo, MdnsStatus};
 
 use crate::audio::{self, CommandSender};
 use crate::config::Config;
-use crate::icons;
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
 use crate::logging::LogBuffer;
+use crate::mixer::Mixer;
 use crate::model;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
+use crate::{icons, style};
+use mixer::MixerMessage;
+
+/// How often held-back mixer commands are checked while a slider moves.
+const MIXER_TICK: Duration = Duration::from_millis(10);
 
 const MIN_SIZE: Size = Size::new(480.0, 400.0);
 
@@ -42,6 +50,7 @@ pub enum Message {
     WindowResized(window::Id, Size),
     ShowPage(Page),
     ToggleServer,
+    Mixer(MixerMessage),
     /// Periodic refresh of time-dependent views.
     Tick,
     ForceExit,
@@ -66,6 +75,7 @@ pub struct App {
     clients: Vec<ClientInfo>,
     mdns: MdnsStatus,
     audio: Option<AudioState>,
+    mixer: Mixer,
     local_ips: Vec<Ipv4Addr>,
     /// The last interface listing error, so a persistent one is logged once.
     local_ips_error: Option<String>,
@@ -102,6 +112,7 @@ impl App {
             clients: Vec::new(),
             mdns: MdnsStatus::Disabled,
             audio: None,
+            mixer: Mixer::default(),
             local_ips: Vec::new(),
             local_ips_error: None,
             tray: None,
@@ -151,6 +162,7 @@ impl App {
             }
             Message::Inbound(Inbound::Tray(action)) => self.tray_action(action),
             Message::Inbound(Inbound::Audio(state)) => {
+                self.mixer.on_state(&state);
                 self.audio = Some(state);
                 Task::none()
             }
@@ -181,6 +193,7 @@ impl App {
                 self.toggle_server();
                 Task::none()
             }
+            Message::Mixer(message) => self.mixer_update(message),
             Message::Tick => {
                 if self.page == Page::Status {
                     self.refresh_local_ips();
@@ -351,12 +364,18 @@ impl App {
         } else {
             Subscription::none()
         };
+        let mixer_tick = if self.mixer.needs_tick() {
+            iced::time::every(MIXER_TICK).map(|_| Message::Mixer(MixerMessage::Tick))
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             self.inbox_rx.subscription().map(Message::Inbound),
             window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
             tick,
+            mixer_tick,
         ])
     }
 
@@ -365,13 +384,10 @@ impl App {
             return text("").into();
         }
         let tab = |label: &'static str, page: Page| {
-            button(text(label))
+            button(text(label).size(style::TEXT_BODY))
                 .on_press(Message::ShowPage(page))
-                .style(if self.page == page {
-                    button::primary
-                } else {
-                    button::text
-                })
+                .padding([style::SPACE_S, style::SPACE_M])
+                .style(style::button(style::Button::Nav(self.page == page)))
                 .width(Length::Fill)
         };
         let nav = column![
@@ -379,16 +395,21 @@ impl App {
             tab("Status", Page::Status),
             tab("Settings", Page::Settings),
         ]
-        .spacing(4)
-        .width(140);
-        let body: Element<'_, Message> = match self.page {
-            Page::Mixer => text("Mixer").into(),
-            Page::Status => self.status_view(),
-            Page::Settings => text("Settings").into(),
+        .spacing(style::SPACE_XS)
+        .width(style::NAV_WIDTH);
+        let (title, body) = match self.page {
+            Page::Mixer => ("Mixer", self.mixer_view()),
+            Page::Status => ("Status", self.status_view()),
+            Page::Settings => ("Settings", text("Settings").into()),
         };
+        let page = column![text(title).size(style::TEXT_TITLE), body]
+            .spacing(style::SPACE_L)
+            .height(Length::Fill);
         row![
-            container(nav).padding(12),
-            container(body).padding(16).width(Length::Fill)
+            container(nav).padding(style::SPACE_M),
+            container(page)
+                .padding([style::SPACE_L, style::SPACE_XL])
+                .width(Length::Fill)
         ]
         .into()
     }

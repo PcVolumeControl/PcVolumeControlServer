@@ -10,9 +10,11 @@ mod config;
 mod icons;
 mod inbox;
 mod logging;
+mod mixer;
 mod model;
 mod paths;
 mod server_ctl;
+mod style;
 mod tray;
 
 use std::process::ExitCode;

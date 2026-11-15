@@ -81,6 +81,12 @@ struct RingLayer {
     buffer: LogBuffer,
 }
 
+/// A layer recording every event into `buffer`, without filtering.
+#[cfg(test)]
+pub(crate) fn ring_layer<S: Subscriber>(buffer: LogBuffer) -> impl Layer<S> {
+    RingLayer { buffer }
+}
+
 impl<S: Subscriber> Layer<S> for RingLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = MessageVisitor::default();
