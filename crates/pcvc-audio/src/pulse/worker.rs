@@ -64,8 +64,7 @@ pub(super) fn run(
         raw: RawState::default(),
         shared,
         details,
-        settle: Settle::new(SETTLE),
-        retry_refresh_at: None,
+        schedule: ReadSchedule::new(SETTLE),
         reconnect: Backoff::new(),
         woken,
         mainloop,
@@ -126,28 +125,61 @@ impl Backoff {
     }
 }
 
-/// When reported changes are read: `window` after the first report since
-/// the last read. Later reports do not move it, so changes that keep coming
-/// (a slider being dragged in another mixer) are still read regularly.
+/// When the worker reads and publishes the state: `settle` after the first
+/// change since the last publish, or [`REFRESH_RETRY`] after a failed read.
+/// Neither moves for later changes, so changes that keep coming (a slider
+/// dragged in another mixer, commands from a client) are still published
+/// regularly.
 #[derive(Debug)]
-struct Settle {
-    window: Duration,
+struct ReadSchedule {
+    settle: Duration,
     due: Option<Instant>,
+    /// Set while a failed read on a live connection awaits its retry.
+    retry_at: Option<Instant>,
 }
 
-impl Settle {
-    fn new(window: Duration) -> Self {
-        Self { window, due: None }
+impl ReadSchedule {
+    fn new(settle: Duration) -> Self {
+        Self {
+            settle,
+            due: None,
+            retry_at: None,
+        }
     }
 
-    /// Whether to read the state at `now`, given whether the server has
-    /// reported changes since the last read.
-    fn read_due(&mut self, reported: bool, now: Instant) -> bool {
-        reported && now >= *self.due.get_or_insert(now + self.window)
+    /// Notes that the server reported changes by `now`.
+    fn changed(&mut self, now: Instant) {
+        if self.retry_at.is_none() {
+            self.due.get_or_insert(now + self.settle);
+        }
     }
 
+    /// Notes that the state was read at `now` for a command but not
+    /// published.
+    fn read_unpublished(&mut self, now: Instant) {
+        self.retry_at = None;
+        self.changed(now);
+    }
+
+    /// When the state is next read and published, if it is.
+    fn next(&self) -> Option<Instant> {
+        self.retry_at.or(self.due)
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        self.next().is_some_and(|at| now >= at)
+    }
+
+    /// Nothing is pending: after a publish, or without a connection.
     fn clear(&mut self) {
         self.due = None;
+        self.retry_at = None;
+    }
+
+    /// A read on a live connection failed at `now`.
+    fn failed(&mut self, now: Instant) {
+        self.due = None;
+        self.retry_at = Some(now + REFRESH_RETRY);
     }
 }
 
@@ -159,10 +191,7 @@ struct Worker {
     shared: Arc<Shared>,
     /// Whether sessions get a [`Session::detail`](crate::Session::detail).
     details: bool,
-    /// When the changes the server reported are read.
-    settle: Settle,
-    /// Set while a failed state read on a live connection awaits a retry.
-    retry_refresh_at: Option<Instant>,
+    schedule: ReadSchedule,
     reconnect: Backoff,
     /// Set when the wake-up socket was drained. The main loop also runs
     /// inside state reads and commands, so a wake-up can be consumed there
@@ -224,14 +253,18 @@ impl Worker {
     /// loop should next wake up on its own, if ever.
     fn maintain(&mut self, now: Instant) -> Option<Instant> {
         if let Some(conn) = &self.conn {
-            let retry_due = self.retry_refresh_at.is_some_and(|at| now >= at);
             if conn.is_dead() {
                 tracing::warn!("lost the PulseAudio connection, reconnecting");
                 self.disconnect(now);
-            } else if (retry_due || self.settle.read_due(conn.is_dirty(), now))
-                && let Err(e) = self.refresh(now + OP_TIMEOUT)
-            {
-                self.refresh_failed(&e, now);
+            } else {
+                if conn.is_dirty() {
+                    self.schedule.changed(now);
+                }
+                if self.schedule.is_due(now)
+                    && let Err(e) = self.refresh(now + OP_TIMEOUT)
+                {
+                    self.refresh_failed(&e, now);
+                }
             }
         }
         if self.conn.is_none() && self.reconnect.next_attempt.is_none_or(|at| now >= at) {
@@ -244,10 +277,7 @@ impl Worker {
             }
         }
         match &self.conn {
-            Some(_) => [self.retry_refresh_at, self.settle.due]
-                .into_iter()
-                .flatten()
-                .min(),
+            Some(_) => self.schedule.next(),
             None => self.reconnect.next_attempt,
         }
     }
@@ -256,8 +286,7 @@ impl Worker {
     /// reconnect.
     fn disconnect(&mut self, now: Instant) {
         self.conn = None;
-        self.settle.clear();
-        self.retry_refresh_at = None;
+        self.schedule.clear();
         self.reconnect.schedule(now);
     }
 
@@ -271,7 +300,7 @@ impl Worker {
             }
             OpError::Failed(_) => {
                 tracing::warn!("reading PulseAudio state failed: {error}");
-                self.retry_refresh_at = Some(now + REFRESH_RETRY);
+                self.schedule.failed(now);
             }
         }
     }
@@ -286,19 +315,21 @@ impl Worker {
         Ok(())
     }
 
-    /// Re-reads the server state, publishes it and emits the events that
-    /// describe the change. Changes reported while the read is in flight
-    /// leave the connection dirty, so they are read again.
-    fn refresh(&mut self, deadline: Instant) -> Result<(), OpError> {
-        let Some(conn) = &self.conn else {
-            return Ok(());
-        };
+    /// Re-reads the server state into the cache. Changes reported while the
+    /// read is in flight leave the connection dirty, so they are read again.
+    fn read(&mut self, deadline: Instant) -> Result<(), OpError> {
+        let conn = self.conn.as_ref().ok_or(OpError::Cancelled)?;
         conn.take_dirty();
-        self.settle.clear();
-        let raw = conn.query(&mut self.mainloop, deadline, &self.raw.clients)?;
-        self.retry_refresh_at = None;
-        let state = raw.to_audio_state(self.details);
-        self.raw = raw;
+        self.raw = conn.query(&mut self.mainloop, deadline, &self.raw.clients)?;
+        Ok(())
+    }
+
+    /// Re-reads the server state, publishes it and emits the events that
+    /// describe the change.
+    fn refresh(&mut self, deadline: Instant) -> Result<(), OpError> {
+        self.read(deadline)?;
+        self.schedule.clear();
+        let state = self.raw.to_audio_state(self.details);
         // Events are sent before the lock is released, so whoever sees the
         // new state in a snapshot can also already receive its events.
         let mut current = self.shared.lock();
@@ -313,20 +344,25 @@ impl Worker {
     /// Applies a command unless its caller has already given up.
     ///
     /// The cache is re-read first if the server reported changes, so the
-    /// command is judged against the current state. The cache is not re-read
-    /// afterwards: the commands patch it with what they set, and the change
-    /// events the server sends in response trigger the authoritative read
-    /// (and the [`AudioEvent`](crate::AudioEvent)s).
+    /// command is judged against the current state; that state is published
+    /// only when the changes have settled (see [`ReadSchedule`]), like any
+    /// other. The cache is not re-read afterwards: the commands patch it
+    /// with what they set, and the change events the server sends in
+    /// response trigger the authoritative read (and the
+    /// [`AudioEvent`](crate::AudioEvent)s).
     fn handle(&mut self, command: &Command, deadline: Instant) -> Result<(), AudioError> {
         if Instant::now() >= deadline {
             return Err(backend_error("PulseAudio request expired before it ran"));
         }
         let not_connected = || backend_error("not connected to PulseAudio, reconnecting");
         let conn = self.conn.as_ref().filter(|c| !c.is_dead());
-        let stale = conn.ok_or_else(not_connected)?.is_dirty() || self.retry_refresh_at.is_some();
-        if stale && let Err(e) = self.refresh(deadline) {
-            self.refresh_failed(&e, Instant::now());
-            return Err(backend_error(e));
+        let stale = conn.ok_or_else(not_connected)?.is_dirty() || self.schedule.retry_at.is_some();
+        if stale {
+            if let Err(e) = self.read(deadline) {
+                self.refresh_failed(&e, Instant::now());
+                return Err(backend_error(e));
+            }
+            self.schedule.read_unpublished(Instant::now());
         }
         let mut ctx = Ctx {
             conn: self.conn.as_ref().ok_or_else(not_connected)?,
@@ -532,82 +568,152 @@ mod tests {
         }
     }
 
-    /// Runs `changes` (when, and the server state from then on) through a
-    /// [`Settle`] of `window` as the worker loop does: it wakes at each
-    /// report and when a read is due, and reads the state as it is then.
-    /// Returns the events of every read.
-    fn play(base: &RawState, changes: &[(u64, RawState)], window: Duration) -> Vec<AudioEvent> {
+    enum Step {
+        /// The server state changes to this, and the server reports it.
+        Server(RawState),
+        /// A command arrives, reading the state if changes were reported.
+        Command,
+    }
+
+    /// Runs `steps` (at a time in milliseconds) through a [`ReadSchedule`]
+    /// the way [`Worker::serve`], [`Worker::handle`] and
+    /// [`Worker::maintain`] use it, with a fake clock: the loop wakes at each
+    /// step and when the schedule says, and a publish shows the server state
+    /// of that moment. Returns when each publish happened and its events.
+    fn play(
+        base: &RawState,
+        steps: &[(u64, Step)],
+        settle: Duration,
+    ) -> Vec<(u64, Vec<AudioEvent>)> {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut settle = Settle::new(window);
+        let mut schedule = ReadSchedule::new(settle);
         let mut published = base.to_audio_state(true);
-        let mut current = base;
-        let mut reported = false;
-        let mut events = Vec::new();
-        let mut pending = changes.iter().peekable();
+        let mut server = base;
+        let mut dirty = false;
+        let mut publishes = Vec::new();
+        let mut steps = steps.iter().peekable();
         loop {
-            let next_change = pending.peek().map(|(ms, _)| at(*ms));
-            let Some(now) = [next_change, settle.due.filter(|_| reported)]
-                .into_iter()
-                .flatten()
-                .min()
-            else {
-                return events;
+            let next_step = steps.peek().map(|(ms, _)| at(*ms));
+            let Some(now) = [next_step, schedule.next()].into_iter().flatten().min() else {
+                return publishes;
             };
-            while let Some((_, raw)) = pending.next_if(|(ms, _)| at(*ms) <= now) {
-                current = raw;
-                reported = true;
+            while let Some((_, step)) = steps.next_if(|(ms, _)| at(*ms) <= now) {
+                match step {
+                    Step::Server(raw) => {
+                        server = raw;
+                        dirty = true;
+                    }
+                    Step::Command if dirty => {
+                        dirty = false;
+                        schedule.read_unpublished(now);
+                    }
+                    Step::Command => {}
+                }
             }
-            if settle.read_due(reported, now) {
-                reported = false;
-                settle.clear();
-                let state = current.to_audio_state(true);
-                events.extend(diff(&published, &state));
+            if dirty {
+                schedule.changed(now);
+            }
+            if schedule.is_due(now) {
+                dirty = false;
+                schedule.clear();
+                let state = server.to_audio_state(true);
+                let ms = now.duration_since(start).as_millis() as u64;
+                publishes.push((ms, diff(&published, &state)));
                 published = state;
             }
         }
     }
 
-    #[test]
-    fn a_staggered_title_change_is_one_update() {
-        let base = tab("Old", "Old");
-        let changes = [(0, tab("New", "Old")), (3, tab("New", "New"))];
-        assert_eq!(
-            play(&base, &changes, SETTLE),
-            vec![AudioEvent::SessionDetailChanged {
-                id: "speakers|10".into()
-            }]
-        );
-        // Read at once, the group splits and merges again.
-        assert_eq!(
-            play(&base, &changes, Duration::ZERO),
-            vec![
-                AudioEvent::SessionDetailChanged {
-                    id: "speakers|10".into()
-                },
-                AudioEvent::SessionAdded {
-                    id: "speakers|11".into()
-                },
-                AudioEvent::SessionRemoved {
-                    id: "speakers|11".into()
-                },
-            ]
-        );
+    fn retitled() -> Vec<AudioEvent> {
+        vec![AudioEvent::SessionDetailChanged {
+            id: "speakers|10".into(),
+        }]
     }
 
     #[test]
-    fn settle_reads_a_window_after_the_first_report() {
+    fn a_staggered_title_change_is_one_update() {
+        let base = tab("Old", "Old");
+        let steps = [
+            (0, Step::Server(tab("New", "Old"))),
+            (3, Step::Server(tab("New", "New"))),
+        ];
+        assert_eq!(play(&base, &steps, SETTLE), [(30, retitled())]);
+
+        // Read at once, the group splits and merges again.
+        assert_eq!(
+            play(&base, &steps, Duration::ZERO),
+            [
+                (
+                    0,
+                    vec![
+                        AudioEvent::SessionDetailChanged {
+                            id: "speakers|10".into()
+                        },
+                        AudioEvent::SessionAdded {
+                            id: "speakers|11".into()
+                        },
+                    ]
+                ),
+                (
+                    3,
+                    vec![AudioEvent::SessionRemoved {
+                        id: "speakers|11".into()
+                    }]
+                ),
+            ]
+        );
+
+        // A command in between reads the half-changed state without
+        // publishing it.
+        let steps = [
+            (0, Step::Server(tab("New", "Old"))),
+            (1, Step::Command),
+            (3, Step::Server(tab("New", "New"))),
+        ];
+        assert_eq!(play(&base, &steps, SETTLE), [(30, retitled())]);
+    }
+
+    #[test]
+    fn changes_that_keep_coming_are_published_regularly() {
+        let base = tab("Old", "Old");
+        let mut steps: Vec<(u64, Step)> = (0..10).map(|i| (i * 7, Step::Command)).collect();
+        steps.insert(0, (0, Step::Server(tab("New", "New"))));
+        steps.push((40, Step::Server(tab("Newer", "Newer"))));
+        steps.push((41, Step::Command));
+        steps.push((50, Step::Server(tab("Newest", "Newest"))));
+        steps.sort_by_key(|(ms, _)| *ms);
+        let times: Vec<u64> = play(&base, &steps, SETTLE)
+            .into_iter()
+            .map(|(ms, events)| {
+                assert_eq!(events, retitled());
+                ms
+            })
+            .collect();
+        assert_eq!(times, [30, 70]);
+    }
+
+    #[test]
+    fn a_failed_read_is_retried_after_its_delay() {
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
-        let mut settle = Settle::new(Duration::from_millis(30));
-        assert!(!settle.read_due(false, at(0)));
-        assert_eq!(settle.due, None);
-        assert!(!settle.read_due(true, at(0)));
-        assert!(!settle.read_due(true, at(20)));
-        assert!(!settle.read_due(true, at(29)));
-        assert!(settle.read_due(true, at(30)));
-        settle.clear();
-        assert!(!settle.read_due(true, at(31)));
-        assert!(settle.read_due(true, at(70)));
+        let mut schedule = ReadSchedule::new(SETTLE);
+        assert_eq!(schedule.next(), None);
+        schedule.changed(at(0));
+        schedule.changed(at(20));
+        assert_eq!(schedule.next(), Some(at(30)));
+        assert!(!schedule.is_due(at(29)) && schedule.is_due(at(30)));
+
+        schedule.failed(at(30));
+        let retry = at(30) + REFRESH_RETRY;
+        assert_eq!(schedule.next(), Some(retry));
+        schedule.changed(at(40));
+        assert_eq!(schedule.next(), Some(retry), "changes wait for the retry");
+
+        // A read for a command that succeeds ends the wait.
+        schedule.read_unpublished(at(50));
+        assert_eq!(schedule.next(), Some(at(80)));
+        schedule.clear();
+        assert_eq!(schedule.next(), None);
     }
 }

@@ -48,7 +48,7 @@ const NULL_DEFAULT_BUDGET: Duration = Duration::from_millis(1500);
 
 const STREAM_NAME: &str = "pcvc-test-stream";
 
-/// The test streams' initial volume, 80 %.
+/// The test streams' initial volume, just under 80 %.
 const STREAM_VOLUME: u32 = Volume::NORMAL.0 / 5 * 4;
 
 /// A fixed name, because WirePlumber remembers every sink that was ever the
@@ -170,8 +170,7 @@ impl Ctl {
             .introspect()
             .get_sink_input_info(index, move |item| {
                 if let ListResult::Item(info) = item {
-                    let percent = info.volume.avg().0 as f32 * 100.0 / Volume::NORMAL.0 as f32;
-                    slot.set(Some((percent, info.mute)));
+                    slot.set(Some((volume_to_percent(info.volume.avg().0), info.mute)));
                 }
             });
         assert!(self.wait(op), "reading sink-input {index} timed out");
@@ -203,6 +202,10 @@ impl Ctl {
             .unload_module(index, move |s| slot.set(s));
         self.wait(op) && ok.get()
     }
+}
+
+fn volume_to_percent(raw: u32) -> f32 {
+    raw as f32 * 100.0 / Volume::NORMAL.0 as f32
 }
 
 fn iterate(mainloop: &mut Mainloop) {
@@ -682,6 +685,16 @@ fn streams_that_look_the_same_are_one_session() {
         .then(|| session.clone())
     });
 
+    let initial = volume_to_percent(STREAM_VOLUME);
+    assert!((session.volume - initial).abs() < 0.01, "{session:?}");
+    for index in [rep, other] {
+        let (volume, muted) = ctl.own_stream(index).expect("the test stream");
+        assert!(
+            (volume - initial).abs() < 0.01 && !muted,
+            "{index}: {volume} {muted}"
+        );
+    }
+
     // Set through the id of the stream that is not the representative.
     let lower = (session.volume / 2.0).floor();
     backend.set_session(&other_id, lower, true).unwrap();
@@ -714,11 +727,8 @@ fn streams_that_look_the_same_are_one_session() {
     drop(oldest);
     let continued = wait_for(&backend, "the session under the other id", |s| {
         let ours = ours(s);
-        match ours.as_slice() {
-            [session] if session.id == other_id => Some(session.clone()),
-            [session] if session.id == rep_id => None,
-            got => panic!("expected one session, got {got:?}"),
-        }
+        assert!(ours.len() <= 1, "the group split: {ours:?}");
+        ours.into_iter().find(|session| session.id == other_id)
     });
     assert!((continued.volume - lower).abs() < 0.01, "{continued:?}");
     assert_eq!(
