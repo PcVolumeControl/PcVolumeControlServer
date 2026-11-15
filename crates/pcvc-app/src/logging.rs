@@ -198,6 +198,9 @@ pub fn init(log_dir: Option<&Path>) -> (LogBuffer, LogGuard) {
 }
 
 fn open_log_file(dir: &Path) -> Result<RollingFileAppender, String> {
+    // The appender prunes old files before it creates the directory, and
+    // reports a missing directory on stderr.
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix("pcvolumecontrol")

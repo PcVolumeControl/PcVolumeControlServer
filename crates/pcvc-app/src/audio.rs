@@ -19,18 +19,62 @@ pub enum BackendChoice {
     Mock,
 }
 
-/// Creates the backend for `choice`. Platform backends plug in here.
+/// Creates the backend for `choice`. When the system backend cannot start,
+/// the app runs with no devices so it never presents the mock's scripted
+/// sessions as real ones.
 pub fn create_backend(choice: BackendChoice) -> Arc<dyn AudioBackend> {
     match choice {
         BackendChoice::Mock => {
             tracing::info!("using the mock audio backend");
             Arc::new(MockBackend::demo())
         }
-        BackendChoice::System => {
-            tracing::warn!("no system audio backend for this platform yet; using the mock backend");
-            Arc::new(MockBackend::demo())
+        BackendChoice::System => match system_backend() {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::error!("the system audio backend failed to start: {e}");
+                Arc::new(MockBackend::new(Vec::new(), None).expect("an empty mock is always valid"))
+            }
+        },
+    }
+}
+
+/// How many times the system backend is tried at startup, one second apart.
+/// At login the app can start before the sound server accepts connections.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const SYSTEM_BACKEND_ATTEMPTS: u32 = 5;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+    let mut attempt = 1;
+    loop {
+        match open_system_backend() {
+            Ok(backend) => return Ok(backend),
+            Err(e) if attempt < SYSTEM_BACKEND_ATTEMPTS => {
+                tracing::warn!("system audio backend not ready (attempt {attempt}): {e}");
+                attempt += 1;
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn open_system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+    tracing::info!("using the PulseAudio backend");
+    Ok(Arc::new(pcvc_audio::PulseBackend::new()?))
+}
+
+#[cfg(target_os = "windows")]
+fn open_system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+    tracing::info!("using the Core Audio backend");
+    Ok(Arc::new(pcvc_audio::WindowsBackend::new()?))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+    tracing::warn!("no system audio backend for this platform; using the mock backend");
+    Ok(Arc::new(MockBackend::demo()))
 }
 
 /// How long backend events are gathered before the state is re-read.
