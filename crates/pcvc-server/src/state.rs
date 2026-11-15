@@ -1,10 +1,34 @@
 use pcvc_audio::AudioState;
 use pcvc_protocol::{
-    APPLICATION_VERSION, DeviceState, FullState, PROTOCOL_VERSION, SessionState, clamp_volume,
+    APPLICATION_VERSION, DeviceState, FEATURE_ICONS, FullState, PROTOCOL_VERSION, SessionState,
+    clamp_volume,
 };
 
-/// Converts a backend snapshot to the wire full state. `None` when there is no
-/// default device, since the protocol has no way to express that.
+use crate::IconProvider;
+
+/// [`to_full_state`] plus the icon extension when there is a provider: the
+/// `icons` feature and each session's icon id, if the provider knows it.
+pub(crate) fn to_full_state_with_icons(
+    state: &AudioState,
+    icons: Option<&dyn IconProvider>,
+) -> Option<FullState> {
+    let mut full = to_full_state(state)?;
+    if let (Some(icons), Some(device)) = (icons, &state.default_device) {
+        full.features = vec![FEATURE_ICONS.to_owned()];
+        for (wire, session) in full
+            .default_device
+            .sessions
+            .iter_mut()
+            .zip(&device.sessions)
+        {
+            wire.icon_id = icons.icon_id(session);
+        }
+    }
+    Some(full)
+}
+
+/// Converts a backend snapshot to the plain v7 wire full state. `None` when
+/// there is no default device, since the protocol has no way to express that.
 pub fn to_full_state(state: &AudioState) -> Option<FullState> {
     let device = state.default_device.as_ref()?;
     Some(FullState {

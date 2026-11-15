@@ -50,7 +50,8 @@ impl Drop for Daemon {
 /// service, and `Failed` whenever it reports an error.
 pub(crate) async fn run(shared: Arc<Shared>, bind: IpAddr, port: u16) {
     shared.mdns.send_replace(MdnsStatus::Starting);
-    let registered = tokio::task::spawn_blocking(move || register(bind, port)).await;
+    let features = shared.features();
+    let registered = tokio::task::spawn_blocking(move || register(bind, port, &features)).await;
     let (daemon, monitor, mut fullname) = match registered {
         Ok(Ok(registered)) => registered,
         Ok(Err(e)) => return fail(&shared, format!("mDNS registration failed: {e}")),
@@ -100,15 +101,27 @@ fn fail(shared: &Shared, message: String) {
     shared.mdns.send_replace(MdnsStatus::Failed(message));
 }
 
+/// The TXT record. `features` is left out when empty, as v7 servers do.
+fn txt_properties(features: &[&str]) -> Vec<(&'static str, String)> {
+    let mut properties = vec![
+        ("version", TXT_VERSION.to_owned()),
+        ("protocol", PROTOCOL_VERSION.to_string()),
+    ];
+    if !features.is_empty() {
+        properties.push(("features", features.join(",")));
+    }
+    properties
+}
+
 fn register(
     bind: IpAddr,
     port: u16,
+    features: &[&str],
 ) -> Result<(Daemon, Receiver<DaemonEvent>, String), mdns_sd::Error> {
     let host = short_hostname();
     let instance = format!("{host}-pcvolumecontrol");
     let host_name = format!("{host}.local.");
-    let protocol = PROTOCOL_VERSION.to_string();
-    let properties = [("version", TXT_VERSION), ("protocol", protocol.as_str())];
+    let properties = txt_properties(features);
 
     let addresses: Vec<IpAddr> = if bind.is_unspecified() {
         Vec::new()
@@ -178,6 +191,24 @@ mod tests {
             "box-pcvolumecontrol (2)"
         );
         assert_eq!(instance_name("other"), "other");
+    }
+
+    #[test]
+    fn txt_record_lists_features_only_when_present() {
+        let pairs = |p: Vec<(&str, String)>| {
+            p.into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pairs(txt_properties(&[])), ["version=1", "protocol=7"]);
+        assert_eq!(
+            pairs(txt_properties(&["icons"])),
+            ["version=1", "protocol=7", "features=icons"]
+        );
+        assert_eq!(
+            pairs(txt_properties(&["icons", "other"])),
+            ["version=1", "protocol=7", "features=icons,other"]
+        );
     }
 
     #[test]
