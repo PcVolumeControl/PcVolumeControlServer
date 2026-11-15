@@ -3,7 +3,9 @@
 //! Sinks are devices (id = sink name, name = description), the server's
 //! default sink is the default device, and the user streams (sink-inputs) on
 //! it are its sessions, with ids of the form `"{sink name}|{sink-input
-//! index}"`. A worker thread owns the main loop and the connection; the
+//! index}"`. Streams of one application instance that would look the same
+//! are one session (see the `model` module). A worker thread owns the main
+//! loop and the connection; the
 //! public [`PulseBackend`] talks to it over channels and serves snapshots
 //! from a cache the worker keeps up to date.
 

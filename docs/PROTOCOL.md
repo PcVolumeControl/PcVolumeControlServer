@@ -312,8 +312,8 @@ Each session object may carry a `detail`, an ordinary optional member of
 v8 sessions with no feature name: a short, human-readable label that tells
 it apart from other sessions of the same application, such as a browser
 tab's title or the title of what a player is playing. Firefox on Linux, for
-example, opens one stream per tab, and every one of them is named
-`Firefox`:
+example, opens a stream for each tab that plays, and every one of them is
+named `Firefox`:
 
 ```json
 "sessions": [
@@ -377,7 +377,9 @@ What the host sends:
   dropped: `Playback`, `Playback Stream`, `Audio Stream`, `AudioStream`,
   `AudioCallbackDriver`, `ALSA Playback`, `Simple DirectMedia Layer` (all
   ignoring case and extra whitespace) and `cpal-playback-` followed by
-  digits.
+  digits. Streams of one application instance with the same name and
+  detail (whether or not details are sent) are one session, with the id of
+  its lowest-numbered stream; the id changes when that stream ends.
 - **Windows**: none. Core Audio gives a session nothing beyond its display
   name, which is already the `name`, and a browser plays all its tabs
   through one session.

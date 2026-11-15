@@ -5,8 +5,8 @@
 //! cargo test -p pcvc-audio --test pulse_live -- --ignored --test-threads=1
 //! ```
 //!
-//! Volume and mute are only changed on things the tests create: a silent
-//! playback stream opened by the test process and a `module-null-sink`.
+//! Volume and mute are only changed on things the tests create: silent
+//! playback streams opened by the test process and a `module-null-sink`.
 //!
 //! Making the null sink the default (for at most [`NULL_DEFAULT_BUDGET`])
 //! also moves every stream on the real default sink to it and back, so they
@@ -35,6 +35,7 @@ use libpulse_binding::proplist::Proplist;
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::{FlagSet as StreamFlagSet, SeekMode, State as StreamState, Stream};
 use libpulse_binding::time::MicroSeconds;
+use libpulse_binding::volume::{ChannelVolumes, Volume};
 use pcvc_audio::{AudioBackend, AudioError, AudioEvent, AudioState, Device, PulseBackend, Session};
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
@@ -46,6 +47,9 @@ const WAIT: Duration = Duration::from_secs(3);
 const NULL_DEFAULT_BUDGET: Duration = Duration::from_millis(1500);
 
 const STREAM_NAME: &str = "pcvc-test-stream";
+
+/// The test streams' initial volume, just under 80 %.
+const STREAM_VOLUME: u32 = Volume::NORMAL.0 / 5 * 4;
 
 /// A fixed name, because WirePlumber remembers every sink that was ever the
 /// default; repeated runs then reuse one entry.
@@ -154,6 +158,41 @@ impl Ctl {
         index.get()
     }
 
+    /// The volume (average, in percent) and mute of one of the test's own
+    /// streams, or `None` once it is gone. Only the test's streams are read
+    /// this way: the safe binding converts their sample spec and channel map
+    /// into enums, which is sound for the values the test chose.
+    fn own_stream(&mut self, index: u32) -> Option<(f32, bool)> {
+        let found = Rc::new(Cell::new(None));
+        let slot = Rc::clone(&found);
+        let op = self
+            .context
+            .introspect()
+            .get_sink_input_info(index, move |item| {
+                if let ListResult::Item(info) = item {
+                    slot.set(Some((volume_to_percent(info.volume.avg().0), info.mute)));
+                }
+            });
+        assert!(self.wait(op), "reading sink-input {index} timed out");
+        found.get()
+    }
+
+    /// Polls [`Self::own_stream`] until `check` accepts its volume and mute.
+    fn wait_for_own_stream(&mut self, index: u32, check: impl Fn(f32, bool) -> bool) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let state = self.own_stream(index);
+            if state.is_some_and(|(volume, muted)| check(volume, muted)) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sink-input {index} stayed at {state:?}"
+            );
+            iterate(&mut self.mainloop);
+        }
+    }
+
     fn unload_module(&mut self, index: u32) -> bool {
         let ok = Rc::new(Cell::new(false));
         let slot = Rc::clone(&ok);
@@ -163,6 +202,10 @@ impl Ctl {
             .unload_module(index, move |s| slot.set(s));
         self.wait(op) && ok.get()
     }
+}
+
+fn volume_to_percent(raw: u32) -> f32 {
+    raw as f32 * 100.0 / Volume::NORMAL.0 as f32
 }
 
 fn iterate(mainloop: &mut Mainloop) {
@@ -282,20 +325,30 @@ impl Drop for Watchdog {
 struct SilentStream {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// The sink-input index.
+    index: u32,
 }
 
 impl SilentStream {
     fn start() -> Self {
+        Self::start_as("silence")
+    }
+
+    /// A stream with `media_name` as its `media.name`.
+    fn start_as(media_name: &'static str) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = mpsc::channel();
         let flag = Arc::clone(&stop);
         // Built before waiting, so its drop also stops a stream that
         // becomes ready too late.
-        let stream = Self {
+        let mut stream = Self {
             stop,
-            thread: Some(std::thread::spawn(move || play_silence(&flag, &ready_tx))),
+            thread: Some(std::thread::spawn(move || {
+                play_silence(&flag, &ready_tx, media_name);
+            })),
+            index: u32::MAX,
         };
-        ready_rx
+        stream.index = ready_rx
             .recv_timeout(WAIT)
             .expect("the silent stream did not start");
         stream
@@ -311,7 +364,7 @@ impl Drop for SilentStream {
     }
 }
 
-fn play_silence(stop: &AtomicBool, ready: &mpsc::Sender<()>) {
+fn play_silence(stop: &AtomicBool, ready: &mpsc::Sender<u32>, media_name: &str) {
     let mut ctl = Ctl::connect_as(STREAM_NAME);
     let mut stream_props = Proplist::new().expect("proplist");
     for key in ["state.restore-props", "state.restore-target"] {
@@ -324,10 +377,14 @@ fn play_silence(stop: &AtomicBool, ready: &mpsc::Sender<()>) {
     };
     let frame = spec.frame_size();
     let mut stream =
-        Stream::new_with_proplist(&mut ctl.context, "silence", &spec, None, &mut stream_props)
+        Stream::new_with_proplist(&mut ctl.context, media_name, &spec, None, &mut stream_props)
             .expect("stream");
+    // Without an initial volume, PipeWire reports 0 until the volume is
+    // first set.
+    let mut volume = ChannelVolumes::default();
+    volume.set(spec.channels, Volume(STREAM_VOLUME));
     stream
-        .connect_playback(None, None, StreamFlagSet::NOFLAGS, None, None)
+        .connect_playback(None, None, StreamFlagSet::NOFLAGS, Some(&volume), None)
         .expect("connect playback");
     let deadline = Instant::now() + WAIT;
     while stream.get_state() != StreamState::Ready {
@@ -338,7 +395,7 @@ fn play_silence(stop: &AtomicBool, ready: &mpsc::Sender<()>) {
         assert!(Instant::now() < deadline, "the stream timed out");
         iterate(&mut ctl.mainloop);
     }
-    let _ = ready.send(());
+    let _ = ready.send(stream.get_index().expect("a ready stream has an index"));
     let zeros = vec![0u8; 64 * 1024];
     while !stop.load(Ordering::Relaxed) {
         if let Some(n) = stream.writable_size() {
@@ -585,6 +642,122 @@ fn default_device_and_master_on_null_sink() {
         (&before.id, before.volume, before.muted)
     );
     eprintln!("null sink was the default for {null_default_for:?}");
+}
+
+/// Two streams of this process with the same `media.name` are one session:
+/// it is set as a whole, and it outlives its representative.
+#[test]
+#[ignore = "needs a running PulseAudio or PipeWire server"]
+fn streams_that_look_the_same_are_one_session() {
+    const MEDIA_NAME: &str = "pcvc-test-group";
+    let _serial = serial();
+    let mut ctl = Ctl::connect();
+    let original_default = ctl.default_sink();
+    let backend = PulseBackend::with_details(true).unwrap();
+    let before = default_device(&backend);
+    let mut events = backend.subscribe();
+
+    let first = SilentStream::start_as(MEDIA_NAME);
+    let second = SilentStream::start_as(MEDIA_NAME);
+    let (rep, other) = (first.index.min(second.index), first.index.max(second.index));
+    let rep_id = format!("{}|{rep}", before.id);
+    let other_id = format!("{}|{other}", before.id);
+    let ours = |s: &AudioState| -> Vec<Session> {
+        s.default_device
+            .iter()
+            .flat_map(|d| &d.sessions)
+            .filter(|x| x.name == STREAM_NAME)
+            .cloned()
+            .collect()
+    };
+    // The backend knows both streams once the other one's id addresses the
+    // group; an echo of the shown state changes nothing.
+    let session = wait_for(&backend, "one session for both streams", |s| {
+        let ours = ours(s);
+        let [session] = ours.as_slice() else {
+            return None;
+        };
+        (session.id == rep_id
+            && session.detail.as_deref() == Some(MEDIA_NAME)
+            && backend
+                .set_session(&other_id, session.volume, session.muted)
+                .is_ok())
+        .then(|| session.clone())
+    });
+
+    let initial = volume_to_percent(STREAM_VOLUME);
+    assert!((session.volume - initial).abs() < 0.01, "{session:?}");
+    for index in [rep, other] {
+        let (volume, muted) = ctl.own_stream(index).expect("the test stream");
+        assert!(
+            (volume - initial).abs() < 0.01 && !muted,
+            "{index}: {volume} {muted}"
+        );
+    }
+
+    // Set through the id of the stream that is not the representative.
+    let lower = (session.volume / 2.0).floor();
+    backend.set_session(&other_id, lower, true).unwrap();
+    for index in [rep, other] {
+        ctl.wait_for_own_stream(index, |volume, muted| {
+            (volume - lower).abs() < 0.01 && muted
+        });
+    }
+    wait_for(&backend, "the lowered, muted session", |s| {
+        session_by_id(s, &rep_id).filter(|x| (x.volume - lower).abs() < 0.01 && x.muted)
+    });
+    backend.set_session(&rep_id, lower, false).unwrap();
+    for index in [rep, other] {
+        ctl.wait_for_own_stream(index, |volume, muted| {
+            (volume - lower).abs() < 0.01 && !muted
+        });
+    }
+    wait_for(&backend, "the unmuted session", |s| {
+        session_by_id(s, &rep_id).filter(|x| !x.muted)
+    });
+    drain(&mut events);
+
+    // The representative goes away; the session continues under the other
+    // stream's id, as one row throughout.
+    let (oldest, newest) = if first.index == rep {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    drop(oldest);
+    let continued = wait_for(&backend, "the session under the other id", |s| {
+        let ours = ours(s);
+        assert!(ours.len() <= 1, "the group split: {ours:?}");
+        ours.into_iter().find(|session| session.id == other_id)
+    });
+    assert!((continued.volume - lower).abs() < 0.01, "{continued:?}");
+    assert_eq!(
+        (continued.muted, continued.detail.as_deref()),
+        (false, Some(MEDIA_NAME))
+    );
+    let seen = drain(&mut events);
+    assert!(
+        seen.contains(&AudioEvent::SessionRemoved { id: rep_id.clone() })
+            && seen.contains(&AudioEvent::SessionAdded {
+                id: other_id.clone()
+            }),
+        "{seen:?}"
+    );
+    assert!(matches!(
+        backend.set_session(&rep_id, 1.0, true),
+        Err(AudioError::UnknownSession(_))
+    ));
+
+    drop(newest);
+    wait_for(&backend, "the streams to go away", |s| {
+        ours(s).is_empty().then_some(())
+    });
+    let after = default_device(&backend);
+    assert_eq!(ctl.default_sink(), original_default);
+    assert_eq!(
+        (&after.id, after.volume, after.muted),
+        (&before.id, before.volume, before.muted)
+    );
 }
 
 /// Commands sent back to back, while the backend is busy reading the state
