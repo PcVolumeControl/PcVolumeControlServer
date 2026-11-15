@@ -9,6 +9,7 @@ mod audio;
 mod autostart;
 mod cli;
 mod config;
+mod fit;
 mod icons;
 mod inbox;
 mod instance;

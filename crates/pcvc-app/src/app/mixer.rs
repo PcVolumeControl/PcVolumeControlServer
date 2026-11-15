@@ -1,16 +1,18 @@
 //! Mixer view and its message handling.
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use iced::widget::{
-    Space, button, column, container, image, pick_list, row, scrollable, slider, text,
+    Space, button, column, container, image, pick_list, responsive, row, slider, text, tooltip,
 };
 use iced::{Center, Element, Fill, Task};
-use pcvc_audio::{Device, DeviceInfo, Session};
+use pcvc_audio::{AudioState, Device, DeviceInfo, Session};
 use pcvc_protocol::Command;
 
 use super::{App, Message};
 use crate::app_icons::{Slot, fallback};
+use crate::fit::fit;
 use crate::mixer::{Target, control};
 use crate::style::{self, Button};
 
@@ -42,25 +44,37 @@ fn tagged<'a>(
     tile
 }
 
-/// A pick-list entry for a playback device.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A pick-list entry for a playback device. Entries are equal when their
+/// device is, so the selected entry can show a shortened name while the
+/// list shows full ones.
+#[derive(Debug, Clone)]
 pub struct DeviceChoice {
     id: String,
-    name: String,
+    label: String,
 }
 
-impl From<&DeviceInfo> for DeviceChoice {
-    fn from(d: &DeviceInfo) -> Self {
+impl DeviceChoice {
+    fn new(d: &DeviceInfo) -> Self {
         Self {
             id: d.id.clone(),
-            name: d.name.clone(),
+            label: d.name.clone(),
         }
+    }
+
+    fn with_label(self, label: String) -> Self {
+        Self { label, ..self }
+    }
+}
+
+impl PartialEq for DeviceChoice {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
     }
 }
 
 impl std::fmt::Display for DeviceChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.name)
+        f.write_str(&self.label)
     }
 }
 
@@ -164,35 +178,52 @@ impl App {
         let Some(audio) = &self.audio else {
             return text("Reading audio devices...").into();
         };
-        let devices: Vec<DeviceChoice> = audio.devices.iter().map(DeviceChoice::from).collect();
-        let selected = audio
-            .default_device
-            .as_ref()
-            .and_then(|device| devices.iter().find(|d| d.id == device.id).cloned());
-        let picker = row![
-            text("Output device").width(style::LABEL_WIDTH),
-            pick_list(devices, selected, |c| Message::Mixer(
-                MixerMessage::SelectDevice(c)
+        // The columns depend on the width, and labels are shortened to fit.
+        responsive(move |size| self.mixer_layout(audio, size.width)).into()
+    }
+
+    fn mixer_layout<'a>(&'a self, audio: &'a AudioState, width: f32) -> Element<'a, Message> {
+        let cols = MixerColumns::new(width);
+        let selected = audio.default_device.as_ref().and_then(|device| {
+            let info = audio.devices.iter().find(|d| d.id == device.id)?;
+            let label = fit(&info.name, style::TEXT_DEFAULT, cols.picker_text);
+            let shortened = matches!(label, Cow::Owned(_));
+            Some((
+                DeviceChoice::new(info).with_label(label.into_owned()),
+                shortened.then_some(info.name.as_str()),
             ))
-            .padding([style::SPACE_S, style::SPACE_M])
-            .width(Fill),
+        });
+        let full_name = selected.as_ref().and_then(|(_, full)| *full);
+        let devices: Vec<DeviceChoice> = audio.devices.iter().map(DeviceChoice::new).collect();
+        let list = pick_list(devices, selected.map(|(choice, _)| choice), |c| {
+            Message::Mixer(MixerMessage::SelectDevice(c))
+        })
+        .text_size(style::TEXT_DEFAULT)
+        .padding([style::SPACE_S, style::SPACE_M])
+        .width(Fill);
+        let picker = row![
+            container(text("Output device"))
+                .width(cols.label)
+                .clip(true),
+            with_tooltip(list, full_name),
         ]
         .spacing(style::SPACE_M)
         .align_y(Center);
 
         let Some(device) = &audio.default_device else {
             return column![
-                container(picker).padding(style::SPACE_L).style(style::card),
+                style::beside_gutter(container(picker).padding(style::SPACE_L).style(style::card)),
                 text("No default playback device").style(style::muted_text),
             ]
             .spacing(style::SPACE_M)
             .into();
         };
         let master = self.volume_row(
-            text("Master").size(style::TEXT_SECTION),
+            text("Master").size(style::TEXT_SECTION).into(),
+            &cols,
             Target::Master,
-            device.volume,
-            device.muted,
+            self.mixer.volume(&Target::Master, device.volume),
+            self.mixer.muted(&Target::Master, device.muted),
         );
         let top = container(column![picker, master].spacing(style::SPACE_L))
             .padding(style::SPACE_L)
@@ -204,31 +235,26 @@ impl App {
                 .into()
         } else {
             column(device.sessions.iter().map(|s| {
-                let label = row![
-                    self.app_icon(s),
-                    text(&s.name).wrapping(text::Wrapping::None)
-                ]
-                .spacing(style::SPACE_S)
-                .align_y(Center);
-                self.volume_row(label, Target::Session(s.id.clone()), s.volume, s.muted)
+                let target = Target::Session(s.id.clone());
+                let muted = self.mixer.muted(&target, s.muted);
+                let label = row![self.app_icon(s, muted), session_name(&s.name, cols.name)]
+                    .spacing(style::APP_ICON_GAP)
+                    .align_y(Center);
+                let volume = self.mixer.volume(&target, s.volume);
+                self.volume_row(label.into(), &cols, target, volume, muted)
             }))
             .spacing(style::SPACE_M)
             .into()
         };
 
         column![
-            top,
-            text("Applications")
-                .size(style::TEXT_SMALL)
-                .style(style::muted_text),
-            scrollable(
-                container(sessions).padding(
-                    iced::Padding::ZERO
-                        .left(style::SPACE_L)
-                        .right(style::SPACE_L)
-                )
-            )
-            .height(Fill),
+            style::beside_gutter(top),
+            style::beside_gutter(
+                text("Applications")
+                    .size(style::TEXT_SMALL)
+                    .style(style::muted_text)
+            ),
+            style::scroll_area(container(sessions).padding([0.0, style::SPACE_L])),
         ]
         .spacing(style::SPACE_M)
         .into()
@@ -236,15 +262,18 @@ impl App {
 
     /// The session's icon once found, the fallback tile when there is
     /// none, and an empty tile of the same size while it is looked up.
-    fn app_icon(&self, session: &Session) -> Element<'_, Message> {
+    /// Muted sessions show it faded.
+    fn app_icon(&self, session: &Session, muted: bool) -> Element<'_, Message> {
         let size = style::APP_ICON;
+        let opacity = if muted { style::MUTED_OPACITY } else { 1.0 };
         match self.session_icon(&session.id) {
             Slot::Ready(Some(handle)) => tagged(
                 container(
                     image(handle.clone())
                         .width(size)
                         .height(size)
-                        .border_radius(style::APP_ICON_RADIUS),
+                        .border_radius(style::APP_ICON_RADIUS)
+                        .opacity(opacity),
                 ),
                 "image",
                 session,
@@ -255,11 +284,11 @@ impl App {
                 let letter = text(fallback::initial(&session.name))
                     .size(style::APP_ICON_LETTER)
                     .style(move |theme| text::Style {
-                        color: Some(fallback::colors(theme, index).text),
+                        color: Some(fallback::colors(theme, index).text.scale_alpha(opacity)),
                     });
-                let tile = container(letter)
-                    .center(size)
-                    .style(move |theme| style::icon_tile(fallback::colors(theme, index).color));
+                let tile = container(letter).center(size).style(move |theme| {
+                    style::icon_tile(fallback::colors(theme, index).color.scale_alpha(opacity))
+                });
                 tagged(tile, "fallback", session).into()
             }
             Slot::Pending => tagged(
@@ -274,15 +303,18 @@ impl App {
         }
     }
 
+    /// Label, slider, percentage and mute button, showing `volume` and
+    /// `muted` as the mixer model presents them. The label column has the
+    /// same width in every row, so the sliders line up. A muted control
+    /// shows a greyed slider and percentage and a highlighted Unmute button.
     fn volume_row<'a>(
         &self,
-        label: impl Into<Element<'a, Message>>,
+        label: Element<'a, Message>,
+        cols: &MixerColumns,
         target: Target,
-        actual: f32,
+        volume: f32,
         muted: bool,
     ) -> Element<'a, Message> {
-        let volume = self.mixer.volume(&target, actual);
-        let muted = self.mixer.muted(&target, muted);
         let mute = button(text(if muted { "Unmute" } else { "Mute" }).center())
             .width(style::MUTE_WIDTH)
             .style(style::button(if muted {
@@ -296,17 +328,141 @@ impl App {
             Message::Mixer(MixerMessage::Slide(slide_target.clone(), v))
         })
         .step(1.0_f32)
-        .on_release(Message::Mixer(MixerMessage::Release(target)));
+        .on_release(Message::Mixer(MixerMessage::Release(target)))
+        .style(style::volume_slider(muted));
+        let percent = text(format!("{volume:.0}%"))
+            .width(style::PERCENT_WIDTH)
+            .align_x(iced::Right);
+        let percent = if muted {
+            percent.style(style::muted_text)
+        } else {
+            percent
+        };
         row![
-            container(label.into()).width(style::LABEL_WIDTH).clip(true),
+            container(label).width(cols.label).clip(true),
             fader,
-            text(format!("{volume:.0}%"))
-                .width(style::PERCENT_WIDTH)
-                .align_x(iced::Right),
-            mute,
+            percent,
+            mute
         ]
         .spacing(style::SPACE_M)
         .align_y(Center)
         .into()
+    }
+}
+
+/// A session name fitted to `width`, with the full name in a tooltip when
+/// it had to be shortened.
+fn session_name(name: &str, width: f32) -> Element<'_, Message> {
+    let fitted = fit(name, style::TEXT_DEFAULT, width);
+    let full = matches!(fitted, Cow::Owned(_)).then_some(name);
+    let label = text(fitted)
+        .size(style::TEXT_DEFAULT)
+        .wrapping(text::Wrapping::None);
+    with_tooltip(label, full)
+}
+
+/// `content`, with `full` in a tooltip on hover when given.
+fn with_tooltip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    full: Option<&'a str>,
+) -> Element<'a, Message> {
+    match full {
+        None => content.into(),
+        Some(full) => tooltip(
+            content,
+            container(text(full).size(style::TEXT_SMALL))
+                .padding([style::SPACE_XS, style::SPACE_S])
+                .style(style::tooltip),
+            tooltip::Position::Top,
+        )
+        .delay(style::TOOLTIP_DELAY)
+        .into(),
+    }
+}
+
+/// Column widths of the Mixer rows for a page `width`. The label column
+/// takes a share of the room left by the fixed columns, within bounds, and
+/// the slider (or the device picker) the rest.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MixerColumns {
+    /// The label column: "Output device", "Master", or icon and name.
+    label: f32,
+    /// Room for a session name after its icon.
+    name: f32,
+    /// Room for the device name inside the picker, beside its arrow.
+    picker_text: f32,
+}
+
+impl MixerColumns {
+    fn new(width: f32) -> Self {
+        // Rows sit inside the card's padding, to the left of the gutter.
+        let row = (width - style::SCROLL_GUTTER - 2.0 * style::SPACE_L).max(0.0);
+        let fixed = style::PERCENT_WIDTH + style::MUTE_WIDTH + 3.0 * style::SPACE_M;
+        let flexible = (row - fixed).max(0.0);
+        let share = flexible * style::LABEL_SHARE;
+        // Too narrow for both minimums (the window may be forced below its
+        // minimum size), the label gives way first, then both shrink alike.
+        let label = share
+            .clamp(style::LABEL_MIN, style::LABEL_MAX)
+            .min((flexible - style::SLIDER_MIN).max(share));
+        let picker = (row - label - style::SPACE_M).max(0.0);
+        Self {
+            label,
+            name: (label - style::APP_ICON - style::APP_ICON_GAP).max(0.0),
+            // The picker's padding, and its arrow at the text size.
+            picker_text: (picker - 2.0 * style::SPACE_M - style::TEXT_DEFAULT - style::SPACE_XS)
+                .max(0.0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Width of the slider for a page `width`.
+    fn slider(width: f32) -> f32 {
+        let row = width - style::SCROLL_GUTTER - 2.0 * style::SPACE_L;
+        row - MixerColumns::new(width).label
+            - style::PERCENT_WIDTH
+            - style::MUTE_WIDTH
+            - 3.0 * style::SPACE_M
+    }
+
+    #[test]
+    fn columns_scale_within_bounds() {
+        let narrow = MixerColumns::new(450.0);
+        let default = MixerColumns::new(550.0);
+        let wide = MixerColumns::new(1400.0);
+        assert_eq!(narrow.label, style::LABEL_MIN);
+        assert!(default.label > narrow.label && default.label < style::LABEL_MAX);
+        assert_eq!(wide.label, style::LABEL_MAX);
+        for (cols, width) in [(narrow, 450.0), (default, 550.0), (wide, 1400.0)] {
+            assert_eq!(
+                cols.name,
+                cols.label - style::APP_ICON - style::APP_ICON_GAP
+            );
+            assert!(cols.picker_text > cols.label);
+            assert!(slider(width) >= style::SLIDER_MIN);
+        }
+        // Squeezed below the minimums, the slider keeps a share.
+        let squeezed = MixerColumns::new(300.0);
+        assert!(squeezed.label < style::LABEL_MIN);
+        assert!(slider(300.0) > 0.0);
+        assert_eq!(slider(300.0), squeezed.label);
+        assert_eq!(MixerColumns::new(0.0).label, 0.0);
+    }
+
+    #[test]
+    fn device_choices_compare_by_id() {
+        let info = DeviceInfo {
+            id: "sink".into(),
+            name: "Arctis Nova Pro Wireless Analog Stereo".into(),
+        };
+        let full = DeviceChoice::new(&info);
+        let short = DeviceChoice::new(&info).with_label("Arctis Nova\u{2026}".into());
+        assert_eq!(full, short);
+        assert_eq!(full.to_string(), info.name);
+        assert_eq!(short.to_string(), "Arctis Nova\u{2026}");
     }
 }

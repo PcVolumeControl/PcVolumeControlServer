@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use iced::widget::{button, column, container, row, scrollable, svg, text};
+use iced::widget::{button, column, container, row, svg, text};
 use iced::{Center, Element, Fill, FillPortion, Font};
 use pcvc_protocol::{APPLICATION_VERSION, PROTOCOL_VERSION};
 use pcvc_server::MdnsStatus;
@@ -126,7 +126,7 @@ impl App {
             env!("CARGO_PKG_VERSION"),
         );
 
-        scrollable(
+        style::scroll_area(
             column![
                 indicator,
                 section("Listening on", addresses),
@@ -144,7 +144,7 @@ impl App {
                     .style(style::muted_text),
             ]
             .spacing(style::SPACE_L)
-            .padding(iced::Padding::ZERO.right(style::SPACE_M)),
+            .padding(iced::Padding::ZERO.bottom(style::SPACE_M)),
         )
         .into()
     }

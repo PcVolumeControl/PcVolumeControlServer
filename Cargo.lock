@@ -2877,6 +2877,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tray-icon",
+ "unicode-segmentation",
  "windows-sys 0.61.2",
  "winresource",
 ]

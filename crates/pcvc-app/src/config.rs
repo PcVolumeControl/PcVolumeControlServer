@@ -47,9 +47,10 @@ pub struct WindowSize {
 }
 
 impl WindowSize {
+    /// Below this the Mixer's columns no longer fit.
     pub const MIN: Self = Self {
-        width: 480.0,
-        height: 400.0,
+        width: 680.0,
+        height: 440.0,
     };
     const MAX: f32 = 16384.0;
 
@@ -290,7 +291,10 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "[window]\nwidth = 0.0\nheight = 1e9\n").unwrap();
         let window = load(&path).config.window;
-        assert_eq!((window.width, window.height), (480.0, 16384.0));
+        assert_eq!(
+            (window.width, window.height),
+            (WindowSize::MIN.width, 16384.0)
+        );
         assert_eq!(
             WindowSize {
                 width: f32::NAN,
