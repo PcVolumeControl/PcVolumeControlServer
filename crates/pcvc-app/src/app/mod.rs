@@ -26,9 +26,6 @@ use crate::tray::{Tray, TrayAction, TrayModel};
 use crate::{icons, style};
 use mixer::MixerMessage;
 
-/// How often held-back mixer commands are checked while a slider moves.
-const MIXER_TICK: Duration = Duration::from_millis(10);
-
 const MIN_SIZE: Size = Size::new(480.0, 400.0);
 
 /// Longest wait for the server to stop on quit before exiting anyway.
@@ -76,6 +73,8 @@ pub struct App {
     mdns: MdnsStatus,
     audio: Option<AudioState>,
     mixer: Mixer,
+    /// When the pending mixer wake-up fires, if one is scheduled.
+    mixer_timer: Option<std::time::Instant>,
     local_ips: Vec<Ipv4Addr>,
     /// The last interface listing error, so a persistent one is logged once.
     local_ips_error: Option<String>,
@@ -113,6 +112,7 @@ impl App {
             mdns: MdnsStatus::Disabled,
             audio: None,
             mixer: Mixer::default(),
+            mixer_timer: None,
             local_ips: Vec::new(),
             local_ips_error: None,
             tray: None,
@@ -364,18 +364,12 @@ impl App {
         } else {
             Subscription::none()
         };
-        let mixer_tick = if self.mixer.needs_tick() {
-            iced::time::every(MIXER_TICK).map(|_| Message::Mixer(MixerMessage::Tick))
-        } else {
-            Subscription::none()
-        };
         Subscription::batch([
             self.inbox_rx.subscription().map(Message::Inbound),
             window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
             tick,
-            mixer_tick,
         ])
     }
 

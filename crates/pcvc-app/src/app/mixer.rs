@@ -8,7 +8,7 @@ use pcvc_audio::{Device, DeviceInfo};
 use pcvc_protocol::Command;
 
 use super::{App, Message};
-use crate::mixer::{Target, volume_command};
+use crate::mixer::{Target, control};
 use crate::style::{self, Button};
 
 #[derive(Debug, Clone)]
@@ -42,18 +42,6 @@ impl std::fmt::Display for DeviceChoice {
     }
 }
 
-/// Current backend volume and mute of `target`, if it exists.
-fn control(device: &Device, target: &Target) -> Option<(f32, bool)> {
-    match target {
-        Target::Master => Some((device.volume, device.muted)),
-        Target::Session(id) => device
-            .sessions
-            .iter()
-            .find(|s| &s.id == id)
-            .map(|s| (s.volume, s.muted)),
-    }
-}
-
 impl App {
     fn default_device(&self) -> Option<&Device> {
         self.audio.as_ref()?.default_device.as_ref()
@@ -70,46 +58,84 @@ impl App {
                 }
             }
             MixerMessage::Slide(target, volume) => {
-                let Some((_, muted)) = self.default_device().and_then(|d| control(d, &target))
-                else {
-                    return Task::none();
-                };
-                let command = volume_command(&target, volume, muted);
-                if let Some(command) = self.mixer.slide(target, command, volume, now) {
-                    self.commands.send(command);
+                if let Some(volume) = self.mixer.slide(target.clone(), volume, now) {
+                    self.send_volume(&target, volume);
                 }
             }
             MixerMessage::Release(target) => {
-                if let Some(command) = self.mixer.release(&target, now) {
-                    self.commands.send(command);
+                if let Some(volume) = self.mixer.release(&target, now) {
+                    self.send_volume(&target, volume);
                 }
             }
             MixerMessage::ToggleMute(target) => {
-                let Some((actual, muted)) = self.default_device().and_then(|d| control(d, &target))
+                let Some((actual_volume, actual_muted)) =
+                    self.default_device().and_then(|d| control(d, &target))
                 else {
                     return Task::none();
                 };
+                let muted = self.mixer.toggle_mute(target.clone(), actual_muted, now);
                 let command = match &target {
                     Target::Master => Command::SetMaster {
                         volume: None,
-                        muted: Some(!muted),
+                        muted: Some(muted),
                     },
-                    Target::Session(_) => {
-                        // Carries the volume on screen, which may be ahead of
-                        // the backend while a drag is in flight.
-                        volume_command(&target, self.mixer.volume(&target, actual), !muted)
-                    }
+                    Target::Session(id) => Command::SetSession {
+                        session_id: id.clone(),
+                        volume: self.mixer.volume(&target, actual_volume),
+                        muted,
+                    },
                 };
-                self.mixer.send_now(target, now);
                 self.commands.send(command);
             }
             MixerMessage::Tick => {
-                for command in self.mixer.tick(now) {
-                    self.commands.send(command);
+                self.mixer_timer = None;
+                for (target, volume) in self.mixer.tick(now) {
+                    self.send_volume(&target, volume);
                 }
             }
         }
-        Task::none()
+        self.schedule_mixer_tick()
+    }
+
+    /// Sends a volume change. A session command must also carry the mute
+    /// state, taken as currently shown, so an unanswered mute toggle is not
+    /// undone.
+    fn send_volume(&self, target: &Target, volume: f32) {
+        let command = match target {
+            Target::Master => Command::SetMaster {
+                volume: Some(volume),
+                muted: None,
+            },
+            Target::Session(id) => {
+                let Some((_, actual_muted)) =
+                    self.default_device().and_then(|d| control(d, target))
+                else {
+                    return;
+                };
+                Command::SetSession {
+                    session_id: id.clone(),
+                    volume,
+                    muted: self.mixer.muted(target, actual_muted),
+                }
+            }
+        };
+        self.commands.send(command);
+    }
+
+    /// Wakes the mixer when it next has work, unless a wake-up at or before
+    /// then is already scheduled.
+    fn schedule_mixer_tick(&mut self) -> Task<Message> {
+        let Some(deadline) = self.mixer.next_deadline() else {
+            return Task::none();
+        };
+        if self.mixer_timer.is_some_and(|t| t <= deadline) {
+            return Task::none();
+        }
+        self.mixer_timer = Some(deadline);
+        Task::perform(
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)),
+            |()| Message::Mixer(MixerMessage::Tick),
+        )
     }
 
     pub(super) fn mixer_view(&self) -> Element<'_, Message> {
@@ -117,10 +143,10 @@ impl App {
             return text("Reading audio devices...").into();
         };
         let devices: Vec<DeviceChoice> = audio.devices.iter().map(DeviceChoice::from).collect();
-        let Some(device) = &audio.default_device else {
-            return text("No playback device").into();
-        };
-        let selected = devices.iter().find(|d| d.id == device.id).cloned();
+        let selected = audio
+            .default_device
+            .as_ref()
+            .and_then(|device| devices.iter().find(|d| d.id == device.id).cloned());
         let picker = row![
             text("Output device").width(style::LABEL_WIDTH),
             pick_list(devices, selected, |c| Message::Mixer(
@@ -132,6 +158,14 @@ impl App {
         .spacing(style::SPACE_M)
         .align_y(Center);
 
+        let Some(device) = &audio.default_device else {
+            return column![
+                container(picker).padding(style::SPACE_L).style(style::card),
+                text("No default playback device").style(style::muted_text),
+            ]
+            .spacing(style::SPACE_M)
+            .into();
+        };
         let master = self.volume_row(
             text("Master").size(style::TEXT_SECTION),
             Target::Master,
@@ -185,6 +219,7 @@ impl App {
         muted: bool,
     ) -> Element<'a, Message> {
         let volume = self.mixer.volume(&target, actual);
+        let muted = self.mixer.muted(&target, muted);
         let mute = button(text(if muted { "Unmute" } else { "Mute" }).center())
             .width(style::MUTE_WIDTH)
             .style(style::button(if muted {

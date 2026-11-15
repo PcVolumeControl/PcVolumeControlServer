@@ -18,9 +18,9 @@ use crate::mixer::Target;
 struct Harness {
     app: App,
     backend: Arc<MockBackend>,
-    // Keeps the runtime the app's tasks were spawned on alive; nothing
-    // drives it, so the server and watcher never actually run.
-    _runtime: tokio::runtime::Runtime,
+    /// Entered around every update, as iced does. Nothing drives it, so the
+    /// server and watcher tasks spawned at boot never actually run.
+    runtime: tokio::runtime::Runtime,
 }
 
 impl Harness {
@@ -48,7 +48,7 @@ impl Harness {
         let mut harness = Self {
             app,
             backend,
-            _runtime: runtime,
+            runtime,
         };
         harness.refresh_audio();
         harness
@@ -56,10 +56,11 @@ impl Harness {
 
     fn refresh_audio(&mut self) {
         let state = self.backend.snapshot().unwrap();
-        let _ = self.app.update(Message::Inbound(Inbound::Audio(state)));
+        self.run(vec![Message::Inbound(Inbound::Audio(state))]);
     }
 
     fn run(&mut self, messages: Vec<Message>) {
+        let _guard = self.runtime.enter();
         for message in messages {
             let _ = self.app.update(message);
         }
