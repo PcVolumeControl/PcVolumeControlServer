@@ -27,21 +27,11 @@ pub const RADIUS: f32 = 8.0;
 pub const NAV_WIDTH: f32 = 150.0;
 /// Labels of the Settings rows.
 pub const LABEL_WIDTH: f32 = 140.0;
-pub const MUTE_WIDTH: f32 = 90.0;
-pub const PERCENT_WIDTH: f32 = 48.0;
 pub const STATUS_ICON: f32 = 64.0;
 
-/// The Mixer's label column (output device, master, icon and name) takes
-/// this share of the width the fixed columns leave, within these bounds.
-pub const LABEL_SHARE: f32 = 0.5;
-pub const LABEL_MIN: f32 = 120.0;
-pub const LABEL_MAX: f32 = 260.0;
-/// The slider keeps at least this much before the label shrinks below
-/// its minimum.
-pub const SLIDER_MIN: f32 = 80.0;
-
-/// Sizes of the Mixer rows. The window's Mixer page and the mini mixer
-/// build their rows with the same code and differ only in these.
+/// Sizes of the Mixer rows, which are built by the same code at every
+/// density. Application icons keep one size (`APP_ICON`) at all densities,
+/// since each application's icon is looked up once.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Density {
     /// Labels, names, percentages and mute buttons.
@@ -67,8 +57,6 @@ pub struct Density {
     /// The slider keeps at least this much before the label shrinks below
     /// its minimum.
     pub slider_min: f32,
-    /// Every row's height, when fixed.
-    pub row_height: Option<f32>,
 }
 
 /// The window's Mixer page.
@@ -78,20 +66,19 @@ pub const REGULAR: Density = Density {
     spacing: SPACE_M,
     row_spacing: SPACE_M,
     inset: SPACE_L,
-    mute_width: MUTE_WIDTH,
+    mute_width: 90.0,
     mute_padding: btn::DEFAULT_PADDING,
-    percent_width: PERCENT_WIDTH,
+    percent_width: 48.0,
     picker_padding: Padding {
         top: SPACE_S,
         right: SPACE_M,
         bottom: SPACE_S,
         left: SPACE_M,
     },
-    label_share: LABEL_SHARE,
-    label_min: LABEL_MIN,
-    label_max: LABEL_MAX,
-    slider_min: SLIDER_MIN,
-    row_height: None,
+    label_share: 0.5,
+    label_min: 120.0,
+    label_max: 260.0,
+    slider_min: 80.0,
 };
 
 /// Application icons in the Mixer.

@@ -1,5 +1,5 @@
-//! Mixer view and its message handling. The rows are shared with the mini
-//! mixer, which builds them at another [`Density`].
+//! Mixer view and its message handling. The rows are built at a
+//! [`Density`].
 
 use std::borrow::Cow;
 use std::time::Instant;
@@ -189,7 +189,7 @@ impl App {
         let picker = device_picker(audio, &cols, density);
         let Some(device) = &audio.default_device else {
             return column![
-                style::beside_gutter(container(picker).padding(style::SPACE_L).style(style::card)),
+                style::beside_gutter(container(picker).padding(density.inset).style(style::card)),
                 text("No default playback device").style(style::muted_text),
             ]
             .spacing(style::SPACE_M)
@@ -345,17 +345,15 @@ impl App {
         } else {
             percent
         };
-        fixed_height(
-            row![
-                container(label).width(cols.label).clip(true),
-                fader,
-                percent,
-                mute
-            ]
-            .spacing(density.spacing)
-            .align_y(Center),
-            density,
-        )
+        row![
+            container(label).width(cols.label).clip(true),
+            fader,
+            percent,
+            mute
+        ]
+        .spacing(density.spacing)
+        .align_y(Center)
+        .into()
     }
 }
 
@@ -383,28 +381,15 @@ pub(super) fn device_picker<'a>(
     .text_size(density.text)
     .padding(density.picker_padding)
     .width(Fill);
-    fixed_height(
-        row![
-            container(text("Output device").size(density.text))
-                .width(cols.label)
-                .clip(true),
-            with_tooltip(list, full_name),
-        ]
-        .spacing(density.spacing)
-        .align_y(Center),
-        density,
-    )
-}
-
-/// `content` at the density's row height, when it has one.
-fn fixed_height<'a>(
-    content: impl Into<Element<'a, Message>>,
-    density: &Density,
-) -> Element<'a, Message> {
-    match density.row_height {
-        Some(height) => container(content).height(height).align_y(Center).into(),
-        None => content.into(),
-    }
+    row![
+        container(text("Output device").size(density.text))
+            .width(cols.label)
+            .clip(true),
+        with_tooltip(list, full_name),
+    ]
+    .spacing(density.spacing)
+    .align_y(Center)
+    .into()
 }
 
 /// A session name fitted to `width`, with the full name in a tooltip when
@@ -479,36 +464,34 @@ mod tests {
     use super::*;
 
     /// Width of the slider for a page `width`.
-    fn slider(width: f32) -> f32 {
-        let row = width - style::SCROLL_GUTTER - 2.0 * style::SPACE_L;
-        row - MixerColumns::new(width, &style::REGULAR).label
-            - style::PERCENT_WIDTH
-            - style::MUTE_WIDTH
-            - 3.0 * style::SPACE_M
+    fn slider(width: f32, d: &Density) -> f32 {
+        let row = width - style::SCROLL_GUTTER - 2.0 * d.inset;
+        row - MixerColumns::new(width, d).label - d.percent_width - d.mute_width - 3.0 * d.spacing
     }
 
     #[test]
     fn columns_scale_within_bounds() {
-        let columns = |width| MixerColumns::new(width, &style::REGULAR);
+        let d = &style::REGULAR;
+        let columns = |width| MixerColumns::new(width, d);
         let narrow = columns(450.0);
         let default = columns(550.0);
         let wide = columns(1400.0);
-        assert_eq!(narrow.label, style::LABEL_MIN);
-        assert!(default.label > narrow.label && default.label < style::LABEL_MAX);
-        assert_eq!(wide.label, style::LABEL_MAX);
+        assert_eq!(narrow.label, d.label_min);
+        assert!(default.label > narrow.label && default.label < d.label_max);
+        assert_eq!(wide.label, d.label_max);
         for (cols, width) in [(narrow, 450.0), (default, 550.0), (wide, 1400.0)] {
             assert_eq!(
                 cols.name,
                 cols.label - style::APP_ICON - style::APP_ICON_GAP
             );
             assert!(cols.picker_text > cols.label);
-            assert!(slider(width) >= style::SLIDER_MIN);
+            assert!(slider(width, d) >= d.slider_min);
         }
         // Squeezed below the minimums, the slider keeps a share.
         let squeezed = columns(300.0);
-        assert!(squeezed.label < style::LABEL_MIN);
-        assert!(slider(300.0) > 0.0);
-        assert_eq!(slider(300.0), squeezed.label);
+        assert!(squeezed.label < d.label_min);
+        assert!(slider(300.0, d) > 0.0);
+        assert_eq!(slider(300.0, d), squeezed.label);
         assert_eq!(columns(0.0).label, 0.0);
     }
 
