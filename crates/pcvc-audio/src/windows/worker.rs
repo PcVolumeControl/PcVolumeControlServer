@@ -22,7 +22,7 @@ use super::callbacks::{self, MtaSession, Poster, Registration};
 use super::com::{self, Apartment, OpenedProcess};
 use super::logic::{self, Change, Dirty, SessionAction, SessionSource};
 use super::policy_config;
-use crate::{AudioError, AudioEvent, AudioState, Device, DeviceInfo, Session};
+use crate::{AppHint, AudioError, AudioEvent, AudioState, Device, DeviceInfo, Session};
 
 const EVENT_CAPACITY: usize = 64;
 
@@ -728,13 +728,16 @@ struct SessionEntry {
     /// The owning process, if the session has exactly one and it could be
     /// opened.
     process: Option<com::Process>,
+    pid: Option<u32>,
+    /// The owning process's image path, read once when the session opens.
+    image_path: Option<Arc<str>>,
     /// Set by the session's callbacks when it expires or is disconnected.
     gone: Arc<AtomicBool>,
     /// `GetDisplayName` as last read, and what it resolved to.
     raw_display: Option<String>,
     display: Option<String>,
-    /// Looked up the first time the session has no display name.
-    process_name: Option<Option<String>>,
+    /// The image file stem, the name used when there is no display name.
+    process_name: Option<String>,
     volume: f32,
     muted: bool,
     _events: Option<Registration<IAudioSessionControl, IAudioSessionEvents>>,
@@ -767,15 +770,18 @@ impl SessionEntry {
             Some(OpenedProcess::NoSuchProcess) => return Ok(None),
             Some(OpenedProcess::Denied) | None => None,
         };
+        let image_path = process.as_ref().and_then(com::Process::image_path);
         let mut entry = Self {
             id,
             control,
             simple,
             process,
+            pid,
+            process_name: image_path.as_deref().and_then(logic::process_stem),
+            image_path: image_path.map(Arc::from),
             gone,
             raw_display: None,
             display: None,
-            process_name: None,
             volume: 0.0,
             muted: false,
             _events: events,
@@ -805,9 +811,6 @@ impl SessionEntry {
             self.display = logic::resolve_display_name(&raw, com::load_indirect_string);
             self.raw_display = Some(raw);
         }
-        if self.display.is_none() && self.process_name.is_none() {
-            self.process_name = Some(self.process.as_ref().and_then(com::Process::image_stem));
-        }
         (self.volume, self.muted) = com::session_volume(&self.simple)
             .map_err(|e| com_error("reading session volume", e))?;
         Ok(true)
@@ -816,12 +819,14 @@ impl SessionEntry {
     fn to_session(&self) -> Session {
         Session {
             id: self.id.clone(),
-            name: logic::session_name(
-                self.display.as_deref(),
-                self.process_name.as_ref().and_then(Option::as_deref),
-            ),
+            name: logic::session_name(self.display.as_deref(), self.process_name.as_deref()),
             volume: self.volume,
             muted: self.muted,
+            app: AppHint {
+                process_binary: self.image_path.clone(),
+                process_id: self.pid,
+                ..AppHint::default()
+            },
         }
     }
 }

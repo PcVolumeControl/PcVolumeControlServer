@@ -23,7 +23,7 @@ use libpulse_binding::time::MicroSeconds;
 use libpulse_binding::volume::{ChannelVolumes, Volume};
 use libpulse_sys as sys;
 
-use super::model::{RawSink, RawSinkInput, RawState};
+use super::model::{AppProps, RawSink, RawSinkInput, RawState};
 
 /// Client name shown by the sound server.
 const CLIENT_NAME: &CStr = c"PcVolumeControl";
@@ -278,11 +278,28 @@ extern "C" fn sink_input_cb(
                 has_volume: (&raw const (*p).has_volume).read() != 0,
                 volume_writable: (&raw const (*p).volume_writable).read() != 0,
                 muted: (&raw const (*p).mute).read() != 0,
-                application_name: prop(props, c"application.name"),
+                app: AppProps::read(|key| prop(props, key)),
                 media_name: prop(props, c"media.name"),
-                process_binary: prop(props, c"application.process.binary"),
                 media_role: prop(props, c"media.role"),
             })
+        });
+    }
+}
+
+extern "C" fn client_cb(
+    _: *mut sys::pa_context,
+    info: *const sys::pa_client_info,
+    eol: i32,
+    userdata: *mut c_void,
+) {
+    // SAFETY: as for `sink_cb`, with a ListAcc<(u32, AppProps)>.
+    unsafe {
+        list_item(info, eol, userdata, |p| {
+            let props = (&raw const (*p).proplist).read();
+            Some((
+                (&raw const (*p).index).read(),
+                AppProps::read(|key| prop(props, key)),
+            ))
         });
     }
 }
@@ -444,11 +461,14 @@ impl Connection {
         }
     }
 
-    /// Reads the default sink, the sinks and the sink-inputs.
+    /// Reads the default sink, the sinks, the sink-inputs and the clients.
+    /// Client changes are not subscribed to: a client exists before its
+    /// streams, and its properties are re-read with every refresh.
     pub fn query(&self, mainloop: &mut Mainloop, deadline: Instant) -> Result<RawState, OpError> {
         let server = ServerAcc::default();
         let sinks = ListAcc::<RawSink>::new();
         let inputs = ListAcc::<RawSinkInput>::new();
+        let clients = ListAcc::<(u32, AppProps)>::new();
         // The operations are declared after the accumulators so they are
         // dropped (cancelled) first on every return path.
         // SAFETY: ctx is live and each accumulator outlives its operation.
@@ -480,10 +500,18 @@ impl Connection {
             },
             self.ctx,
         )?;
+        let clients_op = Op::new(
+            // SAFETY: as for the server info operation.
+            unsafe {
+                sys::pa_context_get_client_info_list(self.ctx, Some(client_cb), clients.userdata())
+            },
+            self.ctx,
+        )?;
         server_op.wait(mainloop, deadline)?;
         sinks_op.wait(mainloop, deadline)?;
         inputs_op.wait(mainloop, deadline)?;
-        drop((server_op, sinks_op, inputs_op));
+        clients_op.wait(mainloop, deadline)?;
+        drop((server_op, sinks_op, inputs_op, clients_op));
         if server.failed.get() {
             return Err(OpError::Failed(sys::PA_ERR_UNKNOWN as i32));
         }
@@ -491,6 +519,7 @@ impl Connection {
             default_sink: server.default_sink.into_inner(),
             sinks: sinks.finish()?,
             inputs: inputs.finish()?,
+            clients: clients.finish()?.into_iter().collect(),
         })
     }
 

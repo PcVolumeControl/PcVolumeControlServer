@@ -1,13 +1,14 @@
 //! Pure mapping from PulseAudio introspection data to [`AudioState`], and the
 //! diff that turns two states into [`AudioEvent`]s.
 
-use std::collections::HashSet;
-use std::ffi::CString;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, CString};
+use std::sync::Arc;
 
 use libpulse_binding::volume::Volume;
 use pcvc_protocol::clamp_volume;
 
-use crate::{AudioEvent, AudioState, Device, DeviceInfo, Session};
+use crate::{AppHint, AudioEvent, AudioState, Device, DeviceInfo, Session};
 
 /// `PA_VOLUME_NORM`, reported as 100 %.
 const NORMAL: u32 = Volume::NORMAL.0;
@@ -28,6 +29,39 @@ pub(super) struct RawState {
     pub default_sink: Option<CString>,
     pub sinks: Vec<RawSink>,
     pub inputs: Vec<RawSinkInput>,
+    /// Application properties of each client, by client index.
+    pub clients: HashMap<u32, AppProps>,
+}
+
+/// The application properties of a stream's or a client's property list.
+/// Blank values are dropped.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct AppProps {
+    pub name: Option<String>,
+    pub process_binary: Option<String>,
+    pub process_id: Option<u32>,
+    pub icon_name: Option<String>,
+    pub app_id: Option<String>,
+}
+
+impl AppProps {
+    /// Reads the properties through `get`, which looks up one key. PipeWire
+    /// spells the icon key with a hyphen, PulseAudio with an underscore.
+    pub fn read(mut get: impl FnMut(&CStr) -> Option<String>) -> Self {
+        let mut first = |keys: &[&CStr]| {
+            keys.iter()
+                .find_map(|key| get(key).filter(|v| !v.trim().is_empty()))
+        };
+        Self {
+            name: first(&[c"application.name"]),
+            process_binary: first(&[c"application.process.binary"]),
+            process_id: first(&[c"application.process.id"])
+                .and_then(|pid| pid.trim().parse().ok())
+                .filter(|&pid| pid != 0),
+            icon_name: first(&[c"application.icon_name", c"application.icon-name"]),
+            app_id: first(&[c"application.id", c"pipewire.access.portal.app_id"]),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,9 +91,8 @@ pub(super) struct RawSinkInput {
     pub has_volume: bool,
     pub volume_writable: bool,
     pub muted: bool,
-    pub application_name: Option<String>,
+    pub app: AppProps,
     pub media_name: Option<String>,
-    pub process_binary: Option<String>,
     pub media_role: Option<String>,
 }
 
@@ -75,20 +108,45 @@ impl RawSinkInput {
         self.client.is_some() && self.media_role.as_deref() != Some("event")
     }
 
-    /// `application.name`, then `media.name`, then
+    /// The stream's `application.name`, then its client's, then
+    /// `media.name`, then the stream's and the client's
     /// `application.process.binary`, then [`UNKNOWN_NAME`]. Blank values are
-    /// skipped.
-    pub fn display_name(&self) -> String {
+    /// skipped. Some clients (cpal, for one) set the application properties
+    /// only on the client, and `media.name` is then a generic stream label.
+    pub fn display_name(&self, client: Option<&AppProps>) -> String {
+        let client_name = client.and_then(|c| c.name.as_ref());
+        let client_binary = client.and_then(|c| c.process_binary.as_ref());
         [
-            &self.application_name,
-            &self.media_name,
-            &self.process_binary,
+            self.app.name.as_ref(),
+            client_name,
+            self.media_name.as_ref(),
+            self.app.process_binary.as_ref(),
+            client_binary,
         ]
         .into_iter()
-        .filter_map(|n| n.as_deref().map(str::trim))
+        .filter_map(|n| n.map(|n| n.trim()))
         .find(|n| !n.is_empty())
         .unwrap_or(UNKNOWN_NAME)
         .to_owned()
+    }
+
+    /// The stream's application properties, each missing one taken from its
+    /// client.
+    pub fn app_hint(&self, client: Option<&AppProps>) -> AppHint {
+        let pick = |own: &Option<String>, of_client: fn(&AppProps) -> &Option<String>| {
+            own.as_deref()
+                .or_else(|| client.and_then(|c| of_client(c).as_deref()))
+                .map(Arc::from)
+        };
+        AppHint {
+            icon_name: pick(&self.app.icon_name, |c| &c.icon_name),
+            process_binary: pick(&self.app.process_binary, |c| &c.process_binary),
+            process_id: self
+                .app
+                .process_id
+                .or_else(|| client.and_then(|c| c.process_id)),
+            app_id: pick(&self.app.app_id, |c| &c.app_id),
+        }
     }
 
     /// Percent volume; a stream without volume control reports 100.
@@ -203,11 +261,15 @@ impl RawState {
                 muted: sink.muted,
                 sessions: self
                     .sessions_on(sink)
-                    .map(|i| Session {
-                        id: session_id(&id, i.index),
-                        name: i.display_name(),
-                        volume: i.percent(),
-                        muted: i.muted,
+                    .map(|i| {
+                        let client = i.client.and_then(|c| self.clients.get(&c));
+                        Session {
+                            id: session_id(&id, i.index),
+                            name: i.display_name(client),
+                            volume: i.percent(),
+                            muted: i.muted,
+                            app: i.app_hint(client),
+                        }
                     })
                     .collect(),
                 id,
@@ -295,7 +357,10 @@ mod tests {
             has_volume: true,
             volume_writable: true,
             muted: false,
-            application_name: Some(app.to_owned()),
+            app: AppProps {
+                name: Some(app.to_owned()),
+                ..AppProps::default()
+            },
             ..Default::default()
         }
     }
@@ -322,11 +387,12 @@ mod tests {
                     muted: true,
                     has_volume: false,
                     volume: vec![],
-                    application_name: None,
+                    app: AppProps::default(),
                     media_name: Some("Playback".into()),
                     ..input(14, 1, "")
                 },
             ],
+            clients: HashMap::new(),
         }
     }
 
@@ -399,17 +465,117 @@ mod tests {
     #[test]
     fn display_name_falls_back() {
         let mut i = RawSinkInput::default();
-        assert_eq!(i.display_name(), UNKNOWN_NAME);
-        i.process_binary = Some("mpv".into());
-        assert_eq!(i.display_name(), "mpv");
+        assert_eq!(i.display_name(None), UNKNOWN_NAME);
+        let mut client = AppProps {
+            process_binary: Some("cpal-app".into()),
+            ..AppProps::default()
+        };
+        assert_eq!(i.display_name(Some(&client)), "cpal-app");
+        i.app.process_binary = Some("mpv".into());
+        assert_eq!(i.display_name(Some(&client)), "mpv");
         i.media_name = Some("  ".into());
-        assert_eq!(i.display_name(), "mpv");
-        i.media_name = Some("Video".into());
-        assert_eq!(i.display_name(), "Video");
-        i.application_name = Some("Firefox".into());
-        assert_eq!(i.display_name(), "Firefox");
-        i.application_name = Some("Caf\u{e9} \u{fffd}".into());
-        assert_eq!(i.display_name(), "Caf\u{e9} \u{fffd}");
+        assert_eq!(i.display_name(None), "mpv");
+        i.media_name = Some("cpal-playback-42".into());
+        assert_eq!(i.display_name(Some(&client)), "cpal-playback-42");
+        client.name = Some(" ".into());
+        assert_eq!(i.display_name(Some(&client)), "cpal-playback-42");
+        client.name = Some("flaxative".into());
+        assert_eq!(i.display_name(Some(&client)), "flaxative");
+        i.app.name = Some("Firefox".into());
+        assert_eq!(i.display_name(Some(&client)), "Firefox");
+        i.app.name = Some("Caf\u{e9} \u{fffd}".into());
+        assert_eq!(i.display_name(None), "Caf\u{e9} \u{fffd}");
+    }
+
+    fn props(pairs: &[(&str, &str)]) -> AppProps {
+        let map: HashMap<&str, &str> = pairs.iter().copied().collect();
+        AppProps::read(|key| map.get(key.to_str().unwrap()).map(|v| (*v).to_owned()))
+    }
+
+    #[test]
+    fn reads_app_props() {
+        assert_eq!(props(&[]), AppProps::default());
+        let p = props(&[
+            ("application.name", "Steam"),
+            ("application.process.binary", "steam"),
+            ("application.process.id", " 430542 "),
+            ("application.icon-name", "steam"),
+            ("application.id", "org.valvesoftware.steam"),
+            ("media.name", "ignored"),
+        ]);
+        assert_eq!(
+            p,
+            AppProps {
+                name: Some("Steam".into()),
+                process_binary: Some("steam".into()),
+                process_id: Some(430542),
+                icon_name: Some("steam".into()),
+                app_id: Some("org.valvesoftware.steam".into()),
+            }
+        );
+        // The PulseAudio spelling wins; blank and unparsable values are dropped.
+        let p = props(&[
+            ("application.icon_name", "pulse-icon"),
+            ("application.icon-name", "pw-icon"),
+            ("application.name", "  "),
+            ("application.process.id", "x"),
+            ("pipewire.access.portal.app_id", "org.example.App"),
+        ]);
+        assert_eq!(p.icon_name.as_deref(), Some("pulse-icon"));
+        assert_eq!((p.name, p.process_id), (None, None));
+        assert_eq!(p.app_id.as_deref(), Some("org.example.App"));
+        assert_eq!(props(&[("application.process.id", "0")]).process_id, None);
+    }
+
+    #[test]
+    fn app_hint_falls_back_to_client() {
+        let client = props(&[
+            ("application.name", "flaxative"),
+            ("application.process.binary", "flaxative"),
+            ("application.process.id", "660845"),
+            ("application.icon-name", "client-icon"),
+        ]);
+        let mut i = RawSinkInput::default();
+        assert!(i.app_hint(None).is_empty());
+        let hint = i.app_hint(Some(&client));
+        assert_eq!(hint.process_binary.as_deref(), Some("flaxative"));
+        assert_eq!(hint.process_id, Some(660845));
+        assert_eq!(hint.icon_name.as_deref(), Some("client-icon"));
+        assert_eq!(hint.app_id, None);
+        i.app = props(&[
+            ("application.icon_name", "own-icon"),
+            ("application.process.id", "7"),
+        ]);
+        let hint = i.app_hint(Some(&client));
+        assert_eq!(hint.icon_name.as_deref(), Some("own-icon"));
+        assert_eq!(hint.process_id, Some(7));
+        assert_eq!(hint.process_binary.as_deref(), Some("flaxative"));
+    }
+
+    #[test]
+    fn sessions_use_client_props() {
+        let mut raw = raw();
+        raw.inputs.push(RawSinkInput {
+            client: Some(116),
+            app: AppProps::default(),
+            media_name: Some("cpal-playback-660845".into()),
+            ..input(15, 1, "")
+        });
+        raw.clients.insert(
+            116,
+            props(&[
+                ("application.name", "flaxative"),
+                ("application.process.binary", "flaxative"),
+            ]),
+        );
+        let device = raw.to_audio_state().default_device.unwrap();
+        let session = device
+            .sessions
+            .iter()
+            .find(|s| s.id == "speakers|15")
+            .unwrap();
+        assert_eq!(session.name, "flaxative");
+        assert_eq!(session.app.process_binary.as_deref(), Some("flaxative"));
     }
 
     #[test]
