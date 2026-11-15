@@ -11,8 +11,9 @@
 //! - the same name ([`RawSinkInput::display_name`]),
 //! - the same detail ([`RawSinkInput::detail`]; two streams without one
 //!   count as the same), whether or not details are sent, and
-//! - the same owner: the process id when known, otherwise the client. A
-//!   stream with neither is never grouped.
+//! - the same owner: the process id when known (the client's first, then
+//!   the stream's), otherwise the client. A stream with neither is never
+//!   grouped.
 //!
 //! Firefox, for one, opens a stream per audio source in a page (a video
 //! element, a Web Audio context), each named after the tab, and usually only
@@ -22,8 +23,8 @@
 //! its representative, the stream with the lowest index, so a group of one
 //! has the id `"{sink name}|{sink-input index}"` and a group keeps its id
 //! while its oldest stream lives. An id naming any stream of a group
-//! addresses the whole group, and setting a session sets every stream of it
-//! (see [`StreamGroup::changes`]).
+//! addresses the whole group, and a volume or mute that differs from the one
+//! shown is set on every stream of it (see [`StreamGroup::changes`]).
 //!
 //! Streams joining or leaving a group change no session unless the
 //! representative changes. When it goes away, the group continues under the
@@ -233,11 +234,14 @@ impl RawSinkInput {
         }
     }
 
-    /// The application instance the stream belongs to, if it is known.
+    /// The application instance the stream belongs to, if it is known. The
+    /// client's pid comes first: on PipeWire it is the server's
+    /// `pipewire.sec.pid`, a host pid, where the stream's own may be one in
+    /// a sandbox's pid namespace.
     fn owner(&self, client: Option<&AppProps>) -> Option<Owner> {
-        self.app
-            .process_id
-            .or_else(|| client.and_then(|c| c.process_id))
+        client
+            .and_then(|c| c.process_id)
+            .or(self.app.process_id)
             .map(Owner::Process)
             .or(self.client.map(Owner::Client))
     }
@@ -263,7 +267,7 @@ fn client_of<'a>(
 }
 
 /// Streams shown as one session.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub(super) struct StreamGroup<'a> {
     pub name: String,
     pub detail: Option<String>,
@@ -285,36 +289,42 @@ impl StreamGroup<'_> {
         self.members[0]
     }
 
-    /// The changes that set every stream of the group to `volume` and
-    /// `muted`, leaving out streams with nothing to change. A stream whose
-    /// volume matches (see [`volume_matches`]) keeps it, and so does one
-    /// whose volume cannot be set. If no stream that needs a new volume can
-    /// take one, the request is refused (`None`), as it is for a single
-    /// stream.
+    /// The changes that set the group to `volume` and `muted`, leaving out
+    /// streams with nothing to change.
+    ///
+    /// Each value is first judged against what the session shows, the
+    /// representative's state, because clients echo it for sessions the user
+    /// did not touch: a volume that matches it (see [`volume_matches`]), or
+    /// the mute it has, changes no stream, even where other streams differ.
+    /// A new value goes to every stream that does not have it already,
+    /// except that a stream whose volume cannot be set keeps its volume. A
+    /// new volume that no stream can take refuses the request (`None`), as
+    /// for a single stream.
     pub fn changes(&self, volume: f32, muted: bool) -> Option<Vec<StreamChange>> {
-        let target = percent_to_volume(volume);
-        let mut needs_volume = false;
-        let mut volume_set = false;
-        let changes: Vec<StreamChange> = self
+        let rep = self.representative();
+        let target = (!volume_matches(volume, rep.percent())).then(|| percent_to_volume(volume));
+        let muted = (muted != rep.muted).then_some(muted);
+        if let Some(target) = target
+            && self
+                .members
+                .iter()
+                .all(|i| i.settable_volume(target).is_none())
+        {
+            return None;
+        }
+        let changes = self
             .members
             .iter()
-            .map(|input| {
-                let volume = if volume_matches(volume, input.percent()) {
-                    None
-                } else {
-                    needs_volume = true;
-                    input.settable_volume(target).map(|cv| (target, cv))
-                };
-                volume_set |= volume.is_some();
-                StreamChange {
-                    index: input.index,
-                    volume,
-                    muted: (muted != input.muted).then_some(muted),
-                }
+            .map(|input| StreamChange {
+                index: input.index,
+                volume: target
+                    .filter(|_| !volume_matches(volume, input.percent()))
+                    .and_then(|t| Some((t, input.settable_volume(t)?))),
+                muted: muted.filter(|&m| m != input.muted),
             })
             .filter(|c| c.volume.is_some() || c.muted.is_some())
             .collect();
-        (volume_set || !needs_volume).then_some(changes)
+        Some(changes)
     }
 }
 
@@ -1159,6 +1169,18 @@ mod tests {
             grouped(&[unnamed(1, 5), unnamed(2, 6), unnamed(3, 7)], &clients),
             [vec![1, 2], vec![3]]
         );
+
+        // The client's pid wins over the stream's, which a sandboxed client
+        // reports from its own pid namespace.
+        let clients = HashMap::from([(5, app("100")), (6, app("200"))]);
+        let sandboxed = |index, client| stream(index, 1, Some(2), Some(client), Some("Radio"));
+        assert_eq!(
+            grouped(
+                &[sandboxed(1, 5), sandboxed(2, 6), sandboxed(3, 5)],
+                &clients
+            ),
+            [vec![1, 3], vec![2]]
+        );
     }
 
     #[test]
@@ -1235,40 +1257,52 @@ mod tests {
                 .map(|c| (c.index, c.volume.map(|(raw, _)| raw), c.muted))
                 .collect::<Vec<_>>()
         };
-        // 32 and 34 cannot take a volume; 33 is already within the echo
-        // tolerance.
+        // The session shows 30's state; echoing it changes nothing, although
+        // the other streams differ.
+        assert_eq!(summary(groups[0].changes(100.0, true).unwrap()), []);
+        assert_eq!(summary(groups[0].changes(99.7, true).unwrap()), []);
+
+        // A new volume goes to every stream that can take it and does not
+        // have it: 32 and 34 cannot, 33 is within the echo tolerance.
         let target = percent_to_volume(50.3);
         assert_eq!(
-            summary(groups[0].changes(50.3, false).unwrap()),
-            [(30, Some(target), Some(false)), (31, Some(target), None)]
-        );
-        assert_eq!(
-            summary(groups[0].changes(100.0, true).unwrap()),
-            [
-                (31, Some(NORMAL), Some(true)),
-                (32, None, Some(true)),
-                (33, Some(NORMAL), Some(true)),
-                (34, None, Some(true)),
-            ]
+            summary(groups[0].changes(50.3, true).unwrap()),
+            [(30, Some(target), None), (31, Some(target), None)]
         );
         let (raw, cv) = groups[0].changes(20.0, true).unwrap()[0].volume.unwrap();
         assert_eq!(raw, percent_to_volume(20.0));
         assert_eq!(cv.get(), [Volume(raw); 2]);
 
-        // Refused only when no stream that needs a new volume can take one.
-        let unsettable = group_streams(&streams[2..3], &HashMap::new());
-        assert_eq!(unsettable[0].changes(50.0, true), None);
+        // A new mute goes to every stream without it; the shown volume is
+        // left alone everywhere.
+        assert_eq!(
+            summary(groups[0].changes(100.0, false).unwrap()),
+            [(30, None, Some(false))]
+        );
+        let unmuted = group_streams(&streams[1..], &HashMap::new());
+        assert_eq!(
+            summary(unmuted[0].changes(25.0, true).unwrap()),
+            [
+                (31, None, Some(true)),
+                (32, None, Some(true)),
+                (33, None, Some(true)),
+                (34, None, Some(true)),
+            ]
+        );
+
+        // Refused, mute included, when no stream can take a new volume.
+        let unsettable = group_streams([&streams[2], &streams[4]], &HashMap::new());
+        assert_eq!(unsettable[0].changes(10.0, true), None);
         assert_eq!(
             summary(unsettable[0].changes(100.0, true).unwrap()),
-            [(32, None, Some(true))]
+            [(32, None, Some(true)), (34, None, Some(true))]
         );
-        // 33 and 34 are at 50 already, 32 needs a volume and cannot take it.
+        // One that can is enough, even if it already has the volume.
         let mixed = group_streams(&streams[2..], &HashMap::new());
-        assert_eq!(mixed[0].changes(50.0, false), None);
-        let target = percent_to_volume(10.0);
+        assert_eq!(summary(mixed[0].changes(50.0, false).unwrap()), []);
         assert_eq!(
             summary(mixed[0].changes(10.0, false).unwrap()),
-            [(33, Some(target), None)]
+            [(33, Some(percent_to_volume(10.0)), None)]
         );
     }
 
