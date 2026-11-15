@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use pcvc_audio::{AudioBackend, AudioState};
-use pcvc_protocol::{FEATURE_ICONS, FullState};
+use pcvc_protocol::FullState;
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
@@ -188,7 +188,7 @@ impl Shared {
 
     /// Protocol extensions this server advertises.
     fn features(&self) -> Vec<&'static str> {
-        self.icons.iter().map(|_| FEATURE_ICONS).collect()
+        state::features(self.icons.is_some())
     }
 }
 

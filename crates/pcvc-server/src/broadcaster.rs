@@ -26,7 +26,6 @@ pub(crate) async fn run(
 ) {
     let mut deadline = (!initial_ok).then(|| Instant::now() + RETRY_INTERVAL);
     let mut events_open = true;
-    let mut icons_open = icon_events.is_some();
     let mut force = !initial_ok;
     loop {
         tokio::select! {
@@ -42,11 +41,11 @@ pub(crate) async fn run(
                     schedule(&mut deadline, coalesce);
                 }
             },
-            event = recv_icon_event(&mut icon_events), if icons_open => match event {
+            event = recv_icon_event(&mut icon_events) => match event {
                 Ok(()) | Err(RecvError::Lagged(_)) => schedule(&mut deadline, coalesce),
                 Err(RecvError::Closed) => {
                     tracing::warn!("icon provider closed its event stream");
-                    icons_open = false;
+                    icon_events = None;
                 }
             },
             () = shared.resync.notified() => {
