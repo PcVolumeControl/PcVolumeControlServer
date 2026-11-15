@@ -1,8 +1,10 @@
 //! The thread that owns the PulseAudio main loop and connection.
 
+use std::cell::Cell;
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -43,7 +45,8 @@ pub(super) fn run(
             return;
         }
     };
-    let Some(_wake_event) = watch_wake(&mut mainloop, wake) else {
+    let woken = Rc::new(Cell::new(false));
+    let Some(_wake_event) = watch_wake(&mut mainloop, wake, Rc::clone(&woken)) else {
         let _ = ready.send(Err(backend_error("cannot watch the wake-up socket")));
         return;
     };
@@ -53,6 +56,7 @@ pub(super) fn run(
         shared,
         retry_refresh_at: None,
         reconnect: Backoff::new(),
+        woken,
         mainloop,
     };
     if let Err(e) = worker.start() {
@@ -66,10 +70,12 @@ pub(super) fn run(
 }
 
 /// Registers the read end of the wake-up socket with the main loop. The
-/// callback only drains it: requests are picked up after each iteration.
+/// callback drains it and sets `woken`; requests are picked up by
+/// [`Worker::serve`].
 fn watch_wake(
     mainloop: &mut Mainloop,
     wake: UnixStream,
+    woken: Rc<Cell<bool>>,
 ) -> Option<IoEvent<<Mainloop as MainloopTrait>::MI>> {
     let fd = wake.as_raw_fd();
     mainloop.new_io_event(
@@ -78,6 +84,7 @@ fn watch_wake(
         Box::new(move |_, _, _| {
             let mut buf = [0u8; 64];
             while matches!((&wake).read(&mut buf), Ok(n) if n > 0) {}
+            woken.set(true);
         }),
     )
 }
@@ -117,6 +124,10 @@ struct Worker {
     /// Set while a failed state read on a live connection awaits a retry.
     retry_refresh_at: Option<Instant>,
     reconnect: Backoff,
+    /// Set when the wake-up socket was drained. The main loop also runs
+    /// inside state reads and commands, so a wake-up can be consumed there
+    /// while its request is still queued.
+    woken: Rc<Cell<bool>>,
     mainloop: Mainloop,
 }
 
@@ -145,6 +156,7 @@ impl Worker {
 
     fn serve(&mut self, requests: &mpsc::Receiver<Request>) {
         loop {
+            self.woken.set(false);
             loop {
                 match requests.try_recv() {
                     Ok(Request::Command {
@@ -159,6 +171,9 @@ impl Worker {
                 }
             }
             let wake_at = self.maintain(Instant::now());
+            if self.woken.get() {
+                continue;
+            }
             let timeout = wake_at.map(|at| at.saturating_duration_since(Instant::now()));
             conn::iterate(&mut self.mainloop, timeout);
         }
@@ -239,16 +254,14 @@ impl Worker {
         self.retry_refresh_at = None;
         let state = raw.to_audio_state();
         self.raw = raw;
-        let events = {
-            let mut current = self.shared.lock();
-            let events = diff(&current, &state);
-            *current = state;
-            events
-        };
-        for event in events {
+        // Events are sent before the lock is released, so whoever sees the
+        // new state in a snapshot can also already receive its events.
+        let mut current = self.shared.lock();
+        for event in diff(&current, &state) {
             // An error only means nobody is subscribed.
             let _ = self.shared.events.send(event);
         }
+        *current = state;
         Ok(())
     }
 

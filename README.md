@@ -59,9 +59,11 @@ cargo run -p pcvc-server --example pulse_server
 It takes the same options as `mock_server`. `cargo run -p pcvc-audio
 --example pulse_dump` prints what the backend sees and the events it emits.
 
-The tests against the running sound server are ignored by default. They play
-silence through `pw-play` and briefly make a temporary null sink the default
-(well under two seconds), restoring everything afterwards:
+The tests against the running sound server are ignored by default. They only
+change the volume of a silent stream and a temporary null sink they create,
+but they make the null sink the default for up to 1.5 seconds, which moves
+the streams on the real default sink there and back (see
+`crates/pcvc-audio/tests/pulse_live.rs`):
 
 ```sh
 cargo test -p pcvc-audio --test pulse_live -- --ignored --test-threads=1
