@@ -3,8 +3,9 @@ name = "pcvolumecontrol"
 description = "Control this computer's volume from your phone"
 version.workspace = true
 edition.workspace = true
-# File::try_lock (single-instance lock) needs 1.89.
-rust-version = "1.89"
+# tray-icon and muda need 1.90 (File::try_lock alone needs 1.89). CI checks
+# this version.
+rust-version = "1.90"
 license.workspace = true
 repository.workspace = true
 keywords = ["volume", "mixer", "audio", "remote-control", "tray"]
