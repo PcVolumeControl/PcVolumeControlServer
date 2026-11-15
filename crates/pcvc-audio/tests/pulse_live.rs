@@ -12,10 +12,11 @@
 //! also moves every stream on the real default sink to it and back, so they
 //! play into the null sink meanwhile; moving a stream to the default sink
 //! makes it follow the default from then on, which resets a stream that was
-//! pinned to the real default sink. The original default sink is restored
-//! and the module unloaded by a guard that also runs when a test fails (but
-//! not when the process is killed), and each test checks that the default
-//! sink, its volume and its mute ended up as they started.
+//! pinned to the real default sink. A watchdog thread restores the original
+//! default sink once the budget is spent; a guard restores it and unloads the
+//! module when the test ends or fails; and a run killed before its guard ran
+//! is cleaned up by the next one. Each test checks that the default sink,
+//! its volume and its mute ended up as they started.
 
 #![cfg(target_os = "linux")]
 
@@ -34,7 +35,7 @@ use libpulse_binding::proplist::Proplist;
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::{FlagSet as StreamFlagSet, SeekMode, State as StreamState, Stream};
 use libpulse_binding::time::MicroSeconds;
-use pcvc_audio::{AudioBackend, AudioError, AudioEvent, AudioState, Device, PulseBackend};
+use pcvc_audio::{AudioBackend, AudioError, AudioEvent, AudioState, Device, PulseBackend, Session};
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
 const WAIT: Duration = Duration::from_secs(3);
@@ -175,6 +176,33 @@ fn iterate(mainloop: &mut Mainloop) {
     }
 }
 
+/// Unloads null sinks left by a run that was killed before its guard ran.
+/// If one of them was the default, the server falls back to another sink
+/// when it goes away; that sink is then selected explicitly, so the server
+/// no longer remembers the test sink as the configured default (WirePlumber
+/// would otherwise make the next test sink the default as soon as it loads).
+fn remove_stale_null_sinks() {
+    let mut ctl = Ctl::connect();
+    let was_default = ctl.try_default_sink().as_deref() == Some(NULL_SINK);
+    for stale in ctl.stale_null_sinks() {
+        assert!(ctl.unload_module(stale), "unloading stale module {stale}");
+    }
+    if was_default {
+        let deadline = Instant::now() + WAIT;
+        let fallback = loop {
+            match ctl.try_default_sink() {
+                Some(name) if name != NULL_SINK => break name,
+                _ => {
+                    assert!(Instant::now() < deadline, "no default sink after cleanup");
+                    iterate(&mut ctl.mainloop);
+                }
+            }
+        };
+        assert!(ctl.set_default_sink(&fallback), "selecting {fallback}");
+        eprintln!("an interrupted run left the test sink as the default; selected {fallback}");
+    }
+}
+
 /// A null sink that is unloaded, and the original default sink restored, on
 /// drop.
 struct NullSink {
@@ -184,17 +212,12 @@ struct NullSink {
 }
 
 impl NullSink {
-    /// Unloads leftovers of an interrupted run, then loads the null sink.
     fn load(mut ctl: Ctl) -> Self {
         let original_default = ctl.default_sink();
         assert_ne!(
             original_default, NULL_SINK,
-            "an interrupted run left the test sink as the default; select the real default \
-             sink again before running the tests"
+            "run remove_stale_null_sinks first"
         );
-        for stale in ctl.stale_null_sinks() {
-            assert!(ctl.unload_module(stale), "unloading stale module {stale}");
-        }
         let module = ctl.load_null_sink();
         Self {
             ctl,
@@ -216,6 +239,43 @@ impl Drop for NullSink {
     }
 }
 
+/// Restores `original` as the default sink from another thread once
+/// `budget` has passed, unless dropped first. This bounds how long the test
+/// sink stays the default even while the test thread is blocked in a call.
+struct Watchdog {
+    cancel: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn arm(original: String, budget: Duration) -> Self {
+        let (cancel, cancelled) = mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            if cancelled.recv_timeout(budget) != Err(mpsc::RecvTimeoutError::Timeout) {
+                return;
+            }
+            let mut ctl = Ctl::connect();
+            if ctl.try_default_sink().as_deref() == Some(NULL_SINK) {
+                let restored = ctl.set_default_sink(&original);
+                eprintln!("watchdog restored the default sink: {restored}");
+            }
+        });
+        Self {
+            cancel: Some(cancel),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        drop(self.cancel.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// A playback stream of silence from this process, on its own connection
 /// and thread, with WirePlumber told not to remember its volume or routing.
 /// It ends on drop, or with the process.
@@ -229,14 +289,16 @@ impl SilentStream {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = mpsc::channel();
         let flag = Arc::clone(&stop);
-        let thread = std::thread::spawn(move || play_silence(&flag, &ready_tx));
+        // Built before waiting, so its drop also stops a stream that
+        // becomes ready too late.
+        let stream = Self {
+            stop,
+            thread: Some(std::thread::spawn(move || play_silence(&flag, &ready_tx))),
+        };
         ready_rx
             .recv_timeout(WAIT)
             .expect("the silent stream did not start");
-        Self {
-            stop,
-            thread: Some(thread),
-        }
+        stream
     }
 }
 
@@ -260,6 +322,7 @@ fn play_silence(stop: &AtomicBool, ready: &mpsc::Sender<()>) {
         channels: 2,
         rate: 48_000,
     };
+    let frame = spec.frame_size();
     let mut stream =
         Stream::new_with_proplist(&mut ctl.context, "silence", &spec, None, &mut stream_props)
             .expect("stream");
@@ -268,17 +331,21 @@ fn play_silence(stop: &AtomicBool, ready: &mpsc::Sender<()>) {
         .expect("connect playback");
     let deadline = Instant::now() + WAIT;
     while stream.get_state() != StreamState::Ready {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         assert!(stream.get_state().is_good(), "the stream failed");
         assert!(Instant::now() < deadline, "the stream timed out");
         iterate(&mut ctl.mainloop);
     }
     let _ = ready.send(());
+    let zeros = vec![0u8; 64 * 1024];
     while !stop.load(Ordering::Relaxed) {
         if let Some(n) = stream.writable_size() {
-            let frames = n / 4;
-            if frames > 0 {
-                let zeros = vec![0u8; frames * 4];
-                let _ = stream.write(&zeros, None, 0, SeekMode::Relative);
+            // Whole frames only, as `write` requires.
+            let len = n.min(zeros.len()) / frame * frame;
+            if len > 0 {
+                let _ = stream.write(&zeros[..len], None, 0, SeekMode::Relative);
             }
         }
         iterate(&mut ctl.mainloop);
@@ -315,7 +382,7 @@ fn default_device(backend: &PulseBackend) -> Device {
         .expect("default device")
 }
 
-fn own_session(state: &AudioState) -> Option<pcvc_audio::Session> {
+fn own_session(state: &AudioState) -> Option<Session> {
     state
         .default_device
         .as_ref()?
@@ -325,13 +392,24 @@ fn own_session(state: &AudioState) -> Option<pcvc_audio::Session> {
         .cloned()
 }
 
-/// Everything received so far; a lag only means some events were skipped.
+fn session_by_id(state: &AudioState, id: &str) -> Option<Session> {
+    state
+        .default_device
+        .as_ref()?
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .cloned()
+}
+
+/// Everything received so far. Fails if the receiver lagged, since the
+/// events the tests look for may then be the ones that were dropped.
 fn drain(rx: &mut broadcast::Receiver<AudioEvent>) -> Vec<AudioEvent> {
     let mut events = Vec::new();
     loop {
         match rx.try_recv() {
             Ok(event) => events.push(event),
-            Err(TryRecvError::Lagged(_)) => {}
+            Err(TryRecvError::Lagged(n)) => panic!("the event receiver lagged by {n}"),
             Err(TryRecvError::Empty | TryRecvError::Closed) => return events,
         }
     }
@@ -372,14 +450,7 @@ fn session_control_on_own_stream() {
         id: session.id.clone()
     }));
 
-    let find = |s: &AudioState| {
-        s.default_device
-            .as_ref()?
-            .sessions
-            .iter()
-            .find(|x| x.id == session.id)
-            .cloned()
-    };
+    let find = |s: &AudioState| session_by_id(s, &session.id);
     let lower = (session.volume / 2.0).floor();
     backend.set_session(&session.id, lower, false).unwrap();
     wait_for(&backend, "the lowered volume", |s| {
@@ -434,14 +505,18 @@ fn session_control_on_own_stream() {
 #[ignore = "needs a running PulseAudio or PipeWire server"]
 fn default_device_and_master_on_null_sink() {
     let _serial = serial();
+    // Before the backend starts, so its first state read sees no leftovers.
+    remove_stale_null_sinks();
     let backend = PulseBackend::new().unwrap();
     let before = default_device(&backend);
     let stream = SilentStream::start();
     let own = wait_for(&backend, "the test stream", own_session);
     let own_index = own.id.rsplit('|').next().unwrap().to_owned();
 
-    let null = NullSink::load(Ctl::connect());
+    let mut null = NullSink::load(Ctl::connect());
     assert_eq!(null.original_default, before.id);
+    // The leftover cleanup recognises a module loaded this way.
+    assert_eq!(null.ctl.stale_null_sinks(), vec![null.module]);
     wait_for(&backend, "the null sink", |s| {
         s.devices.iter().any(|d| d.id == NULL_SINK).then_some(())
     });
@@ -454,20 +529,18 @@ fn default_device_and_master_on_null_sink() {
     // The null sink is the default from here until the restore below.
     let switched_at = Instant::now();
     let window_ends = switched_at + NULL_DEFAULT_BUDGET;
+    let watchdog = Watchdog::arm(before.id.clone(), NULL_DEFAULT_BUDGET);
     backend.set_default_device(NULL_SINK).unwrap();
     let on_null = wait_until(&backend, "the null sink default", window_ends, |s| {
         let d = s.default_device.as_ref()?;
         (d.id == NULL_SINK).then(|| d.clone())
     });
     assert_eq!(on_null.name, NULL_SINK_DESCRIPTION);
+    let seen = drain(&mut events);
+    assert!(seen.contains(&AudioEvent::DefaultDeviceChanged), "{seen:?}");
     let followed = format!("{NULL_SINK}|{own_index}");
     wait_until(&backend, "the stream to follow", window_ends, |s| {
-        s.default_device
-            .as_ref()?
-            .sessions
-            .iter()
-            .any(|x| x.id == followed)
-            .then_some(())
+        session_by_id(s, &followed)
     });
 
     let lower = (on_null.volume / 2.0).floor();
@@ -481,23 +554,24 @@ fn default_device_and_master_on_null_sink() {
         let d = s.default_device.as_ref()?;
         (d.id == NULL_SINK && !d.muted && (d.volume - lower).abs() < 0.01).then_some(())
     });
+    let seen = drain(&mut events);
+    assert!(seen.contains(&AudioEvent::MasterChanged), "{seen:?}");
 
     backend.set_default_device(&before.id).unwrap();
     wait_until(&backend, "the original default", window_ends, |s| {
         (s.default_device.as_ref()?.id == before.id).then_some(())
     });
     let null_default_for = switched_at.elapsed();
-    wait_for(&backend, "the test stream to follow back", |s| {
-        s.default_device
-            .as_ref()?
-            .sessions
-            .iter()
-            .any(|x| x.id == own.id)
-            .then_some(())
-    });
+    drop(watchdog);
+    assert!(
+        null_default_for <= NULL_DEFAULT_BUDGET,
+        "the null sink was the default for {null_default_for:?}"
+    );
     let seen = drain(&mut events);
     assert!(seen.contains(&AudioEvent::DefaultDeviceChanged), "{seen:?}");
-    assert!(seen.contains(&AudioEvent::MasterChanged), "{seen:?}");
+    wait_for(&backend, "the test stream to follow back", |s| {
+        session_by_id(s, &own.id)
+    });
 
     drop(null);
     drop(stream);

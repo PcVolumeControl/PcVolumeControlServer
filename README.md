@@ -61,8 +61,9 @@ It takes the same options as `mock_server`. `cargo run -p pcvc-audio
 
 The tests against the running sound server are ignored by default. They only
 change the volume of a silent stream and a temporary null sink they create,
-but they make the null sink the default for up to 1.5 seconds, which moves
-the streams on the real default sink there and back (see
+but they make the null sink the default for up to 1.5 seconds (a watchdog
+thread restores the default after that), which moves the streams on the
+real default sink there and back (see
 `crates/pcvc-audio/tests/pulse_live.rs`):
 
 ```sh
