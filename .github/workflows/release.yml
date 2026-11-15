@@ -13,6 +13,9 @@ env:
 # Release builds start from a clean target directory (no rust-cache) so a
 # poisoned or stale cache cannot reach published binaries.
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -22,10 +25,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - run: rustup toolchain install --no-self-update --profile minimal
-
       - name: Check the tag matches the package version
         id: version
+        # The runner's stable cargo is enough to read metadata.
+        env:
+          RUSTUP_TOOLCHAIN: stable
         run: |
           version=$(cargo metadata --no-deps --format-version 1 --locked \
             | jq -r '.packages[] | select(.name == "pcvolumecontrol") | .version')
@@ -36,7 +40,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   linux:
-    needs: version
+    needs: [ci, version]
     # The oldest supported runner sets the glibc floor for the binary.
     runs-on: ubuntu-22.04
     env:
@@ -48,12 +52,7 @@ jobs:
 
       - run: rustup toolchain install --no-self-update --profile minimal
 
-      - name: Install build dependencies
-        run: |
-          if grep -q libpulse crates/pcvc-audio/Cargo.toml; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends libpulse-dev
-          fi
+      - uses: ./.github/actions/linux-deps
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --version 3.8.0 --locked
@@ -83,7 +82,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: version
+    needs: [ci, version]
     runs-on: windows-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -102,12 +101,18 @@ jobs:
 
       - name: Build installer
         run: |
-          $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          # Newest Inno Setup installed; the script needs 6.3 or later.
+          function Find-Iscc {
+            Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue |
+              Sort-Object { [version]$_.VersionInfo.FileVersion } -Descending |
+              Select-Object -First 1
+          }
+          $iscc = Find-Iscc
           if (-not $iscc) {
             choco install innosetup --no-progress -y
-            $iscc = Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe" | Select-Object -First 1
+            $iscc = Find-Iscc
           }
+          if (-not $iscc) { throw "Inno Setup (ISCC.exe) not found" }
           & $iscc.FullName "/DAppVersion=$env:VERSION" "/DOutputDir=$env:GITHUB_WORKSPACE\dist" packaging\windows\pcvolumecontrol.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

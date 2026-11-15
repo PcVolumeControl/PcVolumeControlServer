@@ -17,7 +17,8 @@ for a release.
 
 1. Bump `version` in the root `Cargo.toml` and run `cargo check` so
    `Cargo.lock` picks up the new workspace versions.
-2. Commit, push to `main` and wait for CI to pass.
+2. Commit, push to `main` and wait for CI to pass. The release workflow runs
+   the same checks again and builds nothing if they fail.
 3. Tag that commit and push the tag:
 
    ```sh
@@ -54,7 +55,7 @@ To build the packages locally:
 
 ```sh
 cargo build --release -p pcvolumecontrol
-cargo install cargo-deb --locked
+cargo install cargo-deb --version 3.8.0 --locked   # as in release.yml
 cargo deb -p pcvolumecontrol --no-build     # target/debian/
 iscc /DAppVersion=1.2.3 packaging\windows\pcvolumecontrol.iss   # Windows, target\installer\
 ```

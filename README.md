@@ -39,12 +39,16 @@ sudo apt install ./pcvolumecontrol_<version>-1_amd64.deb
 for example for the current user:
 
 ```sh
+tar xzf pcvolumecontrol-<version>-linux-x86_64.tar.gz
+cd pcvolumecontrol-<version>-linux-x86_64
 install -Dm755 pcvolumecontrol ~/.local/bin/pcvolumecontrol
 install -Dm644 pcvolumecontrol.desktop ~/.local/share/applications/pcvolumecontrol.desktop
 install -Dm644 pcvolumecontrol.svg ~/.local/share/icons/hicolor/scalable/apps/pcvolumecontrol.svg
 ```
 
-It needs the PulseAudio client library (`libpulse.so.0`, also provided on
+The desktop entry runs `pcvolumecontrol` from `PATH`; if `~/.local/bin` is not
+on it, log out and back in after creating it, or install the binary to
+`/usr/local/bin` instead. It needs the PulseAudio client library (`libpulse.so.0`, also provided on
 PipeWire systems) and libxkbcommon. If a firewall is active, allow TCP port
 3000 and mDNS (UDP 5353).
 

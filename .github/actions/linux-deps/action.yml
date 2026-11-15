@@ -1,0 +1,14 @@
+name: Install Linux build dependencies
+description: Installs the system libraries the workspace links on Linux.
+runs:
+  using: composite
+  steps:
+    # iced, winit and the ksni tray dlopen X11, Wayland and xkbcommon and
+    # reach D-Bus through zbus, so libpulse (PulseAudio backend) is the only
+    # system library the build links.
+    - shell: bash
+      run: |
+        if grep -q libpulse crates/pcvc-audio/Cargo.toml; then
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse-dev
+        fi
