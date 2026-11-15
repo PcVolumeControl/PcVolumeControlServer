@@ -1,0 +1,4 @@
+[env]
+# Headless view tests (iced_test) render in software: deterministic, no GPU
+# needed, and safe to run in parallel.
+ICED_TEST_BACKEND = "tiny-skia"

@@ -1,11 +1,13 @@
 //! The iced daemon: state, messages, update and subscriptions.
 
 mod mixer;
+mod settings;
 mod status;
 #[cfg(test)]
 mod tests;
 
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,8 +25,9 @@ use crate::mixer::Mixer;
 use crate::model;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
-use crate::{icons, style};
+use crate::{autostart, icons, style};
 use mixer::MixerMessage;
+use settings::{Notice, SettingsForm, SettingsMessage};
 
 const MIN_SIZE: Size = Size::new(480.0, 400.0);
 
@@ -48,6 +51,7 @@ pub enum Message {
     ShowPage(Page),
     ToggleServer,
     Mixer(MixerMessage),
+    Settings(SettingsMessage),
     /// Periodic refresh of time-dependent views.
     Tick,
     ForceExit,
@@ -56,6 +60,8 @@ pub enum Message {
 /// What `main` prepares before the daemon starts.
 pub struct Boot {
     pub config: Config,
+    /// Where the config is saved; `None` keeps it in memory only.
+    pub config_path: Option<PathBuf>,
     pub show_window: bool,
     pub backend: Arc<dyn AudioBackend>,
     pub inbox: Inbox,
@@ -81,6 +87,9 @@ pub struct App {
     tray: Option<Tray>,
     window: Option<window::Id>,
     config: Config,
+    config_path: Option<PathBuf>,
+    settings: SettingsForm,
+    notice: Option<Notice>,
     page: Page,
     logs: LogBuffer,
     quitting: bool,
@@ -90,7 +99,8 @@ impl App {
     /// Runs inside iced's tokio runtime, so it may spawn tasks.
     pub fn boot(boot: Boot) -> (Self, Task<Message>) {
         let Boot {
-            config,
+            mut config,
+            config_path,
             show_window,
             backend,
             inbox,
@@ -101,6 +111,12 @@ impl App {
         let commands = CommandSender::spawn(Arc::clone(&backend));
         let server = ServerController::spawn(backend, inbox.clone());
         server.start(config.server_config());
+        // The login item itself is the truth; it may have been removed
+        // outside the app.
+        match autostart::is_enabled() {
+            Ok(enabled) => config.start_on_login = enabled,
+            Err(e) => tracing::warn!("reading start on login failed: {e}"),
+        }
 
         let mut app = Self {
             inbox,
@@ -117,7 +133,10 @@ impl App {
             local_ips_error: None,
             tray: None,
             window: None,
+            settings: SettingsForm::from(&config),
+            notice: None,
             config,
+            config_path,
             page: Page::Mixer,
             logs,
             quitting: false,
@@ -138,7 +157,7 @@ impl App {
     }
 
     pub fn theme(&self, _window: window::Id) -> Option<Theme> {
-        None
+        self.config.theme.theme()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -194,6 +213,7 @@ impl App {
                 Task::none()
             }
             Message::Mixer(message) => self.mixer_update(message),
+            Message::Settings(message) => self.settings_update(message),
             Message::Tick => {
                 if self.page == Page::Status {
                     self.refresh_local_ips();
@@ -227,7 +247,21 @@ impl App {
                 self.toggle_server();
                 Task::none()
             }
-            TrayAction::ToggleStartOnLogin => Task::none(),
+            TrayAction::ToggleStartOnLogin => {
+                let enable = !self.config.start_on_login;
+                match autostart::set_enabled(enable) {
+                    Ok(()) => {
+                        self.settings.start_on_login = enable;
+                        let new = Config {
+                            start_on_login: enable,
+                            ..self.config.clone()
+                        };
+                        self.apply_config(new);
+                    }
+                    Err(e) => tracing::warn!("changing start on login failed: {e}"),
+                }
+                Task::none()
+            }
             TrayAction::Quit => self.quit(),
         }
     }
@@ -280,6 +314,8 @@ impl App {
             return window::gain_focus(id);
         }
         self.page = Page::Mixer;
+        self.settings = SettingsForm::from(&self.config);
+        self.notice = None;
         let (id, opened) = window::open(window::Settings {
             size: Size::new(self.config.window.width, self.config.window.height),
             min_size: Some(MIN_SIZE),
@@ -307,6 +343,8 @@ impl App {
     fn close_window(&mut self, id: window::Id) -> Task<Message> {
         if self.window == Some(id) {
             self.window = None;
+            // Keeps the window size for next time.
+            self.persist_config();
         }
         window::close(id)
     }
@@ -394,7 +432,7 @@ impl App {
         let (title, body) = match self.page {
             Page::Mixer => ("Mixer", self.mixer_view()),
             Page::Status => ("Status", self.status_view()),
-            Page::Settings => ("Settings", text("Settings").into()),
+            Page::Settings => ("Settings", self.settings_view()),
         };
         let page = column![text(title).size(style::TEXT_TITLE), body]
             .spacing(style::SPACE_L)

@@ -12,6 +12,7 @@ use pcvc_server::ClientInfo;
 use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
+use crate::config::ThemeChoice;
 use crate::inbox;
 use crate::mixer::Target;
 
@@ -32,13 +33,10 @@ impl Harness {
         let _guard = runtime.enter();
         let backend = Arc::new(MockBackend::demo());
         let (inbox, inbox_rx) = inbox::channel();
-        let config = Config {
-            port: 0,
-            mdns: false,
-            ..Config::default()
-        };
+        let config = Config::default();
         let (app, _) = App::boot(Boot {
             config,
+            config_path: None,
             show_window: false,
             backend: Arc::clone(&backend) as Arc<dyn AudioBackend>,
             inbox,
@@ -161,8 +159,33 @@ fn status_shows_addresses_and_clients() {
     ));
 }
 
+#[test]
+fn settings_validate_and_save() {
+    let mut h = Harness::new();
+    h.run(vec![Message::Settings(SettingsMessage::Port("0".into()))]);
+    let mut ui = simulator(h.app.settings_view());
+    ui.find("Port must be a number from 1 to 65535").unwrap();
+    ui.click("Save").unwrap();
+    assert_eq!(ui.into_messages().count(), 0, "Save is disabled");
+
+    h.run(vec![
+        Message::Settings(SettingsMessage::Port("4x0a00".into())),
+        Message::Settings(SettingsMessage::Theme(ThemeChoice::Dark)),
+    ]);
+    assert_eq!(h.app.settings.port, "4000");
+    let mut ui = simulator(h.app.settings_view());
+    ui.click("Save").unwrap();
+    let messages = ui.into_messages().collect();
+    h.run(messages);
+    assert_eq!(h.app.config.port, 4000);
+    assert_eq!(h.app.config.theme, ThemeChoice::Dark);
+    assert_eq!(h.app.notice, Some(Notice::Saved));
+    simulator(h.app.settings_view()).find("Saved").unwrap();
+}
+
 /// Renders every page in both themes into `PCVC_SNAPSHOT_DIR` for a manual
-/// look. Run with `--ignored`.
+/// look. Run with `--ignored`. Existing images in the directory are
+/// replaced.
 #[test]
 #[ignore = "writes PNG files for manual inspection"]
 fn render_pages() {
@@ -193,6 +216,12 @@ fn render_pages() {
         },
     );
     h.app.local_ips = vec![Ipv4Addr::new(192, 168, 1, 20), Ipv4Addr::new(10, 8, 0, 2)];
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "png") {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
     let id = window::Id::unique();
     h.app.window = Some(id);
     for page in [Page::Mixer, Page::Status, Page::Settings] {
@@ -204,7 +233,6 @@ fn render_pages() {
                 h.app.view(id),
             );
             let path = format!("{dir}/{}-{name}.png", format!("{page:?}").to_lowercase());
-            let _ = std::fs::remove_file(&path);
             ui.snapshot(&theme).unwrap().matches_image(&path).unwrap();
         }
     }

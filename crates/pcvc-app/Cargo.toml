@@ -23,6 +23,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "chrono"] }
 tracing-appender = "0.2.5"
 chrono = { version = "0.4.26", default-features = false, features = ["clock", "std"] }
 directories = "6"
+serde.workspace = true
+toml = "1"
+auto-launch = "0.6"
 if-addrs = "0.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -35,5 +38,6 @@ tray-icon = { version = "0.26", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
+tempfile = "3"
 iced_test = "0.14"
 

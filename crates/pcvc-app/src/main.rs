@@ -5,6 +5,7 @@
 
 mod app;
 mod audio;
+mod autostart;
 mod cli;
 mod config;
 mod icons;
@@ -48,7 +49,20 @@ fn main() -> ExitCode {
 
     let (logs, _log_guard) = logging::init(paths::log_dir().as_deref());
 
-    let config = Config::default();
+    let config_path = paths::config_file();
+    let config = match &config_path {
+        Some(path) => {
+            let loaded = config::load(path);
+            if let Some(warning) = loaded.warning {
+                tracing::warn!("{warning}");
+            }
+            loaded.config
+        }
+        None => {
+            tracing::warn!("no home directory; settings will not be saved");
+            Config::default()
+        }
+    };
     let backend = audio::create_backend(if args.mock_audio {
         BackendChoice::Mock
     } else {
@@ -60,6 +74,7 @@ fn main() -> ExitCode {
     let boot = Mutex::new(Some(Boot {
         show_window: args.show || config.show_on_launch,
         config,
+        config_path,
         backend,
         inbox,
         inbox_rx,

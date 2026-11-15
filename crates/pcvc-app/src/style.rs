@@ -27,6 +27,7 @@ pub const STATUS_ICON: f32 = 64.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Button {
+    Primary,
     Secondary,
     Success,
     Danger,
@@ -38,7 +39,7 @@ pub enum Button {
 pub fn button(kind: Button) -> impl Fn(&Theme, btn::Status) -> btn::Style {
     move |theme, status| {
         let base = match kind {
-            Button::Nav(true) => btn::primary(theme, status),
+            Button::Primary | Button::Nav(true) => btn::primary(theme, status),
             Button::Secondary => btn::secondary(theme, status),
             Button::Success => btn::success(theme, status),
             Button::Danger => btn::danger(theme, status),
