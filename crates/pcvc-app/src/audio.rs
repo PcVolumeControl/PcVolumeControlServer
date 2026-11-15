@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use pcvc_audio::{AudioBackend, MockBackend};
 use pcvc_protocol::Command;
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
 use crate::inbox::{Inbound, Inbox};
 
@@ -60,7 +60,7 @@ pub fn spawn_watcher(backend: Arc<dyn AudioBackend>, inbox: Inbox) {
                 Err(RecvError::Closed) => return,
             }
             tokio::time::sleep(COALESCE).await;
-            while events.try_recv().is_ok() {}
+            while let Ok(_) | Err(TryRecvError::Lagged(_)) = events.try_recv() {}
         }
     });
 }

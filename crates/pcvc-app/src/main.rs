@@ -22,11 +22,14 @@ use cli::Parsed;
 use config::Config;
 use tracing_subscriber::EnvFilter;
 
-const DEFAULT_LOG_FILTER: &str =
-    "info,iced_winit=warn,wgpu_core=error,wgpu_hal=error,naga=warn,sctk_adwaita=error";
+const DEFAULT_LOG_FILTER: &str = "info,iced_winit=warn,iced_wgpu=warn,wgpu_core=error,wgpu_hal=error,naga=warn,sctk_adwaita=error";
 
 fn main() -> ExitCode {
-    let args = match cli::parse(std::env::args().skip(1)) {
+    let parsed = cli::parse(std::env::args().skip(1));
+    if !matches!(parsed, Ok(Parsed::Run(_))) {
+        attach_parent_console();
+    }
+    let args = match parsed {
         Ok(Parsed::Run(args)) => args,
         Ok(Parsed::Help) => {
             println!("{}", cli::USAGE);
@@ -89,3 +92,18 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// Release builds on Windows use the GUI subsystem and start without a
+/// console; attach to the launching one so `--help` and usage errors show.
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: AttachConsole has no preconditions; failure (no parent console)
+    // only leaves output going nowhere.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(all(target_os = "windows", not(debug_assertions))))]
+fn attach_parent_console() {}

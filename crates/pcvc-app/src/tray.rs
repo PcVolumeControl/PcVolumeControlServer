@@ -217,47 +217,47 @@ pub use platform::Tray;
 #[cfg(target_os = "linux")]
 mod platform {
     use std::sync::mpsc;
-    use std::thread::JoinHandle;
     use std::time::Duration;
 
     use super::{Core, TrayModel};
+    use crate::inbox::{Inbound, Inbox};
 
-    const CREATE_TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long dropping the tray waits for the icon to be withdrawn.
+    const DROP_TIMEOUT: Duration = Duration::from_secs(2);
 
     pub struct Tray {
         models: Option<mpsc::Sender<TrayModel>>,
-        thread: Option<JoinHandle<()>>,
+        done: mpsc::Receiver<()>,
     }
 
     impl Tray {
-        pub fn new(model: TrayModel) -> Result<Self, String> {
+        /// Creates the icon in the background; a failure arrives in the inbox
+        /// as [`Inbound::TrayFailed`].
+        pub fn spawn(model: TrayModel, inbox: Inbox) -> Self {
             let (models, rx) = mpsc::channel::<TrayModel>();
-            let (created_tx, created_rx) = mpsc::sync_channel(1);
-            let thread = std::thread::Builder::new()
+            let (done_tx, done) = mpsc::sync_channel(1);
+            let spawned = std::thread::Builder::new()
                 .name("tray".into())
                 .spawn(move || {
-                    let mut core = match Core::new(model) {
-                        Ok(core) => {
-                            let _ = created_tx.send(Ok(()));
-                            core
+                    match Core::new(model) {
+                        Ok(mut core) => {
+                            tracing::info!("tray icon created");
+                            for model in rx {
+                                core.apply(model);
+                            }
                         }
                         Err(e) => {
-                            let _ = created_tx.send(Err(e));
-                            return;
+                            inbox.send(Inbound::TrayFailed(e));
                         }
-                    };
-                    for model in rx {
-                        core.apply(model);
                     }
-                })
-                .map_err(|e| e.to_string())?;
-            match created_rx.recv_timeout(CREATE_TIMEOUT) {
-                Ok(Ok(())) => Ok(Self {
-                    models: Some(models),
-                    thread: Some(thread),
-                }),
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(format!("tray creation did not finish: {e}")),
+                    let _ = done_tx.send(());
+                });
+            if let Err(e) = spawned {
+                tracing::error!("spawning the tray thread failed: {e}");
+            }
+            Self {
+                models: Some(models),
+                done,
             }
         }
 
@@ -269,11 +269,11 @@ mod platform {
     }
 
     impl Drop for Tray {
-        /// Waits for the icon to be withdrawn from the panel.
+        /// Waits briefly for the icon to be withdrawn from the panel.
         fn drop(&mut self) {
             self.models = None;
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
+            if self.done.recv_timeout(DROP_TIMEOUT) == Err(mpsc::RecvTimeoutError::Timeout) {
+                tracing::warn!("tray icon was not withdrawn within {DROP_TIMEOUT:?}");
             }
         }
     }
@@ -285,16 +285,30 @@ mod platform {
 #[cfg(not(target_os = "linux"))]
 mod platform {
     use super::{Core, TrayModel};
+    use crate::inbox::{Inbound, Inbox};
 
-    pub struct Tray(Core);
+    pub struct Tray(Option<Core>);
 
     impl Tray {
-        pub fn new(model: TrayModel) -> Result<Self, String> {
-            Core::new(model).map(Self)
+        /// Creates the icon on the calling thread; a failure arrives in the
+        /// inbox as [`Inbound::TrayFailed`].
+        pub fn spawn(model: TrayModel, inbox: Inbox) -> Self {
+            match Core::new(model) {
+                Ok(core) => {
+                    tracing::info!("tray icon created");
+                    Self(Some(core))
+                }
+                Err(e) => {
+                    inbox.send(Inbound::TrayFailed(e));
+                    Self(None)
+                }
+            }
         }
 
         pub fn update(&mut self, model: TrayModel) {
-            self.0.apply(model);
+            if let Some(core) = &mut self.0 {
+                core.apply(model);
+            }
         }
     }
 }

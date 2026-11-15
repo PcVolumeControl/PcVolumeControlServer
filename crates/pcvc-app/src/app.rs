@@ -18,6 +18,8 @@ use crate::model;
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
 
+const MIN_SIZE: Size = Size::new(480.0, 400.0);
+
 /// Longest wait for the server to stop on quit before exiting anyway.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -50,6 +52,7 @@ pub struct Boot {
 }
 
 pub struct App {
+    inbox: Inbox,
     inbox_rx: InboxReceiver,
     commands: CommandSender,
     server: ServerController,
@@ -59,7 +62,6 @@ pub struct App {
     audio: Option<AudioState>,
     local_ips: Vec<Ipv4Addr>,
     tray: Option<Tray>,
-    tray_model: Option<TrayModel>,
     window: Option<window::Id>,
     config: Config,
     page: Page,
@@ -78,10 +80,11 @@ impl App {
         } = boot;
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
-        let server = ServerController::spawn(backend, inbox);
+        let server = ServerController::spawn(backend, inbox.clone());
         server.start(config.server_config());
 
         let mut app = Self {
+            inbox,
             inbox_rx,
             commands,
             server,
@@ -91,7 +94,6 @@ impl App {
             audio: None,
             local_ips: model::local_ipv4s(),
             tray: None,
-            tray_model: None,
             window: None,
             config,
             page: Page::Mixer,
@@ -112,7 +114,7 @@ impl App {
     }
 
     pub fn theme(&self, _window: window::Id) -> Option<Theme> {
-        self.config.theme.theme()
+        None
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -123,25 +125,24 @@ impl App {
 
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::CreateTray => match Tray::new(self.compute_tray_model()) {
-                Ok(tray) => {
-                    tracing::info!("tray icon created");
-                    self.tray = Some(tray);
-                    Task::none()
-                }
-                Err(e) => {
-                    tracing::error!("creating the tray icon failed: {e}");
-                    // Without a tray the window is the only way in.
-                    self.open_window()
-                }
-            },
+            Message::CreateTray => {
+                self.tray = Some(Tray::spawn(self.compute_tray_model(), self.inbox.clone()));
+                Task::none()
+            }
+            Message::Inbound(Inbound::TrayFailed(e)) => {
+                tracing::error!("creating the tray icon failed: {e}");
+                self.tray = None;
+                // Without a tray the window is the only way in, and closing
+                // it quits.
+                self.open_window()
+            }
             Message::Inbound(Inbound::Tray(action)) => self.tray_action(action),
             Message::Inbound(Inbound::Audio(state)) => {
                 self.audio = Some(state);
                 Task::none()
             }
             Message::Inbound(Inbound::Server(update)) => self.server_update(update),
-            Message::WindowCloseRequested(id) => self.close_window(id),
+            Message::WindowCloseRequested(id) => self.close_requested(id),
             Message::WindowClosed(id) => {
                 if self.window == Some(id) {
                     self.window = None;
@@ -149,7 +150,11 @@ impl App {
                 Task::none()
             }
             Message::WindowResized(id, size) => {
-                if self.window == Some(id) {
+                // Minimising reports a zero size on some platforms.
+                if self.window == Some(id)
+                    && size.width >= MIN_SIZE.width
+                    && size.height >= MIN_SIZE.height
+                {
                     self.config.window.width = size.width;
                     self.config.window.height = size.height;
                 }
@@ -227,7 +232,7 @@ impl App {
         self.page = Page::Mixer;
         let (id, opened) = window::open(window::Settings {
             size: Size::new(self.config.window.width, self.config.window.height),
-            min_size: Some(Size::new(480.0, 400.0)),
+            min_size: Some(MIN_SIZE),
             icon: icons::window_icon(),
             exit_on_close_request: false,
             #[cfg(target_os = "linux")]
@@ -241,7 +246,14 @@ impl App {
         opened.discard()
     }
 
-    /// Closing the window only hides the app to the tray.
+    /// Closing the window hides the app to the tray, or quits without one.
+    fn close_requested(&mut self, id: window::Id) -> Task<Message> {
+        if self.tray.is_none() {
+            return self.quit();
+        }
+        self.close_window(id)
+    }
+
     fn close_window(&mut self, id: window::Id) -> Task<Message> {
         if self.window == Some(id) {
             self.window = None;
@@ -288,15 +300,11 @@ impl App {
     }
 
     fn sync_tray(&mut self) {
-        if self.tray.is_none() {
-            return;
-        }
-        let model = self.compute_tray_model();
-        if self.tray_model.as_ref() != Some(&model)
-            && let Some(tray) = self.tray.as_mut()
-        {
-            tray.update(model.clone());
-            self.tray_model = Some(model);
+        if self.tray.is_some() {
+            let model = self.compute_tray_model();
+            if let Some(tray) = self.tray.as_mut() {
+                tray.update(model);
+            }
         }
     }
 

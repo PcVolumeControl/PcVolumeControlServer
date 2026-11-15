@@ -15,6 +15,8 @@ use crate::tray::TrayAction;
 #[derive(Debug, Clone)]
 pub enum Inbound {
     Tray(TrayAction),
+    /// The tray icon could not be created.
+    TrayFailed(String),
     Server(ServerUpdate),
     Audio(AudioState),
 }
