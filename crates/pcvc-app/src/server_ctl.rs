@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pcvc_audio::AudioBackend;
-use pcvc_server::{ClientInfo, MdnsStatus, ServerConfig, ServerEvent, ServerHandle};
+use pcvc_server::{ClientInfo, IconProvider, MdnsStatus, ServerConfig, ServerEvent, ServerHandle};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, watch};
 
@@ -46,9 +46,15 @@ pub struct ServerController(mpsc::UnboundedSender<Request>);
 
 impl ServerController {
     /// Spawns the controller task; it must run inside a tokio runtime.
-    pub fn spawn(backend: Arc<dyn AudioBackend>, inbox: Inbox) -> Self {
+    /// `icons` is given to every server it starts whose config has no icon
+    /// provider of its own.
+    pub fn spawn(
+        backend: Arc<dyn AudioBackend>,
+        icons: Option<Arc<dyn IconProvider>>,
+        inbox: Inbox,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(run(backend, rx, inbox));
+        tokio::spawn(run(backend, icons, rx, inbox));
         Self(tx)
     }
 
@@ -102,6 +108,7 @@ impl Running {
 
 async fn run(
     backend: Arc<dyn AudioBackend>,
+    icons: Option<Arc<dyn IconProvider>>,
     mut requests: mpsc::UnboundedReceiver<Request>,
     inbox: Inbox,
 ) {
@@ -121,7 +128,10 @@ async fn run(
             None => requests.recv().await,
         };
         match request {
-            Some(Request::Start(config)) => {
+            Some(Request::Start(mut config)) => {
+                if config.icons.is_none() {
+                    config.icons = icons.clone();
+                }
                 stop(&mut running, &send).await;
                 send(ServerUpdate::Status(ServerStatus::Starting));
                 match ServerHandle::start(Arc::clone(&backend), config).await {

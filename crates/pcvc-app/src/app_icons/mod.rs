@@ -28,6 +28,7 @@ use iced::widget::image;
 use pcvc_audio::Session;
 
 pub use cache::{IconCache, Slot};
+pub use raster::encode_png;
 
 use crate::icons::Rgba;
 use crate::inbox::{Inbound, Inbox};
@@ -66,10 +67,33 @@ impl IconKey {
     }
 }
 
+/// A resolved icon and what it was drawn from.
+pub struct Found {
+    pub rgba: Rgba,
+    /// The longer side of the raster image it was scaled from; `None` when
+    /// it was drawn at the requested size (a vector source, or one the
+    /// platform renders at any size).
+    pub source_edge: Option<u32>,
+}
+
 /// Finds and renders application icons. May block.
 pub trait Resolver: Send + Sync {
     /// A `key.size` square image, or `None` if nothing usable was found.
     fn resolve(&self, key: &IconKey) -> Option<Rgba>;
+
+    /// [`Resolver::resolve`], also reporting the source's size where the
+    /// resolver knows it.
+    fn resolve_found(&self, key: &IconKey) -> Option<Found> {
+        self.resolve(key).map(|rgba| Found {
+            rgba,
+            source_edge: None,
+        })
+    }
+
+    /// False for a resolver that never finds anything.
+    fn finds_icons(&self) -> bool {
+        true
+    }
 }
 
 /// Finds nothing; every session gets the fallback tile.
@@ -83,6 +107,10 @@ pub struct NoIcons;
 impl Resolver for NoIcons {
     fn resolve(&self, _: &IconKey) -> Option<Rgba> {
         None
+    }
+
+    fn finds_icons(&self) -> bool {
+        false
     }
 }
 

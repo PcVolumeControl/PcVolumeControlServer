@@ -24,7 +24,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
-use super::{IconKey, Resolver, raster, win_pixels};
+use super::{Found, IconKey, Resolver, raster, win_pixels};
 use crate::icons::Rgba;
 
 /// Larger bitmaps are not icons.
@@ -34,6 +34,13 @@ pub struct WindowsResolver;
 
 impl Resolver for WindowsResolver {
     fn resolve(&self, key: &IconKey) -> Option<Rgba> {
+        self.resolve_found(key).map(|found| found.rgba)
+    }
+
+    /// The source edge is that of the bitmap the shell returned. The shell
+    /// scales icons to the requested size itself, except for the
+    /// [`Source::Shell`] fallback at the system icon size.
+    fn resolve_found(&self, key: &IconKey) -> Option<Found> {
         let Some(path) = key.process_binary.as_deref() else {
             tracing::debug!("no executable path for an application icon");
             return None;
@@ -45,7 +52,11 @@ impl Resolver for WindowsResolver {
             .find_map(|source| {
                 let icon = source.extract(&wide_path, key.size)?;
                 let rgba = icon_rgba(&icon)?;
-                Some((source, raster::fit_rgba(&rgba, key.size)?))
+                let found = Found {
+                    source_edge: Some(rgba.width.max(rgba.height)),
+                    rgba: raster::fit_rgba(&rgba, key.size)?,
+                };
+                Some((source, found))
             });
         tracing::debug!(
             path,
@@ -53,7 +64,7 @@ impl Resolver for WindowsResolver {
             size = key.size,
             "application icon lookup"
         );
-        found.map(|(_, rgba)| rgba)
+        found.map(|(_, found)| found)
     }
 }
 

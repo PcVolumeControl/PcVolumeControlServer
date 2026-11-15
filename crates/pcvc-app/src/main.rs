@@ -9,6 +9,7 @@ mod audio;
 mod autostart;
 mod cli;
 mod config;
+mod icon_provider;
 mod icons;
 mod inbox;
 mod instance;
@@ -94,13 +95,16 @@ fn main() -> ExitCode {
         BackendChoice::System
     });
     tray::install_event_handlers(&inbox);
+    let icon_resolver = app_icons::system_resolver();
+    let server_icons = icon_provider::for_server(true, &icon_resolver);
 
     let boot = Mutex::new(Some(Boot {
         show_window: args.show || config.show_on_launch,
         config,
         config_path,
         backend,
-        icon_resolver: app_icons::system_resolver(),
+        icon_resolver,
+        server_icons,
         inbox,
         inbox_rx,
         logs,

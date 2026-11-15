@@ -5,6 +5,8 @@ use std::path::Path;
 
 use resvg::tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
 
+#[cfg(any(target_os = "linux", test))]
+use super::Found;
 use crate::icons::{Rgba, fit, to_rgba};
 
 #[cfg(any(target_os = "linux", test))]
@@ -19,7 +21,7 @@ const MAX_PNG_EDGE: u32 = 2048;
 /// Reads `path` (PNG, SVG or SVGZ, by extension) and renders it centred into
 /// a `size` x `size` image, keeping its aspect ratio. Other formats and
 /// unreadable files give `None`.
-pub fn load(path: &Path, size: u32) -> Option<Rgba> {
+pub fn load(path: &Path, size: u32) -> Option<Found> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     if !matches!(ext.as_str(), "png" | "svg" | "svgz") {
         tracing::debug!(path = %path.display(), "skipping unsupported icon format");
@@ -30,14 +32,20 @@ pub fn load(path: &Path, size: u32) -> Option<Rgba> {
         return None;
     }
     let data = std::fs::read(path).ok()?;
-    let pixmap = match ext.as_str() {
-        "png" => png(&data, size),
-        _ => crate::icons::render(&data, size).ok(),
+    let (pixmap, source_edge) = match ext.as_str() {
+        "png" => (
+            png(&data, size),
+            png_dimensions(&data).map(|(w, h)| w.max(h)),
+        ),
+        _ => (crate::icons::render(&data, size).ok(), None),
     };
     if pixmap.is_none() {
         tracing::debug!(path = %path.display(), "icon file could not be decoded");
     }
-    pixmap.map(to_rgba)
+    pixmap.map(|p| Found {
+        rgba: to_rgba(p),
+        source_edge,
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -118,7 +126,6 @@ fn scaled(source: &Pixmap, factor: f32, quality: FilterQuality) -> Option<Pixmap
 }
 
 /// PNG encoding of an image, the form in which icons can leave the process.
-#[cfg_attr(not(test), expect(dead_code, reason = "no consumer outside tests"))]
 pub fn encode_png(rgba: &Rgba) -> Option<Vec<u8>> {
     Pixmap::from_vec(
         premultiplied(&rgba.pixels),
@@ -162,7 +169,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wide.png");
         std::fs::write(&path, solid_png(512, 256)).unwrap();
-        let icon = load(&path, 48).unwrap();
+        let found = load(&path, 48).unwrap();
+        assert_eq!(found.source_edge, Some(512));
+        let icon = found.rgba;
         assert_eq!((icon.width, icon.height), (48, 48));
         // Letterboxed: transparent above and below, opaque in the middle.
         assert_eq!(alpha_at(&icon, 24, 2), 0);
@@ -176,7 +185,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.SVG");
         std::fs::write(&path, svg).unwrap();
-        let icon = load(&path, 32).unwrap();
+        let found = load(&path, 32).unwrap();
+        assert_eq!(found.source_edge, None, "vector sources have no edge");
+        let icon = found.rgba;
         assert_eq!(icon.pixels.len(), 32 * 32 * 4);
         assert_eq!(alpha_at(&icon, 31, 31), 255);
     }

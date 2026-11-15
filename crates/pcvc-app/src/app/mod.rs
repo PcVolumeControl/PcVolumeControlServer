@@ -16,7 +16,7 @@ use iced::widget::{button, column, container, image, row, text};
 use iced::{Element, Length, Size, Subscription, Task, Theme, window};
 use pcvc_audio::{AudioBackend, AudioState};
 use pcvc_protocol::Command;
-use pcvc_server::{ClientInfo, MdnsStatus};
+use pcvc_server::{ClientInfo, IconProvider, MdnsStatus};
 
 use crate::app_icons::{IconCache, IconKey, IconWorker, Resolver, Slot};
 use crate::audio::{self, CommandSender};
@@ -71,6 +71,8 @@ pub struct Boot {
     pub show_window: bool,
     pub backend: Arc<dyn AudioBackend>,
     pub icon_resolver: Arc<dyn Resolver>,
+    /// Icons for phone clients, given to the server on every start.
+    pub server_icons: Option<Arc<dyn IconProvider>>,
     pub inbox: Inbox,
     pub inbox_rx: InboxReceiver,
     pub logs: LogBuffer,
@@ -164,6 +166,7 @@ impl App {
             show_window,
             backend,
             icon_resolver,
+            server_icons,
             inbox,
             inbox_rx,
             logs,
@@ -172,7 +175,7 @@ impl App {
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
         spawn_signal_handler(inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
-        let server = ServerController::spawn(backend, inbox.clone());
+        let server = ServerController::spawn(backend, server_icons, inbox.clone());
         server.start(config.server_config());
         // The login item itself is the truth; it may have been removed
         // outside the app.

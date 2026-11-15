@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use desktop::DesktopIndex;
 use theme::IconThemes;
 
-use super::{IconKey, Resolver, raster};
+use super::{Found, IconKey, Resolver, raster};
 use crate::icons::Rgba;
 
 /// Longest wait for `gsettings`.
@@ -248,12 +248,12 @@ impl LinuxResolver {
     /// of the process, then the desktop entries for the binary and for the
     /// name. Steam comes before the binary because Proton games run as
     /// Wine, whose own desktop entry would match the binary.
-    pub fn find(&self, key: &IconKey) -> Option<(PathBuf, Rgba, Via)> {
+    pub fn find(&self, key: &IconKey) -> Option<(PathBuf, Found, Via)> {
         let px = key.size;
-        let attempt = |icon: Option<String>, via: Via| -> Option<(PathBuf, Rgba, Via)> {
+        let attempt = |icon: Option<String>, via: Via| -> Option<(PathBuf, Found, Via)> {
             let path = self.icon_file(&icon?, px)?;
-            let rgba = raster::load(&path, px)?;
-            Some((path, rgba, via))
+            let found = raster::load(&path, px)?;
+            Some((path, found, via))
         };
         let desktop = || self.desktop();
         attempt(key.icon_name.as_deref().map(str::to_owned), Via::IconName)
@@ -275,6 +275,10 @@ impl LinuxResolver {
 
 impl Resolver for LinuxResolver {
     fn resolve(&self, key: &IconKey) -> Option<Rgba> {
+        self.resolve_found(key).map(|found| found.rgba)
+    }
+
+    fn resolve_found(&self, key: &IconKey) -> Option<Found> {
         let found = self.find(key);
         match &found {
             Some((path, _, via)) => tracing::debug!(
@@ -286,7 +290,7 @@ impl Resolver for LinuxResolver {
             ),
             None => tracing::debug!(app = %key.name, "no application icon found"),
         }
-        found.map(|(_, rgba, _)| rgba)
+        found.map(|(_, found, _)| found)
     }
 }
 
@@ -407,8 +411,8 @@ mod tests {
     }
 
     fn via(resolver: &LinuxResolver, request: &IconKey) -> Option<(String, Via)> {
-        resolver.find(request).map(|(path, rgba, via)| {
-            assert_eq!((rgba.width, rgba.height), (32, 32));
+        resolver.find(request).map(|(path, found, via)| {
+            assert_eq!((found.rgba.width, found.rgba.height), (32, 32));
             (
                 path.file_name().unwrap().to_string_lossy().into_owned(),
                 via,
