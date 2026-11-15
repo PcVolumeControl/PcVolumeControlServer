@@ -117,9 +117,9 @@ impl IconWorker {
         Self(tx)
     }
 
-    /// Queues a lookup. Without a running thread the session keeps its
-    /// placeholder.
-    pub fn request(&self, key: IconKey) {
-        let _ = self.0.send(key);
+    /// Queues a lookup. Returns false if the thread is not running, so no
+    /// result will come.
+    pub fn request(&self, key: IconKey) -> bool {
+        self.0.send(key).is_ok()
     }
 }

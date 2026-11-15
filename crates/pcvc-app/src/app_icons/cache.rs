@@ -8,24 +8,34 @@ use std::time::{Duration, Instant};
 /// again, so an application installed later gets its icon.
 const MISS_TTL: Duration = Duration::from_secs(120);
 
-/// The state of one key.
+/// What is known about one key.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Slot<T> {
-    /// A lookup is in flight.
+    /// The first lookup is in flight.
     Pending,
-    /// The lookup finished; `None` means nothing was found.
+    /// A lookup finished; `None` means nothing was found. A miss stays
+    /// readable while it is looked up again.
     Ready(Option<T>),
 }
 
+#[derive(Debug)]
+struct Entry<T> {
+    slot: Slot<T>,
+    /// The cache clock at the last request, for eviction.
+    used: u64,
+    /// When the slot was last filled.
+    filled: Instant,
+    in_flight: bool,
+}
+
 /// Remembers lookups, misses included, up to `capacity` keys. Beyond that
-/// the least recently requested finished keys are dropped; pending ones are
-/// kept so their results still land.
+/// the least recently requested keys are dropped, except those with a
+/// lookup in flight, so their results still land.
 #[derive(Debug)]
 pub struct IconCache<K, T> {
     capacity: usize,
     clock: u64,
-    /// Each slot with its last use (a counter) and when it was filled.
-    entries: HashMap<K, (Slot<T>, u64, Instant)>,
+    entries: HashMap<K, Entry<T>>,
 }
 
 impl<K: Eq + Hash + Clone, T> IconCache<K, T> {
@@ -38,27 +48,31 @@ impl<K: Eq + Hash + Clone, T> IconCache<K, T> {
     }
 
     pub fn get(&self, key: &K) -> Option<&Slot<T>> {
-        self.entries.get(key).map(|(slot, _, _)| slot)
+        self.entries.get(key).map(|e| &e.slot)
     }
 
-    /// Marks `key` as in use. Returns true if it is new or a miss older
-    /// than [`MISS_TTL`], in which case it is now pending and the caller
-    /// should look it up.
+    /// Marks `key` as in use. Returns true if the caller should look it up:
+    /// it is new (and now [`Slot::Pending`]), or a miss older than
+    /// [`MISS_TTL`] with no lookup in flight.
     pub fn request(&mut self, key: &K, now: Instant) -> bool {
         self.clock += 1;
-        if let Some((slot, used, filled)) = self.entries.get_mut(key) {
-            *used = self.clock;
-            let stale_miss = matches!(slot, Slot::Ready(None))
-                && now.saturating_duration_since(*filled) >= MISS_TTL;
-            if !stale_miss {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.used = self.clock;
+            let stale_miss = matches!(entry.slot, Slot::Ready(None))
+                && now.saturating_duration_since(entry.filled) >= MISS_TTL;
+            if entry.in_flight || !stale_miss {
                 return false;
             }
-            *slot = Slot::Pending;
-            *filled = now;
+            entry.in_flight = true;
             return true;
         }
-        self.entries
-            .insert(key.clone(), (Slot::Pending, self.clock, now));
+        let entry = Entry {
+            slot: Slot::Pending,
+            used: self.clock,
+            filled: now,
+            in_flight: true,
+        };
+        self.entries.insert(key.clone(), entry);
         self.evict();
         true
     }
@@ -67,8 +81,13 @@ impl<K: Eq + Hash + Clone, T> IconCache<K, T> {
     /// never requested) are stored too.
     pub fn finish(&mut self, key: K, value: Option<T>, now: Instant) {
         self.clock += 1;
-        self.entries
-            .insert(key, (Slot::Ready(value), self.clock, now));
+        let entry = Entry {
+            slot: Slot::Ready(value),
+            used: self.clock,
+            filled: now,
+            in_flight: false,
+        };
+        self.entries.insert(key, entry);
         self.evict();
     }
 
@@ -82,8 +101,8 @@ impl<K: Eq + Hash + Clone, T> IconCache<K, T> {
             let oldest = self
                 .entries
                 .iter()
-                .filter(|(_, (slot, _, _))| !matches!(slot, Slot::Pending))
-                .min_by_key(|(_, (_, used, _))| *used)
+                .filter(|(_, e)| !e.in_flight)
+                .min_by_key(|(_, e)| e.used)
                 .map(|(key, _)| key.clone());
             match oldest {
                 Some(key) => {
@@ -120,8 +139,26 @@ mod tests {
         let later = t0 + MISS_TTL * 2;
         assert!(!cache.request(&"b", later));
         assert!(cache.request(&"a", later));
-        assert_eq!(cache.get(&"a"), Some(&Slot::Pending));
+        assert_eq!(
+            cache.get(&"a"),
+            Some(&Slot::Ready(None)),
+            "the miss stays visible meanwhile"
+        );
+        assert!(!cache.request(&"a", later), "already in flight");
+        cache.finish("a", None, later);
         assert!(!cache.request(&"a", later));
+    }
+
+    #[test]
+    fn in_flight_rechecks_survive_eviction() {
+        let t0 = Instant::now();
+        let mut cache = IconCache::<u32, u32>::new(1);
+        cache.request(&0, t0);
+        cache.finish(0, None, t0);
+        assert!(cache.request(&0, t0 + MISS_TTL));
+        cache.finish(1, Some(1), t0);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&0), Some(&Slot::Ready(None)));
     }
 
     #[test]

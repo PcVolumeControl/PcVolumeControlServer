@@ -27,10 +27,10 @@ pub fn color_index(name: &str) -> usize {
     hash(name) as usize % COLOR_COUNT
 }
 
-/// Background and letter colours from the theme's palette; the letter
-/// colour is the palette's readable text colour for that background, in
-/// light and dark themes alike.
-pub fn colors(theme: &Theme, name: &str) -> Pair {
+/// Background and letter colours number `index` (see [`color_index`]) from
+/// the theme's palette; the letter colour is the palette's readable text
+/// colour for that background, in light and dark themes alike.
+pub fn colors(theme: &Theme, index: usize) -> Pair {
     let p = theme.extended_palette();
     [
         p.primary.weak,
@@ -38,7 +38,7 @@ pub fn colors(theme: &Theme, name: &str) -> Pair {
         p.warning.weak,
         p.danger.weak,
         p.secondary.base,
-    ][color_index(name)]
+    ][index % COLOR_COUNT]
 }
 
 #[cfg(test)]
@@ -75,9 +75,10 @@ mod tests {
         // The names spread over more than one colour.
         assert!(indices.iter().any(|&i| i != indices[0]));
         for theme in [Theme::Light, Theme::Dark] {
-            let pair = colors(&theme, "Firefox");
-            assert_eq!(pair, colors(&theme, "Firefox"));
-            assert_ne!(pair.color, pair.text);
+            for index in 0..COLOR_COUNT {
+                let pair = colors(&theme, index);
+                assert_ne!(pair.color, pair.text);
+            }
         }
     }
 }

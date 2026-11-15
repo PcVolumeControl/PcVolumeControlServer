@@ -169,6 +169,15 @@ fn mixer_rows_show_icon_fallback_and_placeholder() {
     // The master row has no icon.
     let master = ui.find("Master").unwrap().bounds();
     assert!(master.y < icon.y);
+
+    // A new scale factor keeps the found icon up while the sharper one is
+    // looked up; the miss stays a letter tile.
+    drop(ui);
+    let id = h.app.window.unwrap();
+    h.run(vec![Message::ScaleFactor(id, 2.0)]);
+    let mut ui = simulator(h.app.mixer_view());
+    ui.find(icon_id("image", firefox)).unwrap();
+    ui.find(icon_id("pending", spotify)).unwrap();
 }
 
 #[test]

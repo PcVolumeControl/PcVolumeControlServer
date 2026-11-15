@@ -10,7 +10,7 @@ use pcvc_audio::{Device, DeviceInfo, Session};
 use pcvc_protocol::Command;
 
 use super::{App, Message};
-use crate::app_icons::{IconKey, Slot, fallback};
+use crate::app_icons::{Slot, fallback};
 use crate::mixer::{Target, control};
 use crate::style::{self, Button};
 
@@ -21,6 +21,25 @@ pub enum MixerMessage {
     Release(Target),
     ToggleMute(Target),
     Tick,
+}
+
+/// Gives an icon tile an id the view tests can find it by.
+#[cfg(test)]
+fn tagged<'a>(
+    tile: container::Container<'a, Message>,
+    kind: &str,
+    session: &Session,
+) -> container::Container<'a, Message> {
+    tile.id(format!("app-icon-{kind}:{}", session.id))
+}
+
+#[cfg(not(test))]
+fn tagged<'a>(
+    tile: container::Container<'a, Message>,
+    _: &str,
+    _: &Session,
+) -> container::Container<'a, Message> {
+    tile
 }
 
 /// A pick-list entry for a playback device.
@@ -219,39 +238,39 @@ impl App {
     /// none, and an empty tile of the same size while it is looked up.
     fn app_icon(&self, session: &Session) -> Element<'_, Message> {
         let size = style::APP_ICON;
-        let slot = self
-            .icon_size()
-            .and_then(|px| self.icons.get(&IconKey::new(session, px)));
-        let id = |kind: &str| format!("app-icon-{kind}:{}", session.id);
-        match slot {
-            Some(Slot::Ready(Some(handle))) => container(
-                image(handle.clone())
+        match self.session_icon(&session.id) {
+            Slot::Ready(Some(handle)) => tagged(
+                container(
+                    image(handle.clone())
+                        .width(size)
+                        .height(size)
+                        .border_radius(style::APP_ICON_RADIUS),
+                ),
+                "image",
+                session,
+            )
+            .into(),
+            Slot::Ready(None) => {
+                let index = fallback::color_index(&session.name);
+                let letter = text(fallback::initial(&session.name))
+                    .size(style::APP_ICON_LETTER)
+                    .style(move |theme| text::Style {
+                        color: Some(fallback::colors(theme, index).text),
+                    });
+                let tile = container(letter)
+                    .center(size)
+                    .style(move |theme| style::icon_tile(fallback::colors(theme, index).color));
+                tagged(tile, "fallback", session).into()
+            }
+            Slot::Pending => tagged(
+                container(Space::new())
                     .width(size)
                     .height(size)
-                    .border_radius(style::APP_ICON_RADIUS),
+                    .style(style::icon_placeholder),
+                "pending",
+                session,
             )
-            .id(id("image"))
             .into(),
-            Some(Slot::Ready(None)) => {
-                let (letter, tile) = (session.name.clone(), session.name.clone());
-                container(
-                    text(fallback::initial(&session.name))
-                        .size(style::APP_ICON_LETTER)
-                        .style(move |theme| text::Style {
-                            color: Some(fallback::colors(theme, &letter).text),
-                        }),
-                )
-                .id(id("fallback"))
-                .center(size)
-                .style(move |theme| style::icon_tile(fallback::colors(theme, &tile).color))
-                .into()
-            }
-            _ => container(Space::new())
-                .id(id("pending"))
-                .width(size)
-                .height(size)
-                .style(style::icon_placeholder)
-                .into(),
         }
     }
 

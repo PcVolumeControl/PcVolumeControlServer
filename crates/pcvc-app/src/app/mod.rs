@@ -6,6 +6,7 @@ mod status;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use pcvc_audio::{AudioBackend, AudioState};
 use pcvc_protocol::Command;
 use pcvc_server::{ClientInfo, MdnsStatus};
 
-use crate::app_icons::{IconCache, IconKey, IconWorker, Resolver};
+use crate::app_icons::{IconCache, IconKey, IconWorker, Resolver, Slot};
 use crate::audio::{self, CommandSender};
 use crate::config::{Config, WindowSize};
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
@@ -132,6 +133,9 @@ pub struct App {
     mixer: Mixer,
     icon_worker: IconWorker,
     icons: IconCache<IconKey, image::Handle>,
+    /// The icon key of each shown session (by session id), and the key it
+    /// had at the previous icon size, shown until the new one resolves.
+    session_icons: HashMap<String, (IconKey, Option<IconKey>)>,
     /// The window's scale factor, for rendering icons at physical size;
     /// unknown until a window has reported it.
     scale_factor: Option<f32>,
@@ -192,6 +196,7 @@ impl App {
             mixer: Mixer::default(),
             icon_worker,
             icons: IconCache::new(ICON_CACHE_CAPACITY),
+            session_icons: HashMap::new(),
             scale_factor: None,
             mixer_timer: None,
             local_ips: Vec::new(),
@@ -425,11 +430,34 @@ impl App {
             return;
         };
         let now = std::time::Instant::now();
+        let mut session_icons = HashMap::with_capacity(device.sessions.len());
         for session in &device.sessions {
             let key = IconKey::new(session, size);
-            if self.icons.request(&key, now) {
-                self.icon_worker.request(key);
+            if self.icons.request(&key, now) && !self.icon_worker.request(key.clone()) {
+                self.icons.finish(key.clone(), None, now);
             }
+            let previous = self
+                .session_icons
+                .remove(&session.id)
+                .and_then(|(old, older)| if old == key { older } else { Some(old) });
+            session_icons.insert(session.id.clone(), (key, previous));
+        }
+        self.session_icons = session_icons;
+    }
+
+    /// What to show for a session's icon: its icon (possibly at the
+    /// previous size while the current one is looked up), `Ready(None)`
+    /// for the fallback tile, or `Pending`.
+    fn session_icon(&self, session_id: &str) -> Slot<&image::Handle> {
+        let Some((key, previous)) = self.session_icons.get(session_id) else {
+            return Slot::Pending;
+        };
+        match self.icons.get(key) {
+            Some(Slot::Ready(icon)) => Slot::Ready(icon.as_ref()),
+            _ => match previous.as_ref().and_then(|p| self.icons.get(p)) {
+                Some(Slot::Ready(Some(icon))) => Slot::Ready(Some(icon)),
+                _ => Slot::Pending,
+            },
         }
     }
 
