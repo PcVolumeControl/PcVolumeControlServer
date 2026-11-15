@@ -5,8 +5,9 @@ in Rust. It owns the audio stack, serves the iOS and Android apps over TCP
 (protocol v7, compatible with the existing apps), and advertises itself over
 mDNS. It replaces the C# `PcVolumeControlWindows` server. The server library
 also implements the optional "v8" extensions (app icons), which keep the wire
-version at 7 so the shipped apps are unaffected; the mock server below serves
-them for client development.
+version at 7 so the shipped apps are unaffected; the desktop app serves real
+application icons with them, and the mock server below serves demo icons for
+client development.
 
 Status: the protocol, server, desktop app, the Linux (PulseAudio) backend and
 a Windows (Core Audio) backend are in place. The Windows backend and the
@@ -120,8 +121,8 @@ extension. Without a tray the window opens at launch and closing it quits.
 Each row in the Mixer shows the application's icon. Lookups run in the
 background and only while the window is open; a row shows an empty tile
 until its lookup finishes, and a tile with the first letter of the
-application's name when nothing was found. Icons are only shown locally;
-the phones get the same state as before. Nothing is fetched from the
+application's name when nothing was found. Phone clients that speak the
+icon extension get the same icons (see below). Nothing is fetched from the
 network.
 
 On Linux the app tries, in order:
@@ -154,6 +155,30 @@ On Windows the icon comes from the session's executable: its own icon at the
 needed size, else the icon Explorer shows for it. Packaged (Store) apps keep
 their logos outside the executable, so they get a generic program icon or a
 letter tile. Sessions whose process cannot be opened get a letter tile.
+
+### Icons for phone clients
+
+The server offers the same icons to clients that speak the v8 icon
+extension ([docs/PROTOCOL.md](docs/PROTOCOL.md)); the shipped apps ignore
+it. A session first appears without an `iconId` and gains one in a later
+state once its lookup finishes, whether or not the window is open. The id is
+the first 32 hex digits of the SHA-256 of the icon drawn at 64 px, so it
+stays the same across restarts and applications with the same icon share
+it. Icons are sent at the size asked for: SVG icons are drawn at that size,
+raster icons are scaled but never beyond twice their own size, and the
+reply's `size` gives the edge actually sent. On Windows the shell scales an
+executable's icons itself, so that limit only applies to its fallback icon.
+An icon that changes while the app runs (a new icon theme) gets a new id
+the next time a phone asks for a size not sent before, or after a restart.
+
+To serve plain v7 without icons, add this line to `config.toml` and restart
+the app:
+
+```toml
+serve_icons = false
+```
+
+It has no control in the Settings page, and saving settings there keeps it.
 
 ## Try it with a phone
 

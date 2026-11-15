@@ -52,6 +52,15 @@ results by hand. The key holds everything the lookup reads (name, hints,
 pixel size, and on Linux the process id), so equal keys always resolve
 alike.
 
+The same resolver instance backs `icon_provider::ResolverIcons`, the
+server's `IconProvider` for phone clients, so both share its desktop entry
+index and icon theme listings. `main` builds the provider (unless
+`serve_icons = false` in the config, or there is no resolver for the
+platform) and hands it to `ServerController`, which gives it to every
+server start and restart. The provider resolves each application once at
+64 px on its own thread, names the icon by the SHA-256 of those pixels,
+and renders other sizes on request; see the module documentation.
+
 ## Mixer
 
 Slider drags send at most one command per 30 ms per control, always send
@@ -71,3 +80,4 @@ the user's value until the backend reports it back or 300 ms pass
 | `style.rs` | Spacing, sizes and widget styles over iced's built-in themes |
 | `icons.rs` | Embedded SVG icons, rasterised with resvg |
 | `app_icons/` | Application icons for the Mixer: lookup per platform, rasterising, the result cache and the fallback tile |
+| `icon_provider/` | The same icons for phone clients: the server's `IconProvider`, content-derived ids, rendering per requested size |
