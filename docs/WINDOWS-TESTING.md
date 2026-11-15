@@ -124,7 +124,8 @@ cargo run -p pcvolumecontrol -- --show
 ```
 
 The log has one `application icon lookup` line per application, with the
-executable path and whether an icon was found.
+executable path and where the icon came from (`Executable`, `ShellLocation`
+or `Shell`), or `None` when there is none.
 
 - [ ] Each application row starts with that program's icon (browser, media
       player, Discord, a game), drawn crisply and with transparent corners,

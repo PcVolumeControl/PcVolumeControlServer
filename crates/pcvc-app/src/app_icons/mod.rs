@@ -11,7 +11,10 @@ mod cache;
 pub mod fallback;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows")),
+    allow(dead_code, unused_imports)
+)]
 mod raster;
 #[cfg(any(target_os = "windows", test))]
 mod win_pixels;
@@ -32,6 +35,8 @@ use crate::inbox::{Inbound, Inbox};
 /// Everything a lookup depends on, so equal keys always resolve alike.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IconKey {
+    /// The session name, where the platform's lookup uses it (Linux);
+    /// empty elsewhere, so renamed sessions of one program share a key.
     pub name: Arc<str>,
     pub icon_name: Option<Arc<str>>,
     pub app_id: Option<Arc<str>>,
@@ -45,8 +50,13 @@ pub struct IconKey {
 
 impl IconKey {
     pub fn new(session: &Session, size: u32) -> Self {
+        let name = if cfg!(target_os = "linux") {
+            session.name.as_str()
+        } else {
+            ""
+        };
         Self {
-            name: Arc::from(session.name.as_str()),
+            name: Arc::from(name),
             icon_name: session.app.icon_name.clone(),
             app_id: session.app.app_id.clone(),
             process_binary: session.app.process_binary.clone(),

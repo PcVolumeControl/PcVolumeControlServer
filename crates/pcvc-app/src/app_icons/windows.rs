@@ -1,11 +1,12 @@
 //! The shell icon of a session's executable on Windows.
 //!
 //! The icon comes from the executable's own resources at the requested
-//! size (`SHDefExtractIconW`), else from the shell (`SHGetFileInfoW`, the
-//! system large icon size, also the generic program icon for executables
-//! without one). Packaged (UWP/MSIX) apps keep their logos in the package
-//! rather than the executable, and their install folder is not readable,
-//! so they get the generic icon or none.
+//! size (`SHDefExtractIconW`), else from the icon file the shell names for
+//! it at that size (the generic program icon for an executable without
+//! one), else from the shell at the system large icon size
+//! (`SHGetFileInfoW`). Packaged (UWP/MSIX) apps keep their logos in the
+//! package rather than the executable, and their install folder is not
+//! readable, so they get the generic icon or none.
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -15,9 +16,11 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
     DeleteObject, GetDIBits, GetObjectW, HBITMAP, HDC,
 };
-use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows_sys::Win32::System::Com::{
+    COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
+};
 use windows_sys::Win32::UI::Shell::{
-    SHDefExtractIconW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW,
+    SHDefExtractIconW, SHFILEINFOW, SHGFI_ICON, SHGFI_ICONLOCATION, SHGFI_LARGEICON, SHGetFileInfoW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
@@ -31,19 +34,101 @@ pub struct WindowsResolver;
 
 impl Resolver for WindowsResolver {
     fn resolve(&self, key: &IconKey) -> Option<Rgba> {
-        let path = key.process_binary.as_deref()?;
+        let Some(path) = key.process_binary.as_deref() else {
+            tracing::debug!("no executable path for an application icon");
+            return None;
+        };
         COM.with(|_| ());
-        let icon = extract(path, key.size)?;
-        let rgba = icon_rgba(&icon)?;
-        let fitted = raster::fit_rgba(&rgba, key.size);
+        let wide_path = wide(path);
+        let found = [Source::Executable, Source::ShellLocation, Source::Shell]
+            .into_iter()
+            .find_map(|source| {
+                let icon = source.extract(&wide_path, key.size)?;
+                let rgba = icon_rgba(&icon)?;
+                Some((source, raster::fit_rgba(&rgba, key.size)?))
+            });
         tracing::debug!(
-            app = %key.name,
             path,
-            found = fitted.is_some(),
+            source = ?found.as_ref().map(|(source, _)| source),
+            size = key.size,
             "application icon lookup"
         );
-        fitted
+        found.map(|(_, rgba)| rgba)
     }
+}
+
+/// Where an icon came from, tried in this order.
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    /// The executable's own icon resource, at the requested size.
+    Executable,
+    /// The file and index the shell names for the executable's icon (the
+    /// generic program icon for one without its own), at the requested
+    /// size.
+    ShellLocation,
+    /// The shell's icon at the system large icon size.
+    Shell,
+}
+
+impl Source {
+    fn extract(self, path: &[u16], size: u32) -> Option<OwnedIcon> {
+        match self {
+            Source::Executable => extract_at(path, 0, size),
+            Source::ShellLocation => {
+                let mut info = SHFILEINFOW::default();
+                // SAFETY: `path` is nul-terminated, `info` is writable and
+                // its size is passed.
+                let ok = unsafe {
+                    SHGetFileInfoW(
+                        path.as_ptr(),
+                        0,
+                        &mut info,
+                        size_of::<SHFILEINFOW>() as u32,
+                        SHGFI_ICONLOCATION,
+                    )
+                };
+                let len = info.szDisplayName.iter().position(|&c| c == 0)?;
+                if ok == 0 || len == 0 {
+                    return None;
+                }
+                extract_at(&info.szDisplayName[..=len], info.iIcon, size)
+            }
+            Source::Shell => {
+                let mut info = SHFILEINFOW::default();
+                // SAFETY: as above.
+                let ok = unsafe {
+                    SHGetFileInfoW(
+                        path.as_ptr(),
+                        0,
+                        &mut info,
+                        size_of::<SHFILEINFOW>() as u32,
+                        SHGFI_ICON | SHGFI_LARGEICON,
+                    )
+                };
+                (ok != 0 && !info.hIcon.is_null()).then_some(OwnedIcon(info.hIcon))
+            }
+        }
+    }
+}
+
+/// Icon `index` (a negative index is a resource id) of `file`, a
+/// nul-terminated path, at `size` pixels.
+fn extract_at(file: &[u16], index: i32, size: u32) -> Option<OwnedIcon> {
+    let mut large: HICON = null_mut();
+    // SAFETY: `file` is nul-terminated and outlives the call; the small
+    // icon is not requested. The low word of the last argument is the large
+    // icon size.
+    let hr = unsafe {
+        SHDefExtractIconW(
+            file.as_ptr(),
+            index,
+            0,
+            &mut large,
+            null_mut(),
+            size.min(256),
+        )
+    };
+    (hr == 0 && !large.is_null()).then_some(OwnedIcon(large))
 }
 
 /// COM initialised on the icon thread, as the shell functions require.
@@ -53,7 +138,14 @@ impl ComGuard {
     fn init() -> Self {
         // SAFETY: no pointer arguments; balanced by CoUninitialize in Drop
         // when it succeeds (S_OK or S_FALSE).
-        let hr = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) };
+        // The icon thread does not pump messages, so it joins the
+        // multithreaded apartment rather than creating a single-threaded one.
+        let hr = unsafe {
+            CoInitializeEx(
+                null(),
+                (COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            )
+        };
         Self(hr >= 0)
     }
 }
@@ -105,34 +197,6 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// The executable's icon at `size` pixels, else the shell's large icon.
-fn extract(path: &str, size: u32) -> Option<OwnedIcon> {
-    let path = wide(path);
-    let mut large: HICON = null_mut();
-    // SAFETY: `path` is nul-terminated and outlives the call; the small
-    // icon is not requested. The low word of the last argument is the large
-    // icon size.
-    let hr =
-        unsafe { SHDefExtractIconW(path.as_ptr(), 0, 0, &mut large, null_mut(), size.min(256)) };
-    if hr == 0 && !large.is_null() {
-        return Some(OwnedIcon(large));
-    }
-    // SAFETY: SHFILEINFOW is plain data, valid when zeroed.
-    let mut info: SHFILEINFOW = unsafe { std::mem::zeroed() };
-    // SAFETY: `path` is nul-terminated, `info` is writable and its size is
-    // passed.
-    let found = unsafe {
-        SHGetFileInfoW(
-            path.as_ptr(),
-            0,
-            &mut info,
-            size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_LARGEICON,
-        )
-    };
-    (found != 0 && !info.hIcon.is_null()).then_some(OwnedIcon(info.hIcon))
-}
-
 /// The icon's pixels as straight RGBA.
 fn icon_rgba(icon: &OwnedIcon) -> Option<Rgba> {
     let mut info = ICONINFO::default();
@@ -146,8 +210,7 @@ fn icon_rgba(icon: &OwnedIcon) -> Option<Rgba> {
     if color.0.is_null() {
         return None;
     }
-    // SAFETY: BITMAP is plain data, valid when zeroed.
-    let mut bitmap: BITMAP = unsafe { std::mem::zeroed() };
+    let mut bitmap = BITMAP::default();
     // SAFETY: `bitmap` is writable for the size passed.
     let read = unsafe {
         GetObjectW(
@@ -166,10 +229,12 @@ fn icon_rgba(icon: &OwnedIcon) -> Option<Rgba> {
         return None;
     }
     let colors = dib_rows(&dc, &color, width, height)?;
+    // Without alpha the mask holds the transparency, so an icon whose mask
+    // cannot be read is not used rather than drawn on an opaque square.
     let mask_rows = if win_pixels::has_alpha(&colors) || mask.0.is_null() {
         None
     } else {
-        dib_rows(&dc, &mask, width, height)
+        Some(dib_rows(&dc, &mask, width, height)?)
     };
     Some(Rgba {
         pixels: win_pixels::icon_pixels(&colors, mask_rows.as_deref()),
