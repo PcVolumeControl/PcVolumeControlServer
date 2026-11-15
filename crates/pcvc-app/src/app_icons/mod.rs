@@ -10,7 +10,7 @@
 mod cache;
 pub mod fallback;
 #[cfg(target_os = "linux")]
-mod linux;
+pub mod linux;
 #[cfg_attr(
     not(any(target_os = "linux", target_os = "windows")),
     allow(dead_code, unused_imports)

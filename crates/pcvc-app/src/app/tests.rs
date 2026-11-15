@@ -86,7 +86,7 @@ impl Harness {
 
     /// Delivers an icon lookup result as the icon worker would.
     fn resolve_icon(&mut self, session: &pcvc_audio::Session, icon: Option<image::Handle>) {
-        let key = IconKey::new(session, style::APP_ICON as u32);
+        let key = IconKey::new(session, self.app.icon_size().unwrap());
         self.run(vec![Message::Inbound(Inbound::AppIcon(Resolved {
             key,
             icon,
@@ -198,11 +198,7 @@ fn mixer_long_names_keep_the_columns() {
     let long_session = sessions.iter().find(|s| s.name == long).unwrap();
     h.resolve_icon(long_session, None);
 
-    let mut ui = Simulator::with_size(
-        iced::Settings::default(),
-        Size::new(560.0, 480.0),
-        h.app.mixer_view(),
-    );
+    let mut ui = Simulator::with_size(iced::Settings::default(), MIN_SIZE, h.app.mixer_view());
     let tile = ui.find(icon_id("fallback", long_session)).unwrap().bounds();
     assert_eq!(tile.height, style::APP_ICON);
     // The percentages stay in one column: the long name pushes nothing.
@@ -210,12 +206,56 @@ fn mixer_long_names_keep_the_columns() {
     let spotify_percent = ui.find("65%").unwrap().bounds();
     assert_eq!(long_percent.x, spotify_percent.x);
     assert_eq!(long_percent.width, spotify_percent.width);
-    let name = ui.find(long).unwrap();
-    let visible = name.visible_bounds().unwrap();
-    assert!(
-        visible.x + visible.width <= long_percent.x,
-        "name is clipped before the slider"
-    );
+    // The name is shortened with an ellipsis and leaves room for the slider.
+    let (name, bounds) = ui
+        .find(|c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text {
+                content, bounds, ..
+            } if content.starts_with("A very") => Some((content.to_owned(), bounds)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(name.ends_with('\u{2026}'), "{name:?}");
+    assert!(bounds.x + bounds.width + 100.0 < long_percent.x);
+    let spotify = ui.find("Spotify").unwrap().bounds();
+    assert_eq!(bounds.x, spotify.x);
+}
+
+#[test]
+fn mixer_columns_line_up() {
+    let mut h = Harness::new();
+    h.open_window();
+    for size in [MIN_SIZE, Size::new(1200.0, 700.0)] {
+        let mut ui = Simulator::with_size(iced::Settings::default(), size, h.app.mixer_view());
+        let output = ui.find("Output device").unwrap().bounds();
+        let master = ui.find("Master").unwrap().bounds();
+        let master_percent = ui.find("80%").unwrap().bounds();
+        let session_percent = ui.find("65%").unwrap().bounds();
+        let spotify = ui.find("Spotify").unwrap().bounds();
+        assert_eq!(output.x, master.x);
+        assert_eq!(master_percent.x, session_percent.x);
+        assert_eq!(master_percent.width, session_percent.width);
+        // Icons start where the master label does.
+        let icon = ui
+            .find(icon_id("pending", &h.sessions()[1]))
+            .unwrap()
+            .bounds();
+        assert_eq!(icon.x, master.x);
+        assert!(spotify.x > icon.x + style::APP_ICON);
+    }
+}
+
+#[test]
+fn mixer_session_mute_shows_unmute() {
+    let mut h = Harness::new();
+    let spotify = h.sessions()[1].id.clone();
+    h.run(vec![Message::Mixer(MixerMessage::ToggleMute(
+        Target::Session(spotify),
+    ))]);
+    let mut ui = simulator(h.app.mixer_view());
+    // One session offers Unmute, the master and the others Mute.
+    ui.find("Unmute").unwrap();
+    ui.find("Mute").unwrap();
 }
 
 #[test]
@@ -342,8 +382,20 @@ fn render_pages() {
             std::fs::remove_file(&path).unwrap();
         }
     }
+    // A device and a session with names too long for their columns, and a
+    // muted session.
+    let mut device = h.backend.snapshot().unwrap().default_device.unwrap();
+    device.name = "Arctis Nova Pro Wireless Analog Stereo".into();
+    device.sessions[2].muted = true;
+    device.sessions.push(pcvc_audio::Session::new(
+        MockBackend::session_id(&device.id, "cpal"),
+        "cpal-playback-660845 with a much longer stream name",
+        70.0,
+    ));
+    h.backend.add_device(device).unwrap();
+    h.refresh_audio();
     let id = h.open_window();
-    // One icon found, two misses (fallback tiles) and one still pending.
+    // One icon found, three misses (fallback tiles) and one still pending.
     let sessions = h.sessions();
     let app = icons::rasterize(icons::APP, style::APP_ICON as u32).unwrap();
     h.resolve_icon(
@@ -352,16 +404,81 @@ fn render_pages() {
     );
     h.resolve_icon(&sessions[1], None);
     h.resolve_icon(&sessions[2], None);
+    h.resolve_icon(&sessions[4], None);
+    let default = WindowSize::default();
+    let sizes = [
+        ("", Size::new(default.width, default.height)),
+        ("-min", MIN_SIZE),
+    ];
     for page in [Page::Mixer, Page::Status, Page::Settings] {
         h.app.page = page;
-        for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
-            let mut ui = iced_test::Simulator::with_size(
-                iced::Settings::default(),
-                Size::new(720.0, 560.0),
-                h.app.view(id),
-            );
-            let path = format!("{dir}/{}-{name}.png", format!("{page:?}").to_lowercase());
-            ui.snapshot(&theme).unwrap().matches_image(&path).unwrap();
+        for (suffix, size) in sizes {
+            for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+                let mut ui = iced_test::Simulator::with_size(
+                    iced::Settings::default(),
+                    size,
+                    h.app.view(id),
+                );
+                let page = format!("{page:?}").to_lowercase();
+                let path = format!("{dir}/{page}-{name}{suffix}.png");
+                ui.snapshot(&theme).unwrap().matches_image(&path).unwrap();
+            }
         }
+    }
+}
+
+/// Renders the window's Mixer page for the real sound server's current
+/// streams, with icons resolved from this machine's desktop entries and
+/// themes, into `PCVC_SNAPSHOT_DIR` (`real-mixer-*.png`), and prints what
+/// each stream resolved to. Only reads: no audio state is changed. Run with
+/// `--ignored --nocapture`.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "reads the real sound server and icon themes"]
+fn render_real_mixer() {
+    use crate::app_icons::linux::{Dirs, LinuxResolver};
+
+    let Ok(dir) = std::env::var("PCVC_SNAPSHOT_DIR") else {
+        return;
+    };
+    let state = pcvc_audio::PulseBackend::new().unwrap().snapshot().unwrap();
+    let mut h = Harness::new();
+    h.run(vec![Message::Inbound(Inbound::Audio(state.clone()))]);
+    let id = h.open_window();
+    // Renders are drawn at twice the logical size, so icons are too.
+    h.run(vec![Message::ScaleFactor(id, 2.0)]);
+    let resolver = LinuxResolver::new(Dirs::from_env());
+    for session in state.default_device.iter().flat_map(|d| &d.sessions) {
+        let key = IconKey::new(session, h.app.icon_size().unwrap());
+        // A panicking lookup is a miss, as in the app's icon worker.
+        let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| resolver.find(&key)))
+            .ok()
+            .flatten();
+        let outcome = match &found {
+            Some((path, _, via)) => format!("{via:?} {}", path.display()),
+            None => "letter tile".to_owned(),
+        };
+        println!("{:?} {:?} -> {outcome}", session.name, session.app);
+        let icon = found
+            .map(|(_, f, _)| image::Handle::from_rgba(f.rgba.width, f.rgba.height, f.rgba.pixels));
+        h.resolve_icon(session, icon);
+    }
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.starts_with("real-mixer-") && name.ends_with(".png") {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+    h.app.page = Page::Mixer;
+    let default = WindowSize::default();
+    for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+        let mut ui = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            Size::new(default.width, default.height),
+            h.app.view(id),
+        );
+        let path = format!("{dir}/real-mixer-{name}.png");
+        assert!(ui.snapshot(&theme).unwrap().matches_image(&path).unwrap());
     }
 }
