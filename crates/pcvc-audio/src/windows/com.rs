@@ -11,7 +11,7 @@ use std::iter;
 use std::marker::PhantomData;
 
 use ::windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use ::windows::Win32::Foundation::ERROR_NOT_FOUND;
+use ::windows::Win32::Foundation::{ERROR_NOT_FOUND, HANDLE, WAIT_OBJECT_0};
 use ::windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use ::windows::Win32::Media::Audio::{
     AudioSessionStateExpired, DEVICE_STATE_ACTIVE, IAudioSessionControl2, IAudioSessionManager2,
@@ -25,16 +25,13 @@ use ::windows::Win32::System::Com::{
     CoUninitialize, STGM_READ,
 };
 use ::windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, WaitForSingleObject,
 };
 use ::windows::Win32::UI::Shell::SHLoadIndirectString;
 use ::windows::core::{GUID, Interface, Owned, PCWSTR, PWSTR, Result};
 
 use super::logic;
-
-/// Event context passed with this backend's own volume and mute changes, so
-/// that the callbacks they trigger can be told apart.
-pub(super) const EVENT_CONTEXT: GUID = GUID::from_u128(0x5b1f6c2e_8a43_4d0b_9e7a_3c2d1f0e6a91);
 
 /// Membership of the calling thread in the multithreaded apartment, left on
 /// drop. Every COM object the thread holds must be released first.
@@ -171,16 +168,15 @@ pub(super) fn set_master(
     volume: &IAudioEndpointVolume,
     percent: Option<f32>,
     muted: Option<bool>,
+    context: &GUID,
 ) -> Result<()> {
     if let Some(muted) = muted {
-        // SAFETY: the event context points to a static GUID.
-        unsafe { volume.SetMute(muted, &EVENT_CONTEXT) }?;
+        // SAFETY: `context` is a valid GUID reference for the call.
+        unsafe { volume.SetMute(muted, context) }?;
     }
     if let Some(percent) = percent {
-        // SAFETY: the event context points to a static GUID.
-        unsafe {
-            volume.SetMasterVolumeLevelScalar(logic::percent_to_scalar(percent), &EVENT_CONTEXT)
-        }?;
+        // SAFETY: `context` is a valid GUID reference for the call.
+        unsafe { volume.SetMasterVolumeLevelScalar(logic::percent_to_scalar(percent), context) }?;
     }
     Ok(())
 }
@@ -259,11 +255,12 @@ pub(super) fn set_session_volume(
     volume: &ISimpleAudioVolume,
     percent: f32,
     muted: bool,
+    context: &GUID,
 ) -> Result<()> {
-    // SAFETY: the event context points to a static GUID.
-    unsafe { volume.SetMasterVolume(logic::percent_to_scalar(percent), &EVENT_CONTEXT) }?;
-    // SAFETY: the event context points to a static GUID.
-    unsafe { volume.SetMute(muted, &EVENT_CONTEXT) }
+    // SAFETY: `context` is a valid GUID reference for the call.
+    unsafe { volume.SetMasterVolume(logic::percent_to_scalar(percent), context) }?;
+    // SAFETY: `context` is a valid GUID reference for the call.
+    unsafe { volume.SetMute(muted, context) }
 }
 
 /// Resolves an indirect string such as `@%SystemRoot%\System32\x.dll,-202`.
@@ -277,19 +274,47 @@ pub(super) fn load_indirect_string(source: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..end]))
 }
 
-/// The image file stem of a process (`chrome` for `...\chrome.exe`).
-pub(super) fn process_image_stem(pid: u32) -> Option<String> {
-    // SAFETY: plain Win32 call with no pointer arguments.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    // SAFETY: OpenProcess returned a fresh handle that nothing else closes.
-    let handle = unsafe { Owned::new(handle) };
+/// A handle to a process that can tell whether it has exited, which a process
+/// id cannot once the id is reused.
+pub(super) struct Process(Owned<HANDLE>);
+
+impl Process {
+    /// `None` if the process has already gone or may not be opened.
+    pub fn open(pid: u32) -> Option<Self> {
+        // SAFETY: plain Win32 call with no pointer arguments.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+        }
+        .ok()?;
+        // SAFETY: OpenProcess returned a fresh handle that nothing else closes.
+        Some(Self(unsafe { Owned::new(handle) }))
+    }
+
+    pub fn has_exited(&self) -> bool {
+        // SAFETY: the handle is open and has SYNCHRONIZE access; a zero
+        // timeout never blocks. A process handle is signalled once it exits.
+        let event = unsafe { WaitForSingleObject(*self.0, 0) };
+        event == WAIT_OBJECT_0
+    }
+
+    /// The image file stem (`chrome` for `...\chrome.exe`).
+    pub fn image_stem(&self) -> Option<String> {
+        image_stem(*self.0)
+    }
+}
+
+fn image_stem(handle: HANDLE) -> Option<String> {
     let mut buf = vec![0u16; 1024];
     let mut len = buf.len() as u32;
     // SAFETY: `buf` is writable for `len` u16s; on success `len` holds the
     // number of characters written, excluding the terminator.
     unsafe {
         QueryFullProcessImageNameW(
-            *handle,
+            handle,
             PROCESS_NAME_WIN32,
             PWSTR(buf.as_mut_ptr()),
             &mut len,

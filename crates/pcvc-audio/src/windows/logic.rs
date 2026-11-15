@@ -1,7 +1,6 @@
 //! The Windows backend's decisions that need no Core Audio, kept apart so they
 //! are tested on every platform.
 
-use std::collections::HashSet;
 use std::time::Duration;
 
 use pcvc_protocol::clamp_volume;
@@ -171,20 +170,6 @@ impl Dirty {
         self.session_list |= other.session_list;
         self.session_values |= other.session_values;
     }
-}
-
-/// The ids in `current` that are not in `known`, in `current` order and
-/// without duplicates.
-pub(crate) fn unknown_ids<'a>(
-    known: impl IntoIterator<Item = &'a str>,
-    current: &[String],
-) -> Vec<String> {
-    let mut seen: HashSet<&str> = known.into_iter().collect();
-    current
-        .iter()
-        .filter(|id| seen.insert(id.as_str()))
-        .cloned()
-        .collect()
 }
 
 /// Stable-sorts `items` into the order their ids had in `previous`, with ids
@@ -396,14 +381,6 @@ mod tests {
         }
         dirty.merge(other);
         assert_eq!(dirty, Dirty::all());
-    }
-
-    #[test]
-    fn unknown_ids_in_order_without_duplicates() {
-        let current: Vec<String> = ["d", "c", "a", "d", "e"].map(String::from).to_vec();
-        assert_eq!(unknown_ids(["a", "b", "c"], &current), ["d", "e"]);
-        assert_eq!(unknown_ids([], &current), ["d", "c", "a", "e"]);
-        assert!(unknown_ids(["a"], &[]).is_empty());
     }
 
     #[test]

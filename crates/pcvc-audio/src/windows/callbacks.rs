@@ -25,23 +25,46 @@ use ::windows::Win32::Media::Audio::{
 };
 use ::windows::core::{BOOL, GUID, PCWSTR, Ref, Result, implement};
 
-use super::com::EVENT_CONTEXT;
 use super::logic::{self, Change};
 use super::worker::Msg;
 
 /// Posts messages to the COM thread.
 #[derive(Clone)]
-pub(super) struct Poster(Sender<Msg>);
+pub(super) struct Poster {
+    tx: Sender<Msg>,
+    /// Event context of this backend's own volume and mute changes, unique
+    /// per backend so that another instance's changes are not mistaken for
+    /// its own.
+    context: GUID,
+}
 
 impl Poster {
-    pub fn new(tx: Sender<Msg>) -> Self {
-        Self(tx)
+    pub fn new(tx: Sender<Msg>, context: GUID) -> Self {
+        Self { tx, context }
+    }
+
+    pub fn context(&self) -> &GUID {
+        &self.context
+    }
+
+    fn send(&self, msg: Msg) {
+        // Fails only once the COM thread has exited, when nothing is
+        // listening any more.
+        let _ = self.tx.send(msg);
     }
 
     fn post(&self, change: Change) {
-        // Fails only once the COM thread has exited, when nothing is
-        // listening any more.
-        let _ = self.0.send(Msg::Changed(change));
+        self.send(Msg::Changed(change));
+    }
+
+    /// Whether `context` marks a change this backend made.
+    ///
+    /// # Safety
+    ///
+    /// `context` must be null or point to a GUID valid for the call.
+    unsafe fn is_own(&self, context: *const GUID) -> bool {
+        // SAFETY: per the contract.
+        !context.is_null() && unsafe { *context } == self.context
     }
 }
 
@@ -159,16 +182,6 @@ pub(super) fn register_session_events(
     })
 }
 
-/// Whether `context` is the one this backend passes to its own changes.
-///
-/// # Safety
-///
-/// `context` must be null or point to a GUID valid for the call.
-unsafe fn is_own_change(context: *const GUID) -> bool {
-    // SAFETY: per the contract.
-    !context.is_null() && unsafe { *context } == EVENT_CONTEXT
-}
-
 #[implement(IMMNotificationClient)]
 struct DeviceNotifier {
     poster: Poster,
@@ -240,7 +253,8 @@ impl IAudioEndpointVolumeCallback_Impl for VolumeNotifier_Impl {
     fn OnNotify(&self, data: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> Result<()> {
         // SAFETY: Core Audio passes null or a structure valid for the duration
         // of the callback; only its first field is read.
-        let own = !data.is_null() && unsafe { is_own_change(&raw const (*data).guidEventContext) };
+        let own =
+            !data.is_null() && unsafe { self.poster.is_own(&raw const (*data).guidEventContext) };
         if !own {
             self.poster.post(Change::Master);
         }
@@ -259,7 +273,7 @@ impl IAudioSessionNotification_Impl for SessionCreatedNotifier_Impl {
         // The session enumerator may not list a session reported here, so it
         // is handed over directly.
         if let Ok(session) = new_session.ok() {
-            let _ = self.poster.0.send(Msg::SessionCreated {
+            self.poster.send(Msg::SessionCreated {
                 endpoint_id: self.endpoint_id.clone(),
                 session: MtaSession(session.clone()),
             });
@@ -284,7 +298,7 @@ impl SessionNotifier {
 impl IAudioSessionEvents_Impl for SessionNotifier_Impl {
     fn OnDisplayNameChanged(&self, _name: &PCWSTR, context: *const GUID) -> Result<()> {
         // SAFETY: Core Audio passes null or a GUID valid for the callback.
-        if !unsafe { is_own_change(context) } {
+        if !unsafe { self.poster.is_own(context) } {
             self.poster.post(Change::SessionValues);
         }
         Ok(())
@@ -296,7 +310,7 @@ impl IAudioSessionEvents_Impl for SessionNotifier_Impl {
 
     fn OnSimpleVolumeChanged(&self, _volume: f32, _mute: BOOL, context: *const GUID) -> Result<()> {
         // SAFETY: Core Audio passes null or a GUID valid for the callback.
-        if !unsafe { is_own_change(context) } {
+        if !unsafe { self.poster.is_own(context) } {
             self.poster.post(Change::SessionValues);
         }
         Ok(())

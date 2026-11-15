@@ -5,8 +5,9 @@ in Rust. It owns the audio stack, serves the iOS and Android apps over TCP
 (protocol v7, compatible with the existing apps), and advertises itself over
 mDNS. It replaces the C# `PcVolumeControlWindows` server.
 
-Status: the protocol, server and a mock audio backend are in place. Windows
-(Core Audio) and Linux (PulseAudio) backends and the desktop GUI come next.
+Status: the protocol, server, a mock audio backend and a Windows (Core Audio)
+backend, not yet run on Windows, are in place. The Linux (PulseAudio) backend
+and the desktop GUI come next.
 
 ## Build and test
 

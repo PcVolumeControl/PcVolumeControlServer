@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ::windows::Win32::Media::Audio::Endpoints::{
     IAudioEndpointVolume, IAudioEndpointVolumeCallback,
@@ -14,7 +14,7 @@ use ::windows::Win32::Media::Audio::{
     IAudioSessionNotification, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
     ISimpleAudioVolume,
 };
-use ::windows::core::Interface;
+use ::windows::core::{GUID, Interface};
 use tokio::sync::broadcast;
 
 use super::callbacks::{self, MtaSession, Poster, Registration};
@@ -28,6 +28,9 @@ const EVENT_CAPACITY: usize = 64;
 /// Most messages handled before the cache is refreshed and replies are sent,
 /// which bounds how long a command waits behind others.
 const MAX_BATCH: usize = 64;
+
+/// How often sessions are checked for an exited process.
+const PROCESS_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 /// State shared between the COM thread and [`super::WindowsBackend`].
 pub(super) struct Shared {
@@ -153,13 +156,15 @@ struct Worker {
     /// Consecutive failed refreshes.
     failures: u32,
     retry_at: Option<Instant>,
+    last_process_check: Instant,
 }
 
 impl Worker {
     fn new(shared: Arc<Shared>, tx: Sender<Msg>) -> Result<Self, AudioError> {
         let enumerator =
             com::create_enumerator().map_err(|e| com_error("creating IMMDeviceEnumerator", e))?;
-        let poster = Poster::new(tx);
+        let context = GUID::new().map_err(|e| com_error("creating an event context", e))?;
+        let poster = Poster::new(tx, context);
         // Registered before the first read so that no change is missed.
         let endpoint_notifications =
             callbacks::register_endpoint_notifications(&enumerator, poster.clone())
@@ -175,16 +180,32 @@ impl Worker {
             reopen_default: false,
             failures: 0,
             retry_at: None,
+            last_process_check: Instant::now(),
         };
         worker.refresh(Dirty::all())?;
         worker.publish();
         Ok(worker)
     }
 
+    /// When to next look for sessions whose process has exited, which Core
+    /// Audio does not report: an app that stops playing and exits leaves an
+    /// inactive session behind.
+    fn process_check_at(&self) -> Option<Instant> {
+        let watching = self
+            .default
+            .as_ref()
+            .is_some_and(|d| d.sessions.iter().any(|s| s.process.is_some()));
+        watching.then(|| self.last_process_check + PROCESS_CHECK_INTERVAL)
+    }
+
     fn serve(&mut self, rx: &Receiver<Msg>) {
         let mut replies = Vec::new();
         loop {
-            let first = match self.retry_at {
+            let deadline = match (self.retry_at, self.process_check_at()) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let first = match deadline {
                 None => match rx.recv() {
                     Ok(msg) => Some(msg),
                     Err(_) => return,
@@ -227,6 +248,19 @@ impl Worker {
                     }
                 }
             }
+            if self
+                .process_check_at()
+                .is_some_and(|at| at <= Instant::now())
+            {
+                if self
+                    .default
+                    .as_ref()
+                    .is_some_and(DefaultDevice::any_process_exited)
+                {
+                    self.dirty.mark(Change::SessionValues);
+                }
+                self.last_process_check = Instant::now();
+            }
             self.flush();
             // After the flush, so a caller sees its change in the snapshot.
             for (reply, result) in replies.drain(..) {
@@ -258,7 +292,7 @@ impl Worker {
                     })
                     .ok_or(AudioError::NoDefaultDevice)?;
                 self.dirty.mark(Change::Master);
-                com::set_master(&control, volume, muted)
+                com::set_master(&control, volume, muted, self.poster.context())
                     .map_err(|e| com_error("setting master volume", e))
             }
             Request::Session {
@@ -277,7 +311,7 @@ impl Worker {
                     (None, None) => return Err(AudioError::NoDefaultDevice),
                 };
                 self.dirty.mark(Change::SessionValues);
-                com::set_session_volume(&control, volume, muted)
+                com::set_session_volume(&control, volume, muted, self.poster.context())
                     .map_err(|e| com_error("setting session volume", e))
             }
         }
@@ -409,8 +443,13 @@ impl Worker {
         if same.is_some() && !self.reopen_default {
             return Ok(false);
         }
-        let order: Vec<String> = same
-            .map(|d| d.sessions.iter().map(|s| s.id.clone()).collect())
+        // Reopening the same endpoint keeps the session order and the
+        // sessions reported as created but not yet looked at.
+        let (order, created) = same
+            .map(|d| {
+                let order: Vec<String> = d.sessions.iter().map(|s| s.id.clone()).collect();
+                (order, d.created.clone())
+            })
             .unwrap_or_default();
         // On failure the old default stays cached until a retry succeeds,
         // rather than briefly publishing no default device.
@@ -419,6 +458,7 @@ impl Worker {
             endpoint_id,
             &self.poster,
             &order,
+            created,
         )?);
         self.reopen_default = false;
         Ok(true)
@@ -500,8 +540,9 @@ struct DefaultDevice {
     /// Percent and mute.
     master: (f32, bool),
     /// Listed sessions in the order the phones show them. A session leaves
-    /// the list when it expires, is disconnected or can no longer be read,
-    /// not when the session enumerator stops returning it.
+    /// the list when it expires, is disconnected, its process exits or it
+    /// can no longer be read, not when the session enumerator stops
+    /// returning it.
     sessions: Vec<SessionEntry>,
     /// Sessions from `OnSessionCreated` not yet looked at.
     created: Vec<IAudioSessionControl>,
@@ -514,12 +555,14 @@ struct DefaultDevice {
 
 impl DefaultDevice {
     /// Opens the endpoint's controls, registers its callbacks and reads it.
-    /// Sessions whose ids are in `order` come first, in that order.
+    /// Sessions whose ids are in `order` come first, in that order; `created`
+    /// are sessions reported as created that the enumerator may not list.
     fn open(
         device: IMMDevice,
         endpoint_id: String,
         poster: &Poster,
         order: &[String],
+        created: Vec<IAudioSessionControl>,
     ) -> Result<Self, AudioError> {
         let Endpoint { endpoint_id, info } = endpoint_info(&device, endpoint_id);
         let volume: IAudioEndpointVolume =
@@ -545,7 +588,7 @@ impl DefaultDevice {
             name: info.name,
             master,
             sessions: Vec::new(),
-            created: Vec::new(),
+            created,
             _volume_notifications: volume_notifications,
             _session_notifications: session_notifications,
             volume,
@@ -563,51 +606,81 @@ impl DefaultDevice {
         Ok(())
     }
 
-    /// Drops sessions that are gone, re-reads the others, and appends
-    /// sessions that are new in the enumerator or were reported as created.
+    fn any_process_exited(&self) -> bool {
+        self.sessions
+            .iter()
+            .any(|s| s.process.as_ref().is_some_and(com::Process::has_exited))
+    }
+
+    /// Drops sessions that are gone and re-reads the others, then takes in
+    /// sessions reported as created and sessions the enumerator lists that
+    /// are not known yet.
     fn refresh_session_list(&mut self, poster: &Poster) -> Result<(), AudioError> {
-        let mut controls = com::session_controls(&self.manager)
+        let enumerated = com::session_controls(&self.manager)
             .map_err(|e| com_error("enumerating audio sessions", e))?;
-        for created in self.created.drain(..) {
-            match created.cast::<IAudioSessionControl2>() {
-                Ok(control) => controls.push(control),
+        self.refresh_session_values();
+
+        // A created session replaces a known one with the same id: the app
+        // re-created its stream and the old control is about to expire.
+        for created in std::mem::take(&mut self.created) {
+            let opened = created
+                .cast::<IAudioSessionControl2>()
+                .map_err(|e| com_error("querying IAudioSessionControl2", e))
+                .and_then(|control| self.open_session(control, poster));
+            match opened {
+                Ok(Some(entry)) => match self.sessions.iter_mut().find(|s| s.id == entry.id) {
+                    Some(known) => *known = entry,
+                    None => self.sessions.push(entry),
+                },
+                Ok(None) => {}
                 Err(e) => tracing::debug!("skipping created audio session: {e}"),
             }
         }
-        self.refresh_session_values();
 
-        let mut listed = Vec::new();
-        for control in controls {
-            match com::is_listed(&control).and_then(|listed| {
-                listed
-                    .then(|| com::session_instance_id(&control))
-                    .transpose()
-            }) {
-                Ok(Some(id)) => listed.push((id, control)),
-                Ok(None) => {}
-                Err(e) => tracing::debug!("skipping audio session: {e}"),
-            }
-        }
-        let ids: Vec<String> = listed.iter().map(|(id, _)| id.clone()).collect();
-        let added = logic::unknown_ids(self.sessions.iter().map(|s| s.id.as_str()), &ids);
-        for id in added {
-            let Some((_, control)) = listed.iter().find(|(listed_id, _)| *listed_id == id) else {
-                continue;
+        for control in enumerated {
+            let id = match com::session_instance_id(&control) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::debug!("skipping audio session: {e}");
+                    continue;
+                }
             };
-            if !id.contains(&self.device_id) {
-                tracing::warn!(
-                    session = %id,
-                    device = %self.device_id,
-                    "session id does not contain its device id"
-                );
+            if self.sessions.iter().any(|s| s.id == id) {
+                continue;
             }
-            match SessionEntry::open(id, control.clone(), poster) {
+            match self.open_session_with_id(id, control, poster) {
                 Ok(Some(entry)) => self.sessions.push(entry),
                 Ok(None) => {}
                 Err(e) => tracing::debug!("skipping audio session: {e}"),
             }
         }
         Ok(())
+    }
+
+    fn open_session(
+        &self,
+        control: IAudioSessionControl2,
+        poster: &Poster,
+    ) -> Result<Option<SessionEntry>, AudioError> {
+        let id = com::session_instance_id(&control)
+            .map_err(|e| com_error("reading session instance id", e))?;
+        self.open_session_with_id(id, control, poster)
+    }
+
+    fn open_session_with_id(
+        &self,
+        id: String,
+        control: IAudioSessionControl2,
+        poster: &Poster,
+    ) -> Result<Option<SessionEntry>, AudioError> {
+        if !id.contains(&self.device_id) {
+            tracing::warn!(
+                session = %id,
+                device = %self.device_id,
+                "session id does not contain its device id"
+            );
+        }
+        SessionEntry::open(id, control, poster)
     }
 
     /// Re-reads every session's name, volume and mute, dropping sessions that
@@ -628,29 +701,32 @@ struct SessionEntry {
     id: String,
     control: IAudioSessionControl2,
     simple: ISimpleAudioVolume,
-    pid: u32,
-    /// Set by the session's callbacks when it expires or is disconnected. A
-    /// session re-created under the same id gets a new control, so the old
-    /// entry must go.
+    /// The owning process, if the session has exactly one and it could be
+    /// opened.
+    process: Option<com::Process>,
+    /// Set by the session's callbacks when it expires or is disconnected.
     gone: Arc<AtomicBool>,
     /// `GetDisplayName` as last read, and what it resolved to.
     raw_display: Option<String>,
     display: Option<String>,
     /// Looked up the first time the session has no display name.
-    process: Option<Option<String>>,
+    process_name: Option<Option<String>>,
     volume: f32,
     muted: bool,
     _events: Option<Registration<IAudioSessionControl, IAudioSessionEvents>>,
 }
 
 impl SessionEntry {
-    /// Registers for the session's events, then reads it. `None` if it turns
-    /// out not to be listed.
+    /// Registers for the session's events, then reads it. `None` if it is not
+    /// listed: the system-sounds session, expired, or its process has exited.
     fn open(
         id: String,
         control: IAudioSessionControl2,
         poster: &Poster,
     ) -> Result<Option<Self>, AudioError> {
+        if !com::is_listed(&control).map_err(|e| com_error("reading session state", e))? {
+            return Ok(None);
+        }
         let simple: ISimpleAudioVolume = control
             .cast()
             .map_err(|e| com_error("querying ISimpleAudioVolume", e))?;
@@ -659,18 +735,20 @@ impl SessionEntry {
             "IAudioSessionEvents",
             callbacks::register_session_events(&control, Arc::clone(&gone), poster.clone()),
         );
-        // Multi-process sessions have no single pid; they fall back to their
-        // display name or "Unknown".
-        let pid = com::process_id(&control).unwrap_or(0);
+        // Multi-process sessions report no single pid.
+        let process = com::process_id(&control)
+            .ok()
+            .filter(|&pid| pid != 0)
+            .and_then(com::Process::open);
         let mut entry = Self {
             id,
             control,
             simple,
-            pid,
+            process,
             gone,
             raw_display: None,
             display: None,
-            process: None,
+            process_name: None,
             volume: 0.0,
             muted: false,
             _events: events,
@@ -680,7 +758,9 @@ impl SessionEntry {
 
     /// Re-reads the session. Returns false if it is no longer listed.
     fn refresh(&mut self) -> Result<bool, AudioError> {
-        if self.gone.load(Ordering::Acquire) {
+        if self.gone.load(Ordering::Acquire)
+            || self.process.as_ref().is_some_and(com::Process::has_exited)
+        {
             return Ok(false);
         }
         if !com::is_listed(&self.control).map_err(|e| com_error("reading session state", e))? {
@@ -692,9 +772,8 @@ impl SessionEntry {
             self.display = logic::resolve_display_name(&raw, com::load_indirect_string);
             self.raw_display = Some(raw);
         }
-        if self.display.is_none() && self.process.is_none() {
-            let pid = self.pid;
-            self.process = Some((pid != 0).then(|| com::process_image_stem(pid)).flatten());
+        if self.display.is_none() && self.process_name.is_none() {
+            self.process_name = Some(self.process.as_ref().and_then(com::Process::image_stem));
         }
         (self.volume, self.muted) = com::session_volume(&self.simple)
             .map_err(|e| com_error("reading session volume", e))?;
@@ -706,7 +785,7 @@ impl SessionEntry {
             id: self.id.clone(),
             name: logic::session_name(
                 self.display.as_deref(),
-                self.process.as_ref().and_then(Option::as_deref),
+                self.process_name.as_ref().and_then(Option::as_deref),
             ),
             volume: self.volume,
             muted: self.muted,

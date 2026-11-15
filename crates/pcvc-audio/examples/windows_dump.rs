@@ -6,7 +6,9 @@
 //! ```
 //!
 //! With `--seconds N` it stops after N seconds and drops the backend, which
-//! exercises callback unregistration; otherwise it runs until Ctrl-C.
+//! exercises callback unregistration; otherwise it runs until Ctrl-C. The
+//! backend's own logging goes to stderr and follows `RUST_LOG` (default
+//! `info`).
 
 #[cfg(target_os = "windows")]
 fn main() -> std::process::ExitCode {
@@ -44,6 +46,13 @@ fn main() -> std::process::ExitCode {
         }
         println!();
     }
+
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
 
     let mut args = std::env::args().skip(1);
     let deadline = match (args.next().as_deref(), args.next()) {

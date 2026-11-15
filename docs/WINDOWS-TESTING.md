@@ -21,6 +21,8 @@ cargo build -p pcvc-server --example windows_server
 $env:RUST_LOG = "info,pcvc_audio=debug"   # optional, shows skipped sessions and retries
 ```
 
+Both examples log to stderr; keep any warnings they print with your notes.
+
 ## 1. Snapshot (`windows_dump`)
 
 ```powershell
@@ -56,10 +58,12 @@ the change. Nothing should print when nothing changed.
 | Move an app's slider in the Volume Mixer | `SessionChanged { id }` |
 | Mute an app in the Volume Mixer | `SessionChanged { id }` |
 | Start playback in an app that had no session | `SessionAdded { id }` |
-| Close that app completely | `SessionRemoved { id }` (can take a few seconds) |
+| Close that app completely | `SessionRemoved { id }` within about 2 s |
 | Switch the default device in the tray or Sound panel | `DefaultDeviceChanged`, new device's sessions |
 | Plug in or unplug a USB or Bluetooth device | `DevicesChanged` |
-| Disable and re-enable a device in the Sound panel | `DevicesChanged`; if it is the default, master and session changes still arrive afterwards |
+| Disable and re-enable a non-default device in the Sound panel | `DevicesChanged` after each |
+| Restart the default device's driver (Device Manager: disable and enable the audio adapter) while it stays the default | `DevicesChanged`; master and session changes still arrive afterwards |
+| Restart the Windows Audio service (`Restart-Service audiosrv`, admin) | events resume afterwards, possibly after a logged retry |
 | Rename a device (Sound panel, Properties) | `DevicesChanged`, new name |
 | Change a recording device or the default microphone | nothing |
 
@@ -93,8 +97,9 @@ replies directly; a broadcast follows every real change.
 - [ ] Default device: `{"protocolVersion":7,"defaultDevice":{"deviceId":"<other id>"}}`
       makes that device both "Default Device" and "Default Communication
       Device" in the Sound panel, and the broadcast lists its sessions.
-- [ ] An unknown device id or session id changes nothing and re-sends the
-      current state.
+- [ ] An unknown device id changes nothing and re-sends the current state.
+- [ ] An unknown session id changes nothing and sends nothing (unknown
+      sessions are ignored, see `PROTOCOL.md`).
 - [ ] A line that is not JSON closes the connection.
 - [ ] Volumes above 100 or below 0 are clamped.
 - [ ] Ctrl-C stops the server within a few seconds.
@@ -123,8 +128,10 @@ fixes:
   goes stale until something else refreshes it. Session creation is the most
   fragile: Core Audio needs `GetSessionEnumerator` before it delivers
   session-created notifications.
-- **Sessions of exited apps** stay listed while Windows keeps them inactive,
-  until they expire. The C# server hid sessions whose process had exited.
+- **Sessions of exited apps**: Core Audio keeps them as inactive, so the
+  backend checks every 2 s whether a session's process has exited and drops
+  it, as the C# server effectively did. Sessions spanning several processes,
+  or whose process could not be opened, stay until Windows expires them.
 - **Session names**: elevated or protected processes may refuse
   `OpenProcess`, which makes a session without a display name show as
   `Unknown`.
