@@ -4,10 +4,11 @@ The PC side of [PcVolumeControl](https://github.com/PcVolumeControl), rewritten
 in Rust. It owns the audio stack, serves the iOS and Android apps over TCP
 (protocol v7, compatible with the existing apps), and advertises itself over
 mDNS. It replaces the C# `PcVolumeControlWindows` server. The server library
-also implements the optional "v8" extensions (app icons), which keep the wire
-version at 7 so the shipped apps are unaffected; the desktop app serves real
-application icons with them, and the mock server below serves demo icons for
-client development.
+also implements the optional "v8" extensions (app icons and session
+details), which keep the wire version at 7 so the shipped apps are
+unaffected; the desktop app serves real application icons and stream titles
+with them, and the mock server below serves demo icons and titles for client
+development.
 
 Status: the protocol, server, desktop app, the Linux (PulseAudio) backend and
 a Windows (Core Audio) backend are in place. The Windows backend and the
@@ -216,17 +217,36 @@ executable's icons itself, so that limit only applies to its fallback icon.
 An application keeps its id while the app runs, so an icon changed in the
 meantime (a new icon theme) reaches phones after a restart.
 
-To serve plain v7 without icons, add this line near the top of
-`config.toml`, before any `[section]` such as `[window]` (a line below one
+### Session details for phone clients
+
+Sessions of the same application, such as Firefox's one stream per tab, all
+have the same name. The server also sends each session's `detail`, a short
+label that tells them apart ([docs/PROTOCOL.md](docs/PROTOCOL.md#session-details)),
+to clients that show it; the shipped apps ignore it. On Linux it is the
+stream's title (`media.name`, else `media.title`), which for Firefox is the
+tab's title; titles equal to the name and generic ones such as `Playback`
+are left out. Windows sends none: Core Audio has nothing per session beyond
+the name.
+
+**Privacy:** with details on (the default), the title of every stream that
+plays audio, every browser tab included, is readable by any device that can
+reach the server's port, with no password; private-browsing windows are not
+treated differently. Turn details off with `serve_details = false` below if
+that matters on your network.
+
+To turn off icons, details or both (plain v7), add these lines near the top
+of `config.toml`, before any `[section]` such as `[window]` (a line below one
 belongs to that section and is ignored):
 
 ```toml
 serve_icons = false
+serve_details = false
 ```
 
-Then quit from the tray menu and start the app again; the setting is read at
-startup. It has no control in the Settings page, and saving settings there
-keeps it.
+Then quit from the tray menu and start the app again; the settings are read
+at startup. With `serve_details = false` the app does not read stream titles
+at all. They have no control in the Settings page, and saving settings
+there keeps them.
 
 ## Try it with a phone
 
@@ -239,12 +259,20 @@ cargo run -p pcvc-server --example mock_server
 This listens on `0.0.0.0:3000` with a scripted set of devices and sessions and
 advertises `_pcvolumecontrol._tcp`. Point the iOS or Android app at this
 machine (or let it discover the server). Options: `--port N`, `--no-mdns`,
-`--no-icons`; logging follows `RUST_LOG`.
+`--no-icons`, `--no-detail`; logging follows `RUST_LOG`.
+
+### Building a client against session details
+
+The mock server serves the v8 `detail` feature by default (`--no-detail`
+turns it off). Besides the demo's own Firefox session, which has no detail,
+the speakers have two more sessions named `Firefox` with a tab title as
+their detail; one of them moves on to another title every five seconds.
+With both `--no-detail` and `--no-icons` it is a plain v7 server.
 
 ### Building a client against the icon extension
 
 The mock server serves the v8 `icons` feature by default (`--no-icons` turns
-it off and makes it a plain v7 server). Its demo provider draws a coloured
+it off). Its demo provider draws a coloured
 rounded square per app at whatever size is asked for, and resolves icon ids
 in the background like a real one: a session it has not seen before appears
 without an `iconId` and gains it in a state about half a second later.
@@ -260,8 +288,8 @@ cargo run -p pcvc-server --example mock_server -- --port 3001 --no-mdns
 nc localhost 3001
 ```
 
-The first line is a full state with `"features":["icons"]` and an `iconId` on
-every session. Paste a request using one of them and the reply lines come
+The first line is a full state with `"features":["icons","detail"]` and an
+`iconId` on every session. Paste a request using one of them and the reply lines come
 back, one per id:
 
 ```json
@@ -323,7 +351,7 @@ To control this machine from a phone before the desktop app is ready:
 cargo run -p pcvc-server --example pulse_server
 ```
 
-It takes the same options as `mock_server`. `cargo run -p pcvc-audio
+It takes `--port N`, `--no-mdns` and `--no-detail`. `cargo run -p pcvc-audio
 --example pulse_dump` prints what the backend sees and the events it emits.
 
 The tests against the running sound server are ignored by default. They only

@@ -6,7 +6,7 @@ use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
 use libpulse_binding::volume::Volume;
-use pcvc_protocol::clamp_volume;
+use pcvc_protocol::{clamp_volume, session_detail};
 
 use crate::{AppHint, AudioEvent, AudioState, Device, DeviceInfo, Session};
 
@@ -22,6 +22,19 @@ const ECHO_TOLERANCE: f32 = 0.5;
 
 /// Name used when a stream has no usable name property.
 pub(super) const UNKNOWN_NAME: &str = "Unknown";
+
+/// Stream names, compared in lower case, that libraries use when the
+/// application gives none. `audiostream` and `audiocallbackdriver` are
+/// Firefox's internal names. `cpal-playback-<pid>` is matched separately.
+const GENERIC_MEDIA_NAMES: [&str; 7] = [
+    "playback",
+    "playback stream",
+    "audio stream",
+    "audiostream",
+    "audiocallbackdriver",
+    "alsa playback",
+    "simple directmedia layer",
+];
 
 /// What one introspection round returned.
 #[derive(Debug, Clone, Default)]
@@ -106,6 +119,7 @@ pub(super) struct RawSinkInput {
     pub muted: bool,
     pub app: AppProps,
     pub media_name: Option<String>,
+    pub media_title: Option<String>,
     pub media_role: Option<String>,
 }
 
@@ -147,6 +161,18 @@ impl RawSinkInput {
         .to_owned()
     }
 
+    /// What tells this stream apart from others of its application: the
+    /// first of `media.name` and `media.title` that is not blank, not
+    /// `name` and not a generic stream name. Firefox, for one, names each
+    /// stream after its tab.
+    pub fn detail(&self, name: &str) -> Option<String> {
+        [&self.media_name, &self.media_title]
+            .into_iter()
+            .flatten()
+            .filter_map(|raw| session_detail(raw, name))
+            .find(|detail| !is_generic_media_name(detail))
+    }
+
     /// The stream's application properties, each missing one taken from its
     /// client.
     pub fn app_hint(&self, client: Option<&AppProps>) -> AppHint {
@@ -174,6 +200,14 @@ impl RawSinkInput {
             100.0
         }
     }
+}
+
+fn is_generic_media_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    GENERIC_MEDIA_NAMES.contains(&name.as_str())
+        || name
+            .strip_prefix("cpal-playback-")
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Average of the channel volumes as a percentage of `PA_VOLUME_NORM`,
@@ -262,7 +296,8 @@ impl RawState {
         Some((sink, input))
     }
 
-    pub fn to_audio_state(&self) -> AudioState {
+    /// The state, with session details only if `details` is set.
+    pub fn to_audio_state(&self, details: bool) -> AudioState {
         let devices = self
             .addressable_sinks()
             .map(|s| DeviceInfo {
@@ -280,9 +315,11 @@ impl RawState {
                     .sessions_on(sink)
                     .map(|i| {
                         let client = i.client.and_then(|c| self.clients.get(&c));
+                        let name = i.display_name(client);
                         Session {
                             id: session_id(&id, i.index),
-                            name: i.display_name(client),
+                            detail: if details { i.detail(&name) } else { None },
+                            name,
                             volume: i.percent(),
                             muted: i.muted,
                             app: i.app_hint(client),
@@ -342,10 +379,7 @@ pub(super) fn diff(old: &AudioState, new: &AudioState) -> Vec<AudioEvent> {
             None => events.push(AudioEvent::SessionAdded {
                 id: session.id.clone(),
             }),
-            Some(old) if old != session => events.push(AudioEvent::SessionChanged {
-                id: session.id.clone(),
-            }),
-            Some(_) => {}
+            Some(old) => events.extend(session.change_from(old)),
         }
     }
     events
@@ -510,6 +544,119 @@ mod tests {
         assert_eq!(i.display_name(None), "Caf\u{e9} \u{fffd}");
     }
 
+    #[test]
+    fn detail_skips_blank_generic_and_name() {
+        let firefox = |media_name: Option<&str>, media_title: Option<&str>| RawSinkInput {
+            media_name: media_name.map(str::to_owned),
+            media_title: media_title.map(str::to_owned),
+            ..input(1, 1, "Firefox")
+        };
+        let detail = |i: &RawSinkInput| i.detail(&i.display_name(None));
+
+        let tab = "The Best Reactions in Always Sunny - YouTube";
+        assert_eq!(detail(&firefox(Some(tab), None)).as_deref(), Some(tab));
+        assert_eq!(
+            detail(&firefox(Some("Two\nlines "), None)).as_deref(),
+            Some("Two lines")
+        );
+        assert_eq!(detail(&firefox(None, None)), None);
+        assert_eq!(detail(&firefox(Some("  "), None)), None);
+        assert_eq!(detail(&firefox(Some("FIREFOX"), None)), None);
+        assert_eq!(
+            detail(&firefox(Some("Firefox"), Some("Song - Artist"))).as_deref(),
+            Some("Song - Artist")
+        );
+        assert_eq!(detail(&firefox(Some("AudioStream"), Some("Firefox"))), None);
+        for generic in [
+            "Playback",
+            "playback",
+            "Playback Stream",
+            "AudioStream",
+            "audio stream",
+            "AudioCallbackDriver",
+            "ALSA Playback",
+            "Simple DirectMedia Layer",
+            "cpal-playback-660845",
+            " Audio\tStream ",
+        ] {
+            assert_eq!(detail(&firefox(Some(generic), None)), None, "{generic:?}");
+        }
+        for specific in ["cpal-playback-", "cpal-playback-x1", "Playback 2", "Audio"] {
+            assert_eq!(
+                detail(&firefox(Some(specific), None)).as_deref(),
+                Some(specific),
+                "{specific:?}"
+            );
+        }
+
+        // A name taken from `media.name` is not repeated as the detail.
+        let unnamed = RawSinkInput {
+            app: AppProps::default(),
+            media_name: Some("Lecture 3.mkv".into()),
+            ..input(2, 1, "")
+        };
+        assert_eq!(unnamed.display_name(None), "Lecture 3.mkv");
+        assert_eq!(detail(&unnamed), None);
+    }
+
+    #[test]
+    fn sessions_carry_details_and_their_changes_are_reported() {
+        let tab = |index: u32, title: &str| RawSinkInput {
+            media_name: Some(title.to_owned()),
+            ..input(index, 1, "Firefox")
+        };
+        let mut r = raw();
+        r.inputs.push(tab(20, "Inbox - Mail"));
+        r.inputs.push(tab(21, "Radio - Player"));
+        let base = r.to_audio_state(true);
+        let details: Vec<_> = base
+            .default_device
+            .as_ref()
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| (s.name.as_str(), s.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            details,
+            [
+                ("Firefox", None),
+                ("Playback", None),
+                ("Firefox", Some("Inbox - Mail")),
+                ("Firefox", Some("Radio - Player")),
+            ]
+        );
+
+        // Without details nothing is filled in, so a new title changes
+        // nothing.
+        let plain = r.to_audio_state(false);
+        let sessions = &plain.default_device.as_ref().unwrap().sessions;
+        assert!(sessions.iter().all(|s| s.detail.is_none()));
+
+        r.input_mut(20).unwrap().media_name = Some("Inbox (1) - Mail".into());
+        assert_eq!(
+            diff(&base, &r.to_audio_state(true)),
+            vec![AudioEvent::SessionDetailChanged {
+                id: "speakers|20".into()
+            }]
+        );
+        assert!(diff(&plain, &r.to_audio_state(false)).is_empty());
+
+        r.input_mut(20).unwrap().muted = true;
+        r.input_mut(21).unwrap().media_name = Some("Radio - Next".into());
+        assert_eq!(
+            diff(&base, &r.to_audio_state(true)),
+            vec![
+                AudioEvent::SessionChanged {
+                    id: "speakers|20".into()
+                },
+                AudioEvent::SessionDetailChanged {
+                    id: "speakers|21".into()
+                },
+            ]
+        );
+    }
+
     fn props(pairs: &[(&str, &str)]) -> AppProps {
         let map: HashMap<&str, &str> = pairs.iter().copied().collect();
         AppProps::read(|key| map.get(key.to_str().unwrap()).map(|v| (*v).to_owned()))
@@ -598,7 +745,7 @@ mod tests {
                 ("application.process.binary", "flaxative"),
             ]),
         );
-        let device = raw.to_audio_state().default_device.unwrap();
+        let device = raw.to_audio_state(true).default_device.unwrap();
         let session = device
             .sessions
             .iter()
@@ -623,7 +770,7 @@ mod tests {
 
     #[test]
     fn maps_to_audio_state() {
-        let state = raw().to_audio_state();
+        let state = raw().to_audio_state(true);
         assert_eq!(
             state.devices,
             vec![
@@ -661,12 +808,12 @@ mod tests {
     fn missing_or_unknown_default_sink() {
         let mut raw = raw();
         raw.default_sink = Some(CString::new("gone").unwrap());
-        let state = raw.to_audio_state();
+        let state = raw.to_audio_state(true);
         assert_eq!(state.devices.len(), 2);
         assert!(state.default_device.is_none());
         raw.default_sink = None;
-        assert!(raw.to_audio_state().default_device.is_none());
-        assert!(RawState::default().to_audio_state() == AudioState::default());
+        assert!(raw.to_audio_state(true).default_device.is_none());
+        assert!(RawState::default().to_audio_state(true) == AudioState::default());
     }
 
     #[test]
@@ -680,7 +827,7 @@ mod tests {
             name: CString::new(b"bad\xfename".to_vec()).unwrap(),
             ..sink(4, "", Some("Twin"), 0)
         });
-        let state = raw.to_audio_state();
+        let state = raw.to_audio_state(true);
         assert_eq!(state.devices.len(), 3);
         assert_eq!(state.devices[2].id, "bad\u{fffd}name");
         assert_eq!(raw.sink_by_id("bad\u{fffd}name").unwrap().index, 3);
@@ -703,20 +850,20 @@ mod tests {
 
     #[test]
     fn diff_reports_each_kind_of_change() {
-        let base = raw().to_audio_state();
+        let base = raw().to_audio_state(true);
         assert!(diff(&base, &base).is_empty());
 
         let mut r = raw();
         r.sinks[0].volume = vec![NORMAL / 2, NORMAL / 2];
         assert_eq!(
-            diff(&base, &r.to_audio_state()),
+            diff(&base, &r.to_audio_state(true)),
             vec![AudioEvent::MasterChanged]
         );
 
         let mut r = raw();
         r.sinks[0].muted = true;
         assert_eq!(
-            diff(&base, &r.to_audio_state()),
+            diff(&base, &r.to_audio_state(true)),
             vec![AudioEvent::MasterChanged]
         );
 
@@ -725,7 +872,7 @@ mod tests {
         r.inputs.retain(|i| i.index != 14);
         r.inputs.push(input(20, 1, "mpv"));
         assert_eq!(
-            diff(&base, &r.to_audio_state()),
+            diff(&base, &r.to_audio_state(true)),
             vec![
                 AudioEvent::SessionRemoved {
                     id: "speakers|14".into()
@@ -742,27 +889,27 @@ mod tests {
         let mut r = raw();
         r.default_sink = Some(CString::new("hdmi").unwrap());
         assert_eq!(
-            diff(&base, &r.to_audio_state()),
+            diff(&base, &r.to_audio_state(true)),
             vec![AudioEvent::DefaultDeviceChanged]
         );
 
         let mut r = raw();
         r.sinks[1].description = Some("HDMI".into());
         assert_eq!(
-            diff(&base, &r.to_audio_state()),
+            diff(&base, &r.to_audio_state(true)),
             vec![AudioEvent::DevicesChanged]
         );
 
         let mut r = raw();
         r.sinks[0].description = Some("Renamed".into());
         assert_eq!(
-            diff(&base, &r.to_audio_state()),
+            diff(&base, &r.to_audio_state(true)),
             vec![AudioEvent::DevicesChanged, AudioEvent::MasterChanged]
         );
 
         let mut r = raw();
         r.default_sink = None;
-        let none = r.to_audio_state();
+        let none = r.to_audio_state(true);
         assert_eq!(diff(&base, &none), vec![AudioEvent::DefaultDeviceChanged]);
         assert_eq!(diff(&none, &base), vec![AudioEvent::DefaultDeviceChanged]);
 
@@ -770,6 +917,6 @@ mod tests {
         let mut r = raw();
         r.inputs[1].muted = true;
         r.sinks[1].volume = vec![0, 0];
-        assert!(diff(&base, &r.to_audio_state()).is_empty());
+        assert!(diff(&base, &r.to_audio_state(true)).is_empty());
     }
 }

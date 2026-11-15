@@ -57,6 +57,7 @@ fn current() -> FullState {
                 volume: 35.0,
                 muted: false,
                 icon_id: None,
+                detail: None,
             }],
         },
     }

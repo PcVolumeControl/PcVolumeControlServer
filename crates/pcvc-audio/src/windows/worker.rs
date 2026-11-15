@@ -822,6 +822,9 @@ impl SessionEntry {
             name: logic::session_name(self.display.as_deref(), self.process_name.as_deref()),
             volume: self.volume,
             muted: self.muted,
+            // Core Audio has nothing per session beyond the display name,
+            // which is already the name.
+            detail: None,
             app: AppHint {
                 process_binary: self.image_path.clone(),
                 process_id: self.pid,

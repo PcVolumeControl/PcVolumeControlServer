@@ -99,6 +99,8 @@ pub struct Boot {
     pub icon_resolver: Arc<dyn Resolver>,
     /// Icons for phone clients, given to the server on every start.
     pub server_icons: Option<Arc<dyn IconProvider>>,
+    /// Whether every server start sends session details.
+    pub server_details: bool,
     pub inbox: Inbox,
     pub inbox_rx: InboxReceiver,
     pub logs: LogBuffer,
@@ -210,6 +212,7 @@ impl App {
             backend,
             icon_resolver,
             server_icons,
+            server_details,
             inbox,
             inbox_rx,
             logs,
@@ -218,7 +221,7 @@ impl App {
         audio::spawn_watcher(Arc::clone(&backend), inbox.clone());
         spawn_signal_handler(inbox.clone());
         let commands = CommandSender::spawn(Arc::clone(&backend));
-        let server = ServerController::spawn(backend, server_icons, inbox.clone());
+        let server = ServerController::spawn(backend, server_icons, server_details, inbox.clone());
         server.start(config.server_config());
         // The login item itself is the truth; it may have been removed
         // outside the app.

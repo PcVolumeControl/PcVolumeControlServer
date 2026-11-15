@@ -2,7 +2,7 @@
 //! pointed at any machine.
 //!
 //! ```text
-//! cargo run -p pcvc-server --example mock_server -- [--port N] [--no-mdns] [--no-icons]
+//! cargo run -p pcvc-server --example mock_server -- [--port N] [--no-mdns] [--no-icons] [--no-detail]
 //! ```
 //!
 //! Icons (the v8 `icons` feature) are on by default and come from a demo
@@ -11,8 +11,13 @@
 //! the provider has not seen before appears without an `iconId` and gains one
 //! about half a second later. Sessions on the default device at startup are
 //! resolved before anyone can connect; switching the default device to the
-//! headphones or headset shows the delayed path. `--no-icons` serves plain
-//! v7.
+//! headphones or headset shows the delayed path.
+//!
+//! Session details (the v8 `detail` feature) are on by default too. The
+//! speakers have three "Firefox" sessions: the demo's own without a detail,
+//! and two tabs with their title as detail, one of which moves on to another
+//! title every few seconds. `--no-detail` leaves details out; with
+//! `--no-icons` as well the server speaks plain v7.
 //!
 //! Logging follows `RUST_LOG` (default `info`).
 
@@ -23,20 +28,67 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use pcvc_audio::{MockBackend, Session};
+use pcvc_audio::{AudioBackend, MockBackend, Session};
 use pcvc_server::{IconId, IconImage, IconProvider};
 use tokio::sync::broadcast;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let (mut config, flags) = match common::init("mock_server", &["--no-icons"]) {
+    let (mut config, flags) = match common::init("mock_server", &["--no-icons", "--no-detail"]) {
         Ok(parsed) => parsed,
         Err(code) => return code,
     };
     if !flags.contains(&"--no-icons") {
         config = config.with_icons(Arc::new(DemoIcons::default()));
     }
-    common::serve(Arc::new(MockBackend::demo()), config, "mock server").await
+    config = config.with_details(!flags.contains(&"--no-detail"));
+    let backend = Arc::new(MockBackend::demo());
+    let Some(speakers) = backend
+        .snapshot()
+        .ok()
+        .and_then(|s| s.default_device)
+        .map(|d| d.id)
+    else {
+        eprintln!("the demo has no default device");
+        return ExitCode::FAILURE;
+    };
+    let tab = |app: &str, title: &str, volume: f32| {
+        Session::new(MockBackend::session_id(&speakers, app), "Firefox", volume).with_detail(title)
+    };
+    for session in [
+        tab("firefox-radio", "Radio Paradise - Main Mix", 70.0),
+        tab("firefox-video", TAB_TITLES[0], 90.0),
+    ] {
+        backend
+            .add_session(&speakers, session)
+            .expect("demo tabs are valid");
+    }
+    tokio::spawn(browse(Arc::clone(&backend), speakers));
+    common::serve(backend, config, "mock server").await
+}
+
+/// Titles the demo video tab goes through.
+const TAB_TITLES: [&str; 3] = [
+    "Big Buck Bunny - YouTube",
+    "Sintel - YouTube",
+    "Tears of Steel - YouTube",
+];
+
+/// How long the demo video tab keeps each title.
+const TAB_PERIOD: Duration = Duration::from_secs(5);
+
+/// Moves the video tab on to the next title every [`TAB_PERIOD`].
+async fn browse(backend: Arc<MockBackend>, speakers: String) {
+    let id = MockBackend::session_id(&speakers, "firefox-video");
+    let mut interval = tokio::time::interval(TAB_PERIOD);
+    interval.tick().await;
+    for title in TAB_TITLES.iter().cycle().skip(1) {
+        interval.tick().await;
+        if let Err(e) = backend.set_session_detail(&id, Some(title)) {
+            tracing::warn!("renaming the demo tab failed: {e}");
+            return;
+        }
+    }
 }
 
 /// Pretend lookup time before a session's icon id becomes known.
