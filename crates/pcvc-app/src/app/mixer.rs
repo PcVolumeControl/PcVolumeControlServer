@@ -244,7 +244,7 @@ impl App {
                 text("No applications are playing audio")
                     .size(density.text)
                     .style(style::muted_text),
-                density,
+                density.row_height,
             );
         }
         column(device.sessions.iter().map(|s| {
@@ -252,7 +252,7 @@ impl App {
             let muted = self.mixer.muted(&target, s.muted);
             let label = row![
                 self.app_icon(s, muted),
-                session_name(&s.name, cols.name, density)
+                session_label(s, cols.name, density, muted)
             ]
             .spacing(style::APP_ICON_GAP)
             .align_y(Center);
@@ -319,6 +319,10 @@ impl App {
         volume: f32,
         muted: bool,
     ) -> Element<'a, Message> {
+        let height = match target {
+            Target::Master => density.row_height,
+            Target::Session(_) => density.app_row_height,
+        };
         let mute = button(
             text(if muted { "Unmute" } else { "Mute" })
                 .size(density.text)
@@ -357,7 +361,7 @@ impl App {
             ]
             .spacing(density.spacing)
             .align_y(Center),
-            density,
+            height,
         )
     }
 }
@@ -400,37 +404,81 @@ pub(super) fn device_picker<'a>(
         ]
         .spacing(density.spacing)
         .align_y(Center),
-        density,
+        density.row_height,
     )
 }
 
-/// `content` vertically centred in the density's row height, when it has
-/// one.
+/// `content` vertically centred in `height`, when given.
 pub(super) fn fixed_height<'a>(
     content: impl Into<Element<'a, Message>>,
-    density: &Density,
+    height: Option<f32>,
 ) -> Element<'a, Message> {
-    match density.row_height {
+    match height {
         Some(height) => container(content).height(height).align_y(Center).into(),
         None => content.into(),
     }
 }
 
-/// A session name fitted to `width`, with the full name in a tooltip when
-/// it had to be shortened.
-fn session_name<'a>(name: &'a str, width: f32, density: &Density) -> Element<'a, Message> {
-    let fitted = fit(name, density.text, width);
-    let full = matches!(fitted, Cow::Owned(_)).then_some(name);
-    let label = text(fitted)
-        .size(density.text)
-        .wrapping(text::Wrapping::None);
-    with_tooltip(label, full)
+/// A session's name with its detail beneath in a smaller, dimmer style,
+/// each fitted to `width`, in a block of the same height whether or not
+/// there is a detail. The full text is in a tooltip when either had to be
+/// shortened.
+fn session_label<'a>(
+    session: &'a Session,
+    width: f32,
+    density: &Density,
+    muted: bool,
+) -> Element<'a, Message> {
+    let name = fit(&session.name, density.text, width);
+    let detail = session
+        .detail
+        .as_deref()
+        .map(|detail| (detail, fit(detail, density.detail_text, width)));
+    let full = label_tooltip(
+        &session.name,
+        matches!(name, Cow::Owned(_)),
+        detail
+            .as_ref()
+            .map(|(full, fitted)| (*full, matches!(fitted, Cow::Owned(_)))),
+    );
+    let name = text(name).size(density.text).wrapping(text::Wrapping::None);
+    let lines = match detail {
+        None => column![name],
+        Some((_, fitted)) => column![
+            name,
+            text(fitted)
+                .size(density.detail_text)
+                .wrapping(text::Wrapping::None)
+                .style(style::session_detail(muted))
+        ],
+    };
+    with_tooltip(
+        container(lines).height(density.name_height).align_y(Center),
+        full,
+    )
+}
+
+/// The tooltip of a session's label, given whether its name and detail
+/// were shortened: nothing when neither was, otherwise the full name with
+/// the full detail on the next line.
+fn label_tooltip<'a>(
+    name: &'a str,
+    name_cut: bool,
+    detail: Option<(&str, bool)>,
+) -> Option<Cow<'a, str>> {
+    match detail {
+        Some((detail, detail_cut)) if name_cut || detail_cut => {
+            Some(Cow::Owned(format!("{name}\n{detail}")))
+        }
+        _ if name_cut => Some(Cow::Borrowed(name)),
+        _ => None,
+    }
 }
 
 /// `content`, with `full` in a tooltip on hover when given.
 pub(super) fn with_tooltip<'a>(
     content: impl Into<Element<'a, Message>>,
-    full: Option<&'a str>,
+    full: Option<impl text::IntoFragment<'a>>,
 ) -> Element<'a, Message> {
     match full {
         None => content.into(),
@@ -517,6 +565,22 @@ mod tests {
         assert!(slider(300.0, d) > 0.0);
         assert_eq!(slider(300.0, d), squeezed.label);
         assert_eq!(columns(0.0).label, 0.0);
+    }
+
+    #[test]
+    fn tooltips_show_what_was_shortened_in_full() {
+        let tip = |name_cut, detail| label_tooltip("Firefox", name_cut, detail);
+        assert_eq!(tip(false, None), None);
+        assert_eq!(tip(false, Some(("Main Mix", false))), None);
+        assert_eq!(tip(true, None).as_deref(), Some("Firefox"));
+        // Either line shortened shows both, the detail beneath.
+        for cuts in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                tip(cuts.0, Some(("Main Mix", cuts.1))).as_deref(),
+                Some("Firefox\nMain Mix")
+            );
+        }
+        assert!(matches!(tip(true, None), Some(Cow::Borrowed(_))));
     }
 
     #[test]

@@ -242,7 +242,9 @@ pub enum Body {
 
 /// Height of the mini mixer showing `body`, up to `MINI_MAX_HEIGHT`;
 /// beyond that the application rows scroll. Mirrors the layout in
-/// `app::mini`, whose rows all have the compact density's fixed height.
+/// `app::mini`, whose rows all have one of the compact density's fixed
+/// heights: application rows `MINI_APP_ROW` whether or not they show a
+/// detail, the others `MINI_ROW`.
 pub fn height(body: Body) -> f32 {
     let row = style::MINI_ROW;
     let gap = style::MINI_GAP;
@@ -252,7 +254,7 @@ pub fn height(body: Body) -> f32 {
         Body::Rows(rows) => {
             let list = match rows {
                 0 => row,
-                n => n as f32 * row + (n - 1) as f32 * style::COMPACT.row_spacing,
+                n => n as f32 * style::MINI_APP_ROW + (n - 1) as f32 * style::COMPACT.row_spacing,
             };
             row + gap + row + gap + style::MINI_DIVIDER + gap + list
         }
@@ -500,8 +502,8 @@ mod tests {
     #[test]
     fn height_follows_rows_up_to_the_cap() {
         let rows = |n| height(Body::Rows(n));
-        let row = style::MINI_ROW + style::COMPACT.row_spacing;
-        assert_eq!(rows(1), rows(0));
+        let row = style::MINI_APP_ROW + style::COMPACT.row_spacing;
+        assert_eq!(rows(1) - rows(0), style::MINI_APP_ROW - style::MINI_ROW);
         assert_eq!(rows(2) - rows(1), row);
         assert_eq!(rows(5) - rows(2), 3.0 * row);
         let fits = (1..100)

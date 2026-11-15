@@ -409,29 +409,9 @@ fn render_pages() {
             std::fs::remove_file(&path).unwrap();
         }
     }
-    // A device and a session with names too long for their columns, and a
-    // muted session.
-    let mut device = h.backend.snapshot().unwrap().default_device.unwrap();
-    device.name = "Arctis Nova Pro Wireless Analog Stereo".into();
-    device.sessions[2].muted = true;
-    device.sessions.push(pcvc_audio::Session::new(
-        MockBackend::session_id(&device.id, "cpal"),
-        "cpal-playback-660845 with a much longer stream name",
-        70.0,
-    ));
-    h.backend.add_device(device).unwrap();
-    h.refresh_audio();
+    use_detail_device(&mut h);
     let id = h.open_window();
-    // One icon found, three misses (fallback tiles) and one still pending.
-    let sessions = h.sessions();
-    let app = icons::rasterize(icons::APP, style::APP_ICON as u32).unwrap();
-    h.resolve_icon(
-        &sessions[0],
-        Some(image::Handle::from_rgba(app.width, app.height, app.pixels)),
-    );
-    h.resolve_icon(&sessions[1], None);
-    h.resolve_icon(&sessions[2], None);
-    h.resolve_icon(&sessions[4], None);
+    resolve_detail_icons(&mut h);
     let default = WindowSize::default();
     let sizes = [
         ("", Size::new(default.width, default.height)),
@@ -452,12 +432,19 @@ fn render_pages() {
             }
         }
     }
+    // Snapshots are drawn at scale 2; the Mixer at scale 1 too.
+    h.app.page = Page::Mixer;
+    for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+        let size = Size::new(default.width, default.height);
+        let path = format!("{dir}/mixer-{name}-1x.png");
+        render_png(h.app.view(id), size, 1.0, &theme, &path);
+    }
 }
 
 /// Renders the window's Mixer page for the real sound server's current
 /// streams, with icons resolved from this machine's desktop entries and
-/// themes, into `PCVC_SNAPSHOT_DIR` (`real-mixer-*.png`), and prints what
-/// each stream resolved to. Only reads: no audio state is changed. Run with
+/// themes, into `PCVC_SNAPSHOT_DIR` (`real-mixer-*.png`), the mini mixer
+/// too (`real-mini-*.png`), and prints what each stream resolved to. Only reads: no audio state is changed. Run with
 /// `--ignored --nocapture`.
 #[cfg(target_os = "linux")]
 #[test]
@@ -468,7 +455,10 @@ fn render_real_mixer() {
     let Ok(dir) = std::env::var("PCVC_SNAPSHOT_DIR") else {
         return;
     };
-    let state = pcvc_audio::PulseBackend::new().unwrap().snapshot().unwrap();
+    let state = pcvc_audio::PulseBackend::with_details(true)
+        .unwrap()
+        .snapshot()
+        .unwrap();
     let mut h = Harness::new();
     h.run(vec![Message::Inbound(Inbound::Audio(state.clone()))]);
     let id = h.open_window();
@@ -485,7 +475,10 @@ fn render_real_mixer() {
             Some((path, _, via)) => format!("{via:?} {}", path.display()),
             None => "letter tile".to_owned(),
         };
-        println!("{:?} {:?} -> {outcome}", session.name, session.app);
+        println!(
+            "{:?} ({:?}) {:?} -> {outcome}",
+            session.name, session.detail, session.app
+        );
         let icon = found
             .map(|(_, f, _)| image::Handle::from_rgba(f.rgba.width, f.rgba.height, f.rgba.pixels));
         h.resolve_icon(session, icon);
@@ -493,7 +486,8 @@ fn render_real_mixer() {
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_name().unwrap().to_string_lossy();
-        if name.starts_with("real-mixer-") && name.ends_with(".png") {
+        let ours = name.starts_with("real-mixer-") || name.starts_with("real-mini-");
+        if ours && name.ends_with(".png") {
             std::fs::remove_file(&path).unwrap();
         }
     }
@@ -508,6 +502,68 @@ fn render_real_mixer() {
         let path = format!("{dir}/real-mixer-{name}.png");
         assert!(ui.snapshot(&theme).unwrap().matches_image(&path).unwrap());
     }
+    let mini = h.open_mini();
+    for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+        let size = Size::new(style::MINI_WIDTH, h.app.mini_height);
+        let path = format!("{dir}/real-mini-{name}.png");
+        render_png(h.app.view(mini), size, 2.0, &theme, &path);
+    }
+}
+
+/// Replaces the default device with one whose name is too long for the
+/// picker and whose sessions show details: three Firefox tabs (one title
+/// right-to-left, one with an emoji), Spotify without a detail, a muted
+/// Discord with one, a session whose name and detail are both too long, and
+/// two tabs on the same page.
+fn use_detail_device(h: &mut Harness) {
+    let mut device = h.backend.snapshot().unwrap().default_device.unwrap();
+    device.name = "Arctis Nova Pro Wireless Analog Stereo".into();
+    let firefox = device.sessions[0].clone();
+    let tab = |app: &str, detail: &str, volume: f32| pcvc_audio::Session {
+        id: MockBackend::session_id(&device.id, app),
+        volume,
+        ..firefox.clone().with_detail(detail)
+    };
+    let mut discord = device.sessions[2].clone().with_detail("#general - Voice");
+    discord.muted = true;
+    device.sessions = vec![
+        tab("firefox", "Big Buck Bunny - YouTube", 100.0),
+        tab(
+            "firefox-2",
+            "\u{5d7}\u{5d3}\u{5e9}\u{5d5}\u{5ea} - \u{5e2}\u{5e8}\u{5d5}\u{5e5} 12",
+            72.0,
+        ),
+        tab(
+            "firefox-3",
+            "Lofi beats \u{1f3a7} to relax to - YouTube",
+            45.0,
+        ),
+        device.sessions[1].clone(),
+        discord,
+        pcvc_audio::Session::new(
+            MockBackend::session_id(&device.id, "cpal"),
+            "cpal-playback-660845 with a much longer stream name",
+            70.0,
+        )
+        .with_detail("A very long detail, as long as a stream title can be, that fits nowhere"),
+        tab("firefox-4", "Radio Paradise - Main Mix", 30.0),
+        tab("firefox-5", "Radio Paradise - Main Mix", 30.0),
+    ];
+    h.backend.add_device(device).unwrap();
+    h.refresh_audio();
+}
+
+/// The Firefox icon found, misses (letter tiles) for Spotify and Discord,
+/// and the long session still pending.
+fn resolve_detail_icons(h: &mut Harness) {
+    let sessions = h.sessions();
+    let app = icons::rasterize(icons::APP, style::APP_ICON as u32).unwrap();
+    h.resolve_icon(
+        &sessions[0],
+        Some(image::Handle::from_rgba(app.width, app.height, app.pixels)),
+    );
+    h.resolve_icon(&sessions[3], None);
+    h.resolve_icon(&sessions[4], None);
 }
 
 /// Adds a session to the default device and delivers the new snapshot.
@@ -753,11 +809,11 @@ fn mini_shows_the_mixer_rows() {
         .iter()
         .map(|p| middle(&mut ui, p))
         .collect();
-    let step = style::MINI_ROW + style::COMPACT.row_spacing;
+    let step = style::MINI_APP_ROW + style::COMPACT.row_spacing;
     for pair in rows.windows(2) {
         assert!((pair[1] - pair[0] - step).abs() < 0.5, "{rows:?}");
     }
-    let bottom = rows[4] + style::MINI_ROW / 2.0 + style::MINI_PADDING.bottom;
+    let bottom = rows[4] + style::MINI_APP_ROW / 2.0 + style::MINI_PADDING.bottom;
     assert!((bottom - h.app.mini_height).abs() < 0.5, "{bottom}");
 }
 
@@ -897,21 +953,10 @@ fn render_mini() {
     let Ok(dir) = std::env::var("PCVC_SNAPSHOT_DIR") else {
         return;
     };
-    let mut h = mini_harness();
-    let mut device = h.backend.snapshot().unwrap().default_device.unwrap();
-    device.name = "Arctis Nova Pro Wireless Analog Stereo".into();
-    h.backend.add_device(device).unwrap();
-    h.refresh_audio();
+    let mut h = Harness::new();
+    use_detail_device(&mut h);
     let id = h.open_mini();
-    let sessions = h.sessions();
-    let app = icons::rasterize(icons::APP, style::APP_ICON as u32).unwrap();
-    h.resolve_icon(
-        &sessions[0],
-        Some(image::Handle::from_rgba(app.width, app.height, app.pixels)),
-    );
-    for session in &sessions[1..4] {
-        h.resolve_icon(session, None);
-    }
+    resolve_detail_icons(&mut h);
     let mut empty = Harness::new();
     for session in empty.sessions() {
         empty.backend.remove_session(&session.id).unwrap();
@@ -927,5 +972,178 @@ fn render_mini() {
             let path = format!("{dir}/mini-empty-{name}-{scale}x.png");
             render_png(empty.app.view(empty_id), size, scale, &theme, &path);
         }
+    }
+}
+
+/// The Mixer page at a size with room for every row.
+fn full_ui(h: &Harness) -> Simulator<'_, Message> {
+    Simulator::with_size(
+        iced::Settings::default(),
+        Size::new(800.0, 900.0),
+        h.app.mixer_view(),
+    )
+}
+
+/// The content and bounds of the first text below `below` whose content
+/// satisfies `matches`.
+fn text_bounds(
+    ui: &mut Simulator<'_, Message>,
+    below: f32,
+    matches: impl Fn(&str) -> bool + Send,
+) -> (String, iced::Rectangle) {
+    ui.find(move |c: iced_test::selector::Candidate<'_>| match c {
+        iced_test::selector::Candidate::Text {
+            content, bounds, ..
+        } if bounds.y > below && matches(content) => Some((content.to_owned(), bounds)),
+        _ => None,
+    })
+    .unwrap()
+}
+
+/// Delivers the backend's state as the watcher does, returning what the
+/// update asks the runtime to do.
+fn deliver_audio(h: &mut Harness) -> Task<Message> {
+    let state = h.backend.snapshot().unwrap();
+    let _guard = h.runtime.enter();
+    h.app.update(Message::Inbound(Inbound::Audio(state)))
+}
+
+#[test]
+fn rows_keep_their_height_as_details_come_and_go() {
+    let mut h = Harness::new();
+    h.open_window();
+    h.open_mini();
+    let sessions = h.sessions();
+    let (firefox, discord) = (&sessions[0].id, &sessions[2].id);
+    let percents = ["100%", "65%", "40%", "55%"];
+    let rows = |mut ui: Simulator<'_, Message>| percents.map(|p| middle(&mut ui, p));
+    let full = rows(full_ui(&h));
+    let mini = rows(h.mini_ui());
+    let mini_height = h.app.mini_height;
+    // Rows are evenly spaced at each density's fixed height.
+    for (rows, step) in [
+        (
+            full,
+            style::REGULAR.name_height + style::REGULAR.row_spacing,
+        ),
+        (mini, style::MINI_APP_ROW + style::COMPACT.row_spacing),
+    ] {
+        for pair in rows.windows(2) {
+            assert!((pair[1] - pair[0] - step).abs() < 0.5, "{rows:?}");
+        }
+    }
+    h.run(vec![Message::Mixer(MixerMessage::ToggleMute(
+        Target::Session(discord.clone()),
+    ))]);
+    h.wait_for(|s| s.default_device.as_ref().unwrap().sessions[2].muted);
+    // Short enough not to be shortened in either.
+    let steps = [
+        Some("Big Buck Bunny"),
+        Some("Main Mix"),
+        None,
+        Some("Big Buck Bunny"),
+    ];
+    for detail in steps {
+        h.backend.set_session_detail(firefox, detail).unwrap();
+        h.backend
+            .set_session_detail(discord, detail.map(|_| "#general"))
+            .unwrap();
+        let task = deliver_audio(&mut h);
+        assert_eq!(task.units(), 0, "the mini mixer keeps its size");
+        assert_eq!(h.app.mini_height, mini_height);
+        assert_eq!(rows(full_ui(&h)), full);
+        assert_eq!(rows(h.mini_ui()), mini);
+        for (mut ui, percents) in [(full_ui(&h), full), (h.mini_ui(), mini)] {
+            // A name without a detail is centred in its row.
+            assert!((middle(&mut ui, "Spotify") - percents[1]).abs() < 0.5);
+            let name = ui.find("Firefox").unwrap().bounds();
+            match detail {
+                None => {
+                    assert!((name.center_y() - percents[0]).abs() < 0.5);
+                    assert!(ui.find("#general").is_err());
+                }
+                Some(detail) => {
+                    // Name above the middle, detail below, in one column.
+                    let below = ui.find(detail).unwrap().bounds();
+                    assert!(name.center_y() < percents[0] && below.center_y() > percents[0]);
+                    assert_eq!(below.x, name.x);
+                    assert!(below.height < name.height);
+                    assert!(below.y >= name.y + name.height - 0.5);
+                    // The muted row shows its detail beneath its name.
+                    let muted = ui.find("#general").unwrap().bounds();
+                    assert!(muted.center_y() > percents[2]);
+                    ui.find("Unmute").unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn long_details_are_shortened_within_the_name_column() {
+    let mut h = Harness::new();
+    use_detail_device(&mut h);
+    h.open_window();
+    h.open_mini();
+    let mini_width = style::MINI_WIDTH - style::MINI_PADDING.left - style::MINI_PADDING.right;
+    let views = [
+        (
+            Simulator::with_size(iced::Settings::default(), MIN_SIZE, h.app.mixer_view()),
+            mixer::MixerColumns::new(MIN_SIZE.width, &style::REGULAR),
+        ),
+        (
+            h.mini_ui(),
+            mixer::MixerColumns::new(mini_width, &style::COMPACT),
+        ),
+    ];
+    for (mut ui, cols) in views {
+        let (name, name_bounds) = text_bounds(&mut ui, 0.0, |c| c.starts_with("cpal-"));
+        let (detail, detail_bounds) = text_bounds(&mut ui, 0.0, |c| c.starts_with("A very"));
+        for (text, bounds) in [(&name, name_bounds), (&detail, detail_bounds)] {
+            assert!(text.ends_with('\u{2026}'), "{text:?}");
+            assert!(bounds.width <= cols.name + 0.5, "{text:?} {bounds:?}");
+        }
+        assert_eq!(detail_bounds.x, name_bounds.x);
+        // Right-to-left and emoji details are shown as they are.
+        let (rtl, _) = text_bounds(&mut ui, 0.0, |c| c.contains('\u{5d7}'));
+        assert!(rtl.starts_with('\u{5d7}'), "{rtl:?}");
+        text_bounds(&mut ui, 0.0, |c| c.starts_with("Lofi beats"));
+        // Two tabs on the same page are two rows.
+        let (_, first) = text_bounds(&mut ui, 0.0, |c| c.starts_with("Radio Paradise"));
+        let (_, second) = text_bounds(&mut ui, first.y, |c| c.starts_with("Radio Paradise"));
+        assert!(second.y >= first.y + first.height);
+    }
+    // The mini mixer is as tall as its eight rows, which all fit.
+    assert_eq!(h.app.mini_height, height(Body::Rows(8)));
+    assert!(h.app.mini_height < style::MINI_MAX_HEIGHT);
+    let mut ui = h.mini_ui();
+    let (_, first) = text_bounds(&mut ui, 0.0, |c| c == "30%");
+    let (_, last) = text_bounds(&mut ui, first.y, |c| c == "30%");
+    let bottom = last.center_y() + style::MINI_APP_ROW / 2.0 + style::MINI_PADDING.bottom;
+    assert!((bottom - h.app.mini_height).abs() < 0.5, "{bottom}");
+}
+
+#[test]
+fn detail_changes_keep_a_held_volume() {
+    let mut h = Harness::new();
+    h.open_window();
+    h.open_mini();
+    let spotify = h.sessions()[1].clone();
+    let target = Target::Session(spotify.id.clone());
+    // The first value goes out, the second is held by the throttle.
+    h.run(vec![
+        Message::Mixer(MixerMessage::Slide(target.clone(), 20.0)),
+        Message::Mixer(MixerMessage::Slide(target.clone(), 21.0)),
+    ]);
+    let timer = h.app.mixer_timer;
+    assert!(timer.is_some());
+    for detail in [Some("Song One"), Some("Song Two"), None] {
+        h.backend.set_session_detail(&spotify.id, detail).unwrap();
+        let task = deliver_audio(&mut h);
+        assert_eq!(task.units(), 0);
+        assert_eq!(h.app.mixer.volume(&target, spotify.volume), 21.0);
+        assert_eq!(h.app.mixer_timer, timer);
+        simulator(h.app.mixer_view()).find("21%").unwrap();
+        h.mini_ui().find("21%").unwrap();
     }
 }

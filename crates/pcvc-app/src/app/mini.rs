@@ -263,7 +263,7 @@ impl App {
                 text("Reading audio devices...")
                     .size(style::TEXT_COMPACT)
                     .style(style::muted_text),
-                &style::COMPACT,
+                style::COMPACT.row_height,
             ),
             Some(audio) => responsive(move |size| self.mini_layout(audio, size.width)).into(),
         };
@@ -295,7 +295,7 @@ impl App {
                     text("No default playback device")
                         .size(density.text)
                         .style(style::muted_text),
-                    density,
+                    density.row_height,
                 )),
             ]
             .spacing(style::MINI_GAP)

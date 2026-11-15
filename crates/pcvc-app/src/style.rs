@@ -38,6 +38,8 @@ pub const STATUS_ICON: f32 = 64.0;
 pub struct Density {
     /// Labels, names, percentages and mute buttons.
     pub text: f32,
+    /// Session details, beneath the name.
+    pub detail_text: f32,
     /// The "Master" label.
     pub master_text: f32,
     /// Between the columns of a row.
@@ -59,16 +61,24 @@ pub struct Density {
     /// The slider keeps at least this much before the label shrinks below
     /// its minimum.
     pub slider_min: f32,
-    /// Every row's height, when fixed.
+    /// The height of the device picker's and the master's rows and of
+    /// notes, when fixed.
     pub row_height: Option<f32>,
+    /// An application's name and the line for its detail beneath, kept
+    /// whether or not it has one so rows never change height. Whole
+    /// pixels, at least both lines' height.
+    pub name_height: f32,
+    /// The height of application rows, when fixed.
+    pub app_row_height: Option<f32>,
 }
 
 /// The window's Mixer page.
 pub const REGULAR: Density = Density {
     text: TEXT_DEFAULT,
+    detail_text: TEXT_SMALL,
     master_text: TEXT_SECTION,
     spacing: SPACE_M,
-    row_spacing: SPACE_M,
+    row_spacing: SPACE_S,
     inset: SPACE_L,
     mute_width: 90.0,
     mute_padding: btn::DEFAULT_PADDING,
@@ -84,12 +94,15 @@ pub const REGULAR: Density = Density {
     label_max: 260.0,
     slider_min: 80.0,
     row_height: None,
+    name_height: 38.0,
+    app_row_height: None,
 };
 
 /// The mini mixer. Rows have a fixed height, so the window can be sized
 /// for its rows before it is drawn.
 pub const COMPACT: Density = Density {
     text: TEXT_COMPACT,
+    detail_text: TEXT_COMPACT_DETAIL,
     master_text: TEXT_COMPACT,
     spacing: SPACE_S,
     row_spacing: SPACE_XS,
@@ -113,15 +126,20 @@ pub const COMPACT: Density = Density {
     label_max: 160.0,
     slider_min: 80.0,
     row_height: Some(MINI_ROW),
+    name_height: MINI_APP_ROW,
+    app_row_height: Some(MINI_APP_ROW),
 };
 
 pub const TEXT_COMPACT: f32 = 14.0;
+pub const TEXT_COMPACT_DETAIL: f32 = 12.0;
 
-/// The mini mixer: a fixed width, and a height that follows its rows up to
+/// The mini mixer: a fixed width, with room for a few words of each
+/// session's detail, and a height that follows its rows up to
 /// `MINI_MAX_HEIGHT` (see `mini::height`).
-pub const MINI_WIDTH: f32 = 400.0;
+pub const MINI_WIDTH: f32 = 440.0;
 pub const MINI_MAX_HEIGHT: f32 = 460.0;
 pub const MINI_ROW: f32 = 32.0;
+pub const MINI_APP_ROW: f32 = 34.0;
 /// Inside the frame. On the right the scroll gutter, which every row
 /// keeps, does the padding; one pixel clears the frame's border.
 pub const MINI_PADDING: Padding = Padding {
@@ -147,6 +165,8 @@ pub const APP_ICON_GAP: f32 = SPACE_S;
 pub const APP_ICON_LETTER: f32 = 13.0;
 /// Opacity of a muted application's icon.
 pub const MUTED_OPACITY: f32 = 0.45;
+/// Opacity of a muted application's detail, already a dim colour.
+pub const MUTED_DETAIL_OPACITY: f32 = 0.6;
 
 pub const TOOLTIP_DELAY: Duration = Duration::from_millis(400);
 
@@ -321,9 +341,47 @@ pub fn muted_text(theme: &Theme) -> text::Style {
     text::secondary(theme)
 }
 
+/// A session's detail beneath its name; fainter when it is muted.
+pub fn session_detail(muted: bool) -> impl Fn(&Theme) -> text::Style {
+    move |theme| {
+        let color = theme.extended_palette().secondary.base.color;
+        text::Style {
+            color: Some(if muted {
+                color.scale_alpha(MUTED_DETAIL_OPACITY)
+            } else {
+                color
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_and_details_fit_their_rows() {
+        // iced's default line height.
+        let line = |size: f32| size * 1.3;
+        for d in [REGULAR, COMPACT] {
+            assert!(d.name_height >= line(d.text) + line(d.detail_text), "{d:?}");
+            assert!(d.detail_text < d.text);
+            assert_eq!(d.name_height, d.name_height.round());
+            if let Some(row) = d.app_row_height {
+                assert!(row >= d.name_height);
+            }
+        }
+    }
+
+    #[test]
+    fn muted_details_are_fainter() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let normal = session_detail(false)(&theme).color.unwrap();
+            let muted = session_detail(true)(&theme).color.unwrap();
+            assert!(muted.a < normal.a);
+            assert_ne!(normal, theme.extended_palette().background.base.text);
+        }
+    }
 
     #[test]
     fn muted_sliders_are_greyed() {
