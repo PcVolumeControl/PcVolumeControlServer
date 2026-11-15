@@ -20,7 +20,8 @@ const CACHE_CAPACITY: usize = 256;
 /// Fits remembered per label: the window being resized must not grow them.
 const SIZES_PER_LABEL: usize = 4;
 
-/// Fits by (size, width) bits. `None` means the content fits as it is.
+/// Fits by (size, width) bits, least recently used first. `None` means the
+/// content fits as it is.
 type Fits = Vec<((u32, u32), Option<String>)>;
 
 /// Fitted labels by content. When the current generation is full it
@@ -36,22 +37,33 @@ struct FitCache {
 
 impl FitCache {
     fn get(&mut self, content: &str, key: (u32, u32)) -> Option<Option<String>> {
-        if !self.current.contains_key(content)
-            && let Some((content, fits)) = self.previous.remove_entry(content)
-        {
-            self.make_room();
-            self.current.insert(content, fits);
+        if let Some(fits) = self.current.get_mut(content) {
+            return Self::hit(fits, key);
         }
-        let fits = self.current.get(content)?;
-        let (_, fitted) = fits.iter().find(|(k, _)| *k == key)?;
-        Some(fitted.clone())
+        let (content, mut fits) = self.previous.remove_entry(content)?;
+        let hit = Self::hit(&mut fits, key);
+        self.make_room();
+        self.current.insert(content, fits);
+        hit
+    }
+
+    /// The fit for `key`, which becomes the most recently used.
+    fn hit(fits: &mut Fits, key: (u32, u32)) -> Option<Option<String>> {
+        let i = fits.iter().position(|(k, _)| *k == key)?;
+        let used = fits.remove(i);
+        let fitted = used.1.clone();
+        fits.push(used);
+        Some(fitted)
     }
 
     fn insert(&mut self, content: &str, key: (u32, u32), fitted: Option<String>) {
-        if !self.current.contains_key(content) {
-            self.make_room();
-        }
-        let fits = self.current.entry(content.to_owned()).or_default();
+        let fits = match self.current.get_mut(content) {
+            Some(fits) => fits,
+            None => {
+                self.make_room();
+                self.current.entry(content.to_owned()).or_default()
+            }
+        };
         if fits.len() >= SIZES_PER_LABEL {
             fits.remove(0);
         }
@@ -208,6 +220,15 @@ mod tests {
         assert_eq!(cache.current["Firefox"].len(), SIZES_PER_LABEL);
         assert_eq!(cache.get("Firefox", (1, 99)), Some(None));
         assert_eq!(cache.get("Firefox", (1, 0)), None);
+        // A size in use (another window's) outlives sizes passed through.
+        cache.insert("Firefox", (2, 0), Some("Fire\u{2026}".into()));
+        for width in 100..200 {
+            cache.insert("Firefox", (1, width), None);
+            assert_eq!(
+                cache.get("Firefox", (2, 0)),
+                Some(Some("Fire\u{2026}".into()))
+            );
+        }
     }
 
     #[test]

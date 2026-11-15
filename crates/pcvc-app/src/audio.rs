@@ -201,18 +201,19 @@ mod tests {
         let backend: Arc<dyn AudioBackend> = mock.clone();
         let (inbox, receiver) = inbox::channel();
         let mut rx = receiver.take_stream().unwrap();
+        // The watcher's first snapshot is taken after this.
+        let spawned = Instant::now();
         spawn_watcher_with(backend, inbox, INTERVAL);
         let first = next(&mut rx, Duration::from_secs(2)).await.unwrap();
         let session = first.default_device.unwrap().sessions[0].clone();
 
-        // A burst of titles is one snapshot, an interval after the last
+        // A burst of titles is one snapshot, an interval after the first
         // one, with the latest title.
-        let start = Instant::now();
         for title in ["One", "Two", "Three"] {
             mock.set_session_detail(&session.id, Some(title)).unwrap();
         }
         let state = next(&mut rx, 2 * INTERVAL).await.unwrap();
-        assert!(start.elapsed() >= INTERVAL / 2, "{:?}", start.elapsed());
+        assert!(spawned.elapsed() >= INTERVAL, "{:?}", spawned.elapsed());
         assert_eq!(detail(&state), Some("Three"));
         assert!(next(&mut rx, INTERVAL / 2).await.is_none());
 
