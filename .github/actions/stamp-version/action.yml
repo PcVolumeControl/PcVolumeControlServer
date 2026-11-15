@@ -1,0 +1,26 @@
+name: Stamp the release version
+description: Sets the workspace package version to the release version.
+inputs:
+  version:
+    description: The version to build, without the leading v.
+    required: true
+runs:
+  using: composite
+  steps:
+    # bash is Git Bash on the Windows runner.
+    - shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        current=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)".*/\1/p' Cargo.toml)
+        if [ -z "$current" ]; then
+          echo "::error::no version under [workspace.package] in Cargo.toml"
+          exit 1
+        fi
+        if [ "$current" != "$VERSION" ]; then
+          sed -i -E '/^\[workspace\.package\]/,/^\[/ s/^version = "[^"]*"/version = "'"$VERSION"'"/' Cargo.toml
+          # Rewrites only the workspace members' entries in Cargo.lock, so
+          # the build can still use --locked.
+          cargo update --workspace
+        fi
+        echo "building version $VERSION (Cargo.toml had $current)"

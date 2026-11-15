@@ -2,10 +2,13 @@
 
 ## Versions
 
-The release version is `version` under `[workspace.package]` in the root
-`Cargo.toml`; every crate inherits it. From it come `pcvolumecontrol
+A release takes its version from its tag: `v1.2.3` builds version `1.2.3`.
+The release workflow writes that version into `[workspace.package]` in the
+root `Cargo.toml` before it builds, so it reaches `pcvolumecontrol
 --version`, the Status page, the Windows executable's version resource, the
-`.deb` version, the installer version and the artifact names.
+`.deb` version, the installer version and the artifact names. The version
+committed in `Cargo.toml` is what builds from source report; it does not have
+to match the tag.
 
 `APPLICATION_VERSION` in `crates/pcvc-protocol/src/lib.rs` is a separate
 string sent to phones in every full state (`applicationVersion`). It continues
@@ -15,23 +18,26 @@ for a release.
 
 ## Steps
 
-1. Bump `version` in the root `Cargo.toml` and run `cargo check` so
-   `Cargo.lock` picks up the new workspace versions.
-2. Commit, push to `main` and wait for CI to pass. The release workflow runs
-   the same checks again and builds nothing if they fail.
-3. Tag that commit and push the tag:
+1. Make sure CI passed on the commit to release.
+2. Tag it and push the tag:
 
    ```sh
    git tag v1.2.3
    git push origin v1.2.3
    ```
 
-   The tag must be `v` plus the package version; the release workflow fails
-   otherwise. A tag with a pre-release suffix (`v1.2.3-rc.1`) makes a
-   pre-release.
-4. The `Release` workflow builds the artifacts and attaches them to a draft
-   GitHub release with generated notes. Smoke test them (below), edit the
-   notes, then publish the draft.
+   The tag must look like `v1.2.3` or, for a pre-release, `v1.2.3-rc.1`.
+3. The `Release` workflow runs the CI checks again, builds the artifacts and
+   publishes a GitHub release for the tag with generated notes and the
+   artifacts attached. A tag with a pre-release suffix is published as a
+   pre-release. Nothing is published if a check or a build fails.
+
+To see what a release would contain without publishing one, run the workflow
+by hand with a version: the artifacts are attached to the workflow run.
+
+```sh
+gh workflow run release.yml -f version=1.2.3-test
+```
 
 ## Artifacts
 

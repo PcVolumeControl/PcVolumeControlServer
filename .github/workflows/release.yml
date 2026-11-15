@@ -1,8 +1,16 @@
 name: Release
 
+# Pushing a tag such as v1.2.3 builds the artifacts and publishes a GitHub
+# release for it. A manual run builds the same artifacts for the given
+# version and stops before publishing.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build without publishing, for example 1.2.3-test
+        required: true
 
 permissions:
   contents: read
@@ -13,7 +21,9 @@ env:
 # Release builds start from a clean target directory (no rust-cache) so a
 # poisoned or stale cache cannot reach published binaries.
 jobs:
+  # After the version job, so a malformed tag fails before any check runs.
   ci:
+    needs: version
     uses: ./.github/workflows/ci.yml
 
   version:
@@ -21,20 +31,14 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Check the tag matches the package version
+      - name: Take the version from the tag
         id: version
-        # The runner's stable cargo is enough to read metadata.
         env:
-          RUSTUP_TOOLCHAIN: stable
+          REQUESTED: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 --locked \
-            | jq -r '.packages[] | select(.name == "pcvolumecontrol") | .version')
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match package version $version"
+          version="${REQUESTED#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::'$REQUESTED' is not a version like v1.2.3 or v1.2.3-rc.1"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -52,6 +56,10 @@ jobs:
 
       - run: rustup toolchain install --no-self-update --profile minimal
 
+      - uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ needs.version.outputs.version }}
+
       - uses: ./.github/actions/linux-deps
 
       - name: Install cargo-deb
@@ -63,7 +71,10 @@ jobs:
       - name: Package .deb
         run: |
           mkdir -p dist
-          cargo deb -p pcvolumecontrol --no-build --output dist/
+          # Named with the tag's version: cargo-deb's default name spells a
+          # pre-release with "~", which GitHub rewrites in asset names.
+          cargo deb -p pcvolumecontrol --no-build \
+            --output "dist/pcvolumecontrol_$VERSION-1_amd64.deb"
 
       - name: Package tar.gz
         run: |
@@ -95,6 +106,10 @@ jobs:
           persist-credentials: false
 
       - run: rustup toolchain install --no-self-update --profile minimal
+
+      - uses: ./.github/actions/stamp-version
+        with:
+          version: ${{ needs.version.outputs.version }}
 
       - name: Build
         run: cargo build --release --locked -p pcvolumecontrol
@@ -131,6 +146,8 @@ jobs:
           if-no-files-found: error
 
   publish:
+    # A manual run stops here, with the artifacts attached to the run.
+    if: github.event_name == 'push'
     needs: [linux, windows]
     runs-on: ubuntu-latest
     permissions:
@@ -145,10 +162,9 @@ jobs:
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS
 
-      # A draft, so the artifacts can be smoke tested before publishing.
       - uses: softprops/action-gh-release@v3
         with:
-          draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: dist/*
