@@ -4,12 +4,20 @@
 //! the list of active playback devices, accepts the three kinds of change the
 //! protocol supports, and notifies listeners through [`AudioEvent`]s.
 //! [`MockBackend`] is always available; platform backends (Windows Core Audio,
-//! PulseAudio) will live in `cfg`-gated modules of this crate.
+//! PulseAudio) live in `cfg`-gated modules of this crate.
 
 mod mock;
+#[cfg(target_os = "linux")]
+mod pulse;
+#[cfg(any(target_os = "windows", test))]
+mod windows;
 
+#[cfg(target_os = "windows")]
+pub use self::windows::WindowsBackend;
 pub use mock::MockBackend;
 use pcvc_protocol::Command;
+#[cfg(target_os = "linux")]
+pub use pulse::PulseBackend;
 use tokio::sync::broadcast;
 
 /// Snapshot of the audio system as the protocol presents it.

@@ -11,3 +11,30 @@ repository.workspace = true
 pcvc-protocol.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding.workspace = true
+libpulse-sys.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tracing.workspace = true
+windows-core = "0.62.2"
+windows = { version = "0.62.2", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
