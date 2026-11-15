@@ -36,6 +36,9 @@ pub const STATUS_ICON: f32 = 64.0;
 pub const LABEL_SHARE: f32 = 0.5;
 pub const LABEL_MIN: f32 = 120.0;
 pub const LABEL_MAX: f32 = 260.0;
+/// The slider keeps at least this much before the label shrinks below
+/// its minimum.
+pub const SLIDER_MIN: f32 = 80.0;
 
 /// Application icons in the Mixer.
 pub const APP_ICON: f32 = 24.0;
@@ -180,4 +183,23 @@ pub fn tooltip(theme: &Theme) -> container::Style {
 /// De-emphasised text such as section labels and hints.
 pub fn muted_text(theme: &Theme) -> text::Style {
     text::secondary(theme)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn muted_sliders_are_greyed() {
+        for theme in [Theme::Light, Theme::Dark] {
+            let status = slider::Status::Active;
+            let normal = volume_slider(false)(&theme, status);
+            let muted = volume_slider(true)(&theme, status);
+            assert_eq!(normal, slider::default(&theme, status));
+            assert_ne!(muted.rail.backgrounds, normal.rail.backgrounds);
+            assert_ne!(muted.handle.background, normal.handle.background);
+            let primary = theme.extended_palette().primary.base.color;
+            assert_ne!(muted.handle.background, primary.into());
+        }
+    }
 }

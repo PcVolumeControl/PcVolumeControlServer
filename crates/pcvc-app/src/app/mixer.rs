@@ -187,17 +187,25 @@ impl App {
         let selected = audio.default_device.as_ref().and_then(|device| {
             let info = audio.devices.iter().find(|d| d.id == device.id)?;
             let label = fit(&info.name, style::TEXT_DEFAULT, cols.picker_text);
-            Some(DeviceChoice::new(info).with_label(label.into_owned()))
-        });
-        let devices: Vec<DeviceChoice> = audio.devices.iter().map(DeviceChoice::new).collect();
-        let picker = row![
-            text("Output device").width(cols.label),
-            pick_list(devices, selected, |c| Message::Mixer(
-                MixerMessage::SelectDevice(c)
+            let shortened = matches!(label, Cow::Owned(_));
+            Some((
+                DeviceChoice::new(info).with_label(label.into_owned()),
+                shortened.then_some(info.name.as_str()),
             ))
-            .text_size(style::TEXT_DEFAULT)
-            .padding([style::SPACE_S, style::SPACE_M])
-            .width(Fill),
+        });
+        let full_name = selected.as_ref().and_then(|(_, full)| *full);
+        let devices: Vec<DeviceChoice> = audio.devices.iter().map(DeviceChoice::new).collect();
+        let list = pick_list(devices, selected.map(|(choice, _)| choice), |c| {
+            Message::Mixer(MixerMessage::SelectDevice(c))
+        })
+        .text_size(style::TEXT_DEFAULT)
+        .padding([style::SPACE_S, style::SPACE_M])
+        .width(Fill);
+        let picker = row![
+            container(text("Output device"))
+                .width(cols.label)
+                .clip(true),
+            with_tooltip(list, full_name),
         ]
         .spacing(style::SPACE_M)
         .align_y(Center);
@@ -214,8 +222,8 @@ impl App {
             text("Master").size(style::TEXT_SECTION).into(),
             &cols,
             Target::Master,
-            device.volume,
-            device.muted,
+            self.mixer.volume(&Target::Master, device.volume),
+            self.mixer.muted(&Target::Master, device.muted),
         );
         let top = container(column![picker, master].spacing(style::SPACE_L))
             .padding(style::SPACE_L)
@@ -227,17 +235,13 @@ impl App {
                 .into()
         } else {
             column(device.sessions.iter().map(|s| {
-                let muted = self.mixer.muted(&Target::Session(s.id.clone()), s.muted);
+                let target = Target::Session(s.id.clone());
+                let muted = self.mixer.muted(&target, s.muted);
                 let label = row![self.app_icon(s, muted), session_name(&s.name, cols.name)]
                     .spacing(style::APP_ICON_GAP)
                     .align_y(Center);
-                self.volume_row(
-                    label.into(),
-                    &cols,
-                    Target::Session(s.id.clone()),
-                    s.volume,
-                    s.muted,
-                )
+                let volume = self.mixer.volume(&target, s.volume);
+                self.volume_row(label.into(), &cols, target, volume, muted)
             }))
             .spacing(style::SPACE_M)
             .into()
@@ -299,7 +303,8 @@ impl App {
         }
     }
 
-    /// Label, slider, percentage and mute button. The label column has the
+    /// Label, slider, percentage and mute button, showing `volume` and
+    /// `muted` as the mixer model presents them. The label column has the
     /// same width in every row, so the sliders line up. A muted control
     /// shows a greyed slider and percentage and a highlighted Unmute button.
     fn volume_row<'a>(
@@ -307,11 +312,9 @@ impl App {
         label: Element<'a, Message>,
         cols: &MixerColumns,
         target: Target,
-        actual: f32,
+        volume: f32,
         muted: bool,
     ) -> Element<'a, Message> {
-        let volume = self.mixer.volume(&target, actual);
-        let muted = self.mixer.muted(&target, muted);
         let mute = button(text(if muted { "Unmute" } else { "Mute" }).center())
             .width(style::MUTE_WIDTH)
             .style(style::button(if muted {
@@ -335,26 +338,39 @@ impl App {
         } else {
             percent
         };
-        row![container(label).width(cols.label), fader, percent, mute]
-            .spacing(style::SPACE_M)
-            .align_y(Center)
-            .into()
+        row![
+            container(label).width(cols.label).clip(true),
+            fader,
+            percent,
+            mute
+        ]
+        .spacing(style::SPACE_M)
+        .align_y(Center)
+        .into()
     }
 }
 
 /// A session name fitted to `width`, with the full name in a tooltip when
 /// it had to be shortened.
 fn session_name(name: &str, width: f32) -> Element<'_, Message> {
-    match fit(name, style::TEXT_DEFAULT, width) {
-        Cow::Borrowed(name) => text(name)
-            .size(style::TEXT_DEFAULT)
-            .wrapping(text::Wrapping::None)
-            .into(),
-        Cow::Owned(short) => tooltip(
-            text(short)
-                .size(style::TEXT_DEFAULT)
-                .wrapping(text::Wrapping::None),
-            container(text(name).size(style::TEXT_SMALL))
+    let fitted = fit(name, style::TEXT_DEFAULT, width);
+    let full = matches!(fitted, Cow::Owned(_)).then_some(name);
+    let label = text(fitted)
+        .size(style::TEXT_DEFAULT)
+        .wrapping(text::Wrapping::None);
+    with_tooltip(label, full)
+}
+
+/// `content`, with `full` in a tooltip on hover when given.
+fn with_tooltip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    full: Option<&'a str>,
+) -> Element<'a, Message> {
+    match full {
+        None => content.into(),
+        Some(full) => tooltip(
+            content,
+            container(text(full).size(style::TEXT_SMALL))
                 .padding([style::SPACE_XS, style::SPACE_S])
                 .style(style::tooltip),
             tooltip::Position::Top,
@@ -383,9 +399,12 @@ impl MixerColumns {
         let row = (width - style::SCROLL_GUTTER - 2.0 * style::SPACE_L).max(0.0);
         let fixed = style::PERCENT_WIDTH + style::MUTE_WIDTH + 3.0 * style::SPACE_M;
         let flexible = (row - fixed).max(0.0);
-        let label = (flexible * style::LABEL_SHARE)
+        let share = flexible * style::LABEL_SHARE;
+        // Too narrow for both minimums (the window may be forced below its
+        // minimum size), the label gives way first, then both shrink alike.
+        let label = share
             .clamp(style::LABEL_MIN, style::LABEL_MAX)
-            .min(flexible);
+            .min((flexible - style::SLIDER_MIN).max(share));
         let picker = (row - label - style::SPACE_M).max(0.0);
         Self {
             label,
@@ -401,21 +420,36 @@ impl MixerColumns {
 mod tests {
     use super::*;
 
+    /// Width of the slider for a page `width`.
+    fn slider(width: f32) -> f32 {
+        let row = width - style::SCROLL_GUTTER - 2.0 * style::SPACE_L;
+        row - MixerColumns::new(width).label
+            - style::PERCENT_WIDTH
+            - style::MUTE_WIDTH
+            - 3.0 * style::SPACE_M
+    }
+
     #[test]
     fn columns_scale_within_bounds() {
-        let narrow = MixerColumns::new(400.0);
-        let default = MixerColumns::new(500.0);
+        let narrow = MixerColumns::new(450.0);
+        let default = MixerColumns::new(550.0);
         let wide = MixerColumns::new(1400.0);
         assert_eq!(narrow.label, style::LABEL_MIN);
         assert!(default.label > narrow.label && default.label < style::LABEL_MAX);
         assert_eq!(wide.label, style::LABEL_MAX);
-        for cols in [narrow, default, wide] {
+        for (cols, width) in [(narrow, 450.0), (default, 550.0), (wide, 1400.0)] {
             assert_eq!(
                 cols.name,
                 cols.label - style::APP_ICON - style::APP_ICON_GAP
             );
             assert!(cols.picker_text > cols.label);
+            assert!(slider(width) >= style::SLIDER_MIN);
         }
+        // Squeezed below the minimums, the slider keeps a share.
+        let squeezed = MixerColumns::new(300.0);
+        assert!(squeezed.label < style::LABEL_MIN);
+        assert!(slider(300.0) > 0.0);
+        assert_eq!(slider(300.0), squeezed.label);
         assert_eq!(MixerColumns::new(0.0).label, 0.0);
     }
 

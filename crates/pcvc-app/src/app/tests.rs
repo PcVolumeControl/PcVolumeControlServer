@@ -245,14 +245,14 @@ fn mixer_columns_line_up() {
 }
 
 #[test]
-fn mixer_shows_muted_sessions() {
+fn mixer_session_mute_shows_unmute() {
     let mut h = Harness::new();
     let spotify = h.sessions()[1].id.clone();
     h.run(vec![Message::Mixer(MixerMessage::ToggleMute(
         Target::Session(spotify),
     ))]);
     let mut ui = simulator(h.app.mixer_view());
-    // The master and three sessions are unmuted, one says Unmute.
+    // One session offers Unmute, the master and the others Mute.
     ui.find("Unmute").unwrap();
     ui.find("Mute").unwrap();
 }
