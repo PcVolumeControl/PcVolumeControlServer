@@ -48,6 +48,7 @@ gh workflow run release.yml -f version=1.2.3-test
 | `PcVolumeControl-<version>-setup.exe` | windows-latest | Inno Setup installer (`packaging/windows/pcvolumecontrol.iss`) |
 | `pcvolumecontrol-<version>-windows-x86_64.zip` | windows-latest | portable exe, LICENSE.txt, README |
 | `SHA256SUMS` | | checksums of the above |
+| `SHA256SUMS.minisig` | | minisign signature of `SHA256SUMS`, only once signing is set up (below) |
 
 The Linux binary needs glibc 2.35 (Ubuntu 22.04, Debian 12) or newer, set by
 the build runner. Windows builds are not code signed.
@@ -96,6 +97,22 @@ Windows (10 or 11):
   `PcVolumeControl` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` are gone.
 - The portable zip runs from an arbitrary folder.
+- From the previous release, installed: Status > Check now offers this
+  release, and Install and restart upgrades and restarts the app
+  ([WINDOWS-TESTING.md](WINDOWS-TESTING.md#7-updates) has the full list).
+
+## Update checks
+
+The app asks GitHub's `releases/latest` endpoint, which skips drafts and
+pre-releases, and compares the tag with its own version as SemVer. It finds
+its asset by the names in the table above, so keep them. A release without
+`SHA256SUMS` can still be found, but not installed.
+
+The `stamp-version` action also sets `PCVC_OFFICIAL_BUILD=1`, which
+`crates/pcvc-app/build.rs` turns into the `pcvc_official_build` cfg. Only
+such builds check by themselves and install updates; builds from source
+call themselves development builds and only check on request. Builds from
+a manual run of the workflow count as official too.
 
 ## Signing updates (optional)
 
