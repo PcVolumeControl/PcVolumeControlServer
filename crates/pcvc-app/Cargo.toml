@@ -1,12 +1,17 @@
 [package]
 name = "pcvolumecontrol"
-description = "PcVolumeControl desktop host: tray icon, server and mixer GUI"
+description = "Control this computer's volume from the PcVolumeControl phone apps"
 version.workspace = true
 edition.workspace = true
 # File::try_lock (single-instance lock) needs 1.89.
 rust-version = "1.89"
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "pcvolumecontrol"
