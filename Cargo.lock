@@ -2789,6 +2789,7 @@ dependencies = [
 name = "pcvc-protocol"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
 ]
@@ -2797,11 +2798,13 @@ dependencies = [
 name = "pcvc-server"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures-util",
  "hostname",
  "mdns-sd",
  "pcvc-audio",
  "pcvc-protocol",
+ "png 0.18.1",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",

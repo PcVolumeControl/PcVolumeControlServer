@@ -19,8 +19,8 @@ async fn main() -> std::process::ExitCode {
 
     use pcvc_audio::PulseBackend;
 
-    let config = match common::init("pulse_server") {
-        Ok(config) => config,
+    let config = match common::init("pulse_server", &[]) {
+        Ok((config, _)) => config,
         Err(code) => return code,
     };
     // The constructor blocks briefly while it connects.

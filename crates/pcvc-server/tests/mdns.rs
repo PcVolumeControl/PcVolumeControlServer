@@ -43,6 +43,8 @@ async fn advertises_while_running_and_withdraws_on_stop() {
             {
                 assert_eq!(service.get_property_val_str("version"), Some("1"));
                 assert_eq!(service.get_property_val_str("protocol"), Some("7"));
+                // No icon provider, so no v8 features.
+                assert_eq!(service.get_property_val_str("features"), None);
                 // Other responders for the same host (avahi, for one) may add
                 // IPv6 addresses, so only check that an IPv4 one is present.
                 assert!(service.addresses.iter().any(|a| a.to_ip_addr().is_ipv4()));
