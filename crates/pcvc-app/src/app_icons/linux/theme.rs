@@ -3,7 +3,8 @@
 //! directories.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Extensions tried, best first. XPM is not supported.
 const EXTENSIONS: [&str; 3] = ["svg", "svgz", "png"];
@@ -106,25 +107,28 @@ fn parse_index(text: &str) -> Theme {
     }
 }
 
-/// How well a file fits a request for `px` pixels; lower is better. Vector
-/// files fit any size; otherwise the smallest size at or above `px` wins,
-/// then the largest below it.
-fn score(dir: &ThemeDir, ext: &str, px: u32) -> (u8, u32) {
-    if ext != "png" {
-        return (0, 0);
-    }
+/// How well a file fits a request for `px` pixels; lower is better. A
+/// directory whose size range covers `px` fits; otherwise the smallest size
+/// above `px` wins, then the largest below it. At equal fit a vector file
+/// beats a PNG. Themes that draw each size separately (also as SVG) thus
+/// keep their per-size artwork.
+fn score(dir: &ThemeDir, ext: &str, px: u32) -> (u8, u32, u8) {
+    let ext_rank = u8::from(ext == "png");
     let lo = dir.min.saturating_mul(dir.scale);
     let hi = dir.max.saturating_mul(dir.scale);
-    if (lo..=hi).contains(&px) && dir.kind != DirKind::Fixed {
-        return (1, 0);
+    if (lo..=hi).contains(&px) {
+        return (0, 0, ext_rank);
     }
     let actual = dir.size.saturating_mul(dir.scale);
     if actual >= px {
-        (1, actual - px)
+        (1, actual - px, ext_rank)
     } else {
-        (2, px - actual)
+        (2, px - actual, ext_rank)
     }
 }
+
+/// File names of a directory, or `None` if it cannot be read.
+type Listing = Option<Arc<HashSet<String>>>;
 
 /// Icon themes found below a set of base directories (`~/.icons`,
 /// `$XDG_DATA_DIRS/icons`, ...), parsed on first use.
@@ -135,6 +139,9 @@ pub struct IconThemes {
     /// The theme chain, current theme first and `hicolor` last.
     chain: Vec<String>,
     themes: HashMap<String, Theme>,
+    /// Directory listings read so far, so a lookup checks names in memory
+    /// rather than stat-ing every candidate path.
+    listings: Mutex<HashMap<PathBuf, Listing>>,
 }
 
 impl IconThemes {
@@ -179,7 +186,26 @@ impl IconThemes {
             pixmaps,
             chain,
             themes,
+            listings: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn contains(&self, folder: &Path, file: &str) -> bool {
+        let listing = {
+            let mut listings = self.listings.lock().unwrap_or_else(PoisonError::into_inner);
+            listings
+                .entry(folder.to_path_buf())
+                .or_insert_with(|| {
+                    let names = std::fs::read_dir(folder)
+                        .ok()?
+                        .flatten()
+                        .filter_map(|e| e.file_name().into_string().ok())
+                        .collect();
+                    Some(Arc::new(names))
+                })
+                .clone()
+        };
+        listing.is_some_and(|names| names.contains(file))
     }
 
     #[cfg(test)]
@@ -193,20 +219,20 @@ impl IconThemes {
         if name.is_empty() || name.contains('/') {
             return None;
         }
+        let files = EXTENSIONS.map(|ext| (ext, format!("{name}.{ext}")));
         for theme_name in &self.chain {
             let theme = &self.themes[theme_name];
-            let mut best: Option<((u8, u32), PathBuf)> = None;
+            let mut best: Option<((u8, u32, u8), PathBuf)> = None;
             for dir in &theme.dirs {
                 for base in &self.bases {
                     let folder = base.join(theme_name).join(&dir.path);
-                    for ext in EXTENSIONS {
-                        let path = folder.join(format!("{name}.{ext}"));
-                        if !path.is_file() {
+                    for (ext, file) in &files {
+                        if !self.contains(&folder, file) {
                             continue;
                         }
                         let s = score(dir, ext, px);
                         if best.as_ref().is_none_or(|(b, _)| s < *b) {
-                            best = Some((s, path));
+                            best = Some((s, folder.join(file)));
                         }
                     }
                 }
@@ -216,10 +242,10 @@ impl IconThemes {
             }
         }
         self.pixmaps.iter().find_map(|dir| {
-            EXTENSIONS
+            files
                 .iter()
-                .map(|ext| dir.join(format!("{name}.{ext}")))
-                .find(|p| p.is_file())
+                .find(|(_, file)| self.contains(dir, file))
+                .map(|(_, file)| dir.join(file))
         })
     }
 }
@@ -259,8 +285,6 @@ pub fn parse_gsettings(output: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     const INDEX: &str = "\
@@ -317,6 +341,12 @@ Type=Scalable
             min: size,
             max: size,
         };
+        let scalable = ThemeDir {
+            kind: DirKind::Scalable,
+            min: 8,
+            max: 512,
+            ..dir(48, 1)
+        };
         let need = 48;
         let mut ranked = [
             (dir(16, 1), "png"),
@@ -326,19 +356,35 @@ Type=Scalable
             (dir(48, 1), "png"),
             (dir(24, 2), "png"),
             (dir(16, 1), "svg"),
+            (dir(48, 1), "svg"),
+            (scalable, "svg"),
         ];
         ranked.sort_by_key(|(d, ext)| score(d, ext, need));
-        let order: Vec<(u32, u32, &str)> =
-            ranked.iter().map(|(d, e)| (d.size, d.scale, *e)).collect();
+        let order: Vec<(u32, u32, &str)> = ranked
+            .iter()
+            .map(|(d, e)| {
+                (
+                    if d.kind == DirKind::Scalable {
+                        0
+                    } else {
+                        d.size
+                    },
+                    d.scale,
+                    *e,
+                )
+            })
+            .collect();
         assert_eq!(
             order,
             vec![
-                (16, 1, "svg"),
+                (48, 1, "svg"),
+                (0, 1, "svg"),
                 (48, 1, "png"),
                 (24, 2, "png"),
                 (64, 1, "png"),
                 (256, 1, "png"),
                 (32, 1, "png"),
+                (16, 1, "svg"),
                 (16, 1, "png"),
             ]
         );

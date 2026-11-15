@@ -3,9 +3,8 @@
 use std::path::Path;
 
 use resvg::tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
-use resvg::usvg;
 
-use crate::icons::Rgba;
+use crate::icons::{Rgba, fit, to_rgba};
 
 /// Larger files are not icons worth reading.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -29,7 +28,7 @@ pub fn load(path: &Path, size: u32) -> Option<Rgba> {
     let data = std::fs::read(path).ok()?;
     let pixmap = match ext.as_str() {
         "png" => png(&data, size),
-        _ => svg(&data, size),
+        _ => crate::icons::render(&data, size).ok(),
     };
     if pixmap.is_none() {
         tracing::debug!(path = %path.display(), "icon file could not be decoded");
@@ -37,25 +36,20 @@ pub fn load(path: &Path, size: u32) -> Option<Rgba> {
     pixmap.map(to_rgba)
 }
 
-pub fn svg(data: &[u8], size: u32) -> Option<Pixmap> {
-    let tree = usvg::Tree::from_data(data, &usvg::Options::default()).ok()?;
-    let natural = tree.size();
-    let mut pixmap = Pixmap::new(size, size)?;
-    let (scale, dx, dy) = fit(natural.width(), natural.height(), size);
-    let transform = Transform::from_translate(dx, dy).pre_scale(scale, scale);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    Some(pixmap)
-}
-
 pub fn png(data: &[u8], size: u32) -> Option<Pixmap> {
     let (w, h) = png_dimensions(data)?;
     if w == 0 || h == 0 || w > MAX_PNG_EDGE || h > MAX_PNG_EDGE {
         return None;
     }
-    let mut source = Pixmap::decode_png(data).ok()?;
+    let source = Pixmap::decode_png(data).ok()?;
+    fit_pixmap(source, size)
+}
+
+/// Draws `source` centred into a `size` square, keeping its aspect ratio.
+pub fn fit_pixmap(mut source: Pixmap, size: u32) -> Option<Pixmap> {
     // Bicubic sampling skips source pixels when shrinking by more than half,
-    // so large images are halved first.
-    while source.width() / 2 >= size && source.height() / 2 >= size {
+    // so large images are halved first. The longer side sets the scale.
+    while source.width().max(source.height()) / 2 >= size {
         source = scaled(&source, 0.5, FilterQuality::Bilinear)?;
     }
     let mut out = Pixmap::new(size, size)?;
@@ -105,31 +99,6 @@ fn scaled(source: &Pixmap, factor: f32, quality: FilterQuality) -> Option<Pixmap
         None,
     );
     Some(out)
-}
-
-/// Scale and offset that fit a `w` x `h` image centred in a `size` square.
-fn fit(w: f32, h: f32, size: u32) -> (f32, f32, f32) {
-    let size = size as f32;
-    let scale = size / w.max(h).max(f32::EPSILON);
-    (scale, (size - w * scale) / 2.0, (size - h * scale) / 2.0)
-}
-
-/// Straight-alpha pixels of a premultiplied pixmap.
-pub fn to_rgba(pixmap: Pixmap) -> Rgba {
-    let (width, height) = (pixmap.width(), pixmap.height());
-    let pixels = pixmap
-        .pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect();
-    Rgba {
-        pixels,
-        width,
-        height,
-    }
 }
 
 /// PNG encoding of an image, the form in which icons can leave the process.
@@ -211,6 +180,17 @@ mod tests {
         }
         assert!(load(&dir.path().join("missing.png"), 32).is_none());
         assert!(load(dir.path(), 32).is_none());
+    }
+
+    #[test]
+    fn halves_by_the_longer_side() {
+        let mut wide = Pixmap::new(1024, 128).unwrap();
+        wide.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
+        let icon = to_rgba(fit_pixmap(wide, 48).unwrap());
+        assert_eq!((icon.width, icon.height), (48, 48));
+        // 1024x128 fits as 48x6, centred vertically.
+        assert_eq!(alpha_at(&icon, 24, 24), 255);
+        assert_eq!(alpha_at(&icon, 24, 18), 0);
     }
 
     #[test]

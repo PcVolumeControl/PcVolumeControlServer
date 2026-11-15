@@ -17,7 +17,7 @@ use pcvc_audio::{AudioBackend, AudioState};
 use pcvc_protocol::Command;
 use pcvc_server::{ClientInfo, MdnsStatus};
 
-use crate::app_icons::{IconCache, IconKey, IconWorker, Request, Resolver};
+use crate::app_icons::{IconCache, IconKey, IconWorker, Resolver};
 use crate::audio::{self, CommandSender};
 use crate::config::{Config, WindowSize};
 use crate::inbox::{Inbound, Inbox, InboxReceiver};
@@ -132,8 +132,9 @@ pub struct App {
     mixer: Mixer,
     icon_worker: IconWorker,
     icons: IconCache<IconKey, image::Handle>,
-    /// The window's scale factor, for rendering icons at physical size.
-    scale_factor: f32,
+    /// The window's scale factor, for rendering icons at physical size;
+    /// unknown until a window has reported it.
+    scale_factor: Option<f32>,
     /// When the pending mixer wake-up fires, if one is scheduled.
     mixer_timer: Option<std::time::Instant>,
     local_ips: Vec<Ipv4Addr>,
@@ -191,7 +192,7 @@ impl App {
             mixer: Mixer::default(),
             icon_worker,
             icons: IconCache::new(ICON_CACHE_CAPACITY),
-            scale_factor: 1.0,
+            scale_factor: None,
             mixer_timer: None,
             local_ips: Vec::new(),
             local_ips_error: None,
@@ -253,7 +254,8 @@ impl App {
                 Task::none()
             }
             Message::Inbound(Inbound::AppIcon(resolved)) => {
-                self.icons.finish(resolved.key, resolved.icon);
+                self.icons
+                    .finish(resolved.key, resolved.icon, std::time::Instant::now());
                 Task::none()
             }
             Message::Inbound(Inbound::Server(update)) => self.server_update(update),
@@ -277,7 +279,7 @@ impl App {
             }
             Message::ScaleFactor(id, factor) => {
                 if self.window == Some(id) && factor.is_finite() && factor > 0.0 {
-                    self.scale_factor = factor;
+                    self.scale_factor = Some(factor);
                     self.request_icons();
                 }
                 Task::none()
@@ -397,13 +399,17 @@ impl App {
             ..Default::default()
         });
         self.window = Some(id);
+        // Uses the scale factor from an earlier window until this one
+        // reports its own.
         self.request_icons();
         opened.then(|id| window::scale_factor(id).map(move |f| Message::ScaleFactor(id, f)))
     }
 
-    /// Edge length of application icons in physical pixels.
-    fn icon_size(&self) -> u32 {
-        (style::APP_ICON * self.scale_factor.clamp(1.0, 4.0)).ceil() as u32
+    /// Edge length of application icons in physical pixels, once the scale
+    /// factor is known.
+    fn icon_size(&self) -> Option<u32> {
+        let scale = self.scale_factor?.clamp(1.0, 4.0);
+        Some((style::APP_ICON * scale).ceil() as u32)
     }
 
     /// Starts lookups for the icons of the shown sessions that are not
@@ -412,14 +418,17 @@ impl App {
         if self.window.is_none() {
             return;
         }
-        let Some(device) = self.audio.as_ref().and_then(|a| a.default_device.as_ref()) else {
+        let (Some(size), Some(device)) = (
+            self.icon_size(),
+            self.audio.as_ref().and_then(|a| a.default_device.as_ref()),
+        ) else {
             return;
         };
-        let size = self.icon_size();
+        let now = std::time::Instant::now();
         for session in &device.sessions {
-            let request = Request::new(session, size);
-            if self.icons.request(&request.key) {
-                self.icon_worker.request(request);
+            let key = IconKey::new(session, size);
+            if self.icons.request(&key, now) {
+                self.icon_worker.request(key);
             }
         }
     }
@@ -500,6 +509,12 @@ impl App {
             window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
+            iced::event::listen_with(|event, _, id| match event {
+                iced::Event::Window(window::Event::Rescaled(factor)) => {
+                    Some(Message::ScaleFactor(id, factor))
+                }
+                _ => None,
+            }),
             tick,
         ])
     }

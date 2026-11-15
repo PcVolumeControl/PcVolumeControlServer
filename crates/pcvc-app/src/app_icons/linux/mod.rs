@@ -6,17 +6,25 @@ mod theme;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use desktop::DesktopIndex;
 use theme::IconThemes;
 
-use super::{Request, Resolver, raster};
+use super::{IconKey, Resolver, raster};
 use crate::icons::Rgba;
 
 /// Longest wait for `gsettings`.
 const GSETTINGS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long the desktop entries and the icon theme are used before they
+/// are read again, so applications installed and theme changes made while
+/// the app runs are picked up.
+const REFRESH_AFTER: Duration = Duration::from_secs(60);
+
+/// Desktops whose icon theme is the GNOME setting.
+const GNOME_LIKE: [&str; 4] = ["GNOME", "Unity", "Budgie", "Pantheon"];
 
 /// Where to look. Built from the environment in production and from a
 /// fixture tree in tests.
@@ -110,14 +118,42 @@ impl Dirs {
             let path = self.config_home.as_ref()?.join(file);
             parse(&std::fs::read_to_string(path).ok()?)
         };
-        let kde = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.contains("KDE"));
-        let kde_theme = || config("kdeglobals", theme::parse_kdeglobals);
-        let detected = if kde { kde_theme() } else { None }
-            .or_else(gsettings_theme)
-            .or_else(|| config("gtk-3.0/settings.ini", theme::parse_gtk_settings))
-            .or_else(|| config("gtk-4.0/settings.ini", theme::parse_gtk_settings))
-            .or_else(kde_theme);
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        let has = |name: &str| desktop.split(':').any(|d| d.eq_ignore_ascii_case(name));
+        let kde = || config("kdeglobals", theme::parse_kdeglobals);
+        let gtk = || {
+            config("gtk-3.0/settings.ini", theme::parse_gtk_settings)
+                .or_else(|| config("gtk-4.0/settings.ini", theme::parse_gtk_settings))
+        };
+        let detected = if has("KDE") {
+            kde().or_else(gtk)
+        } else if GNOME_LIKE.iter().any(|d| has(d)) {
+            gsettings_theme().or_else(gtk)
+        } else {
+            gtk().or_else(gsettings_theme).or_else(kde)
+        };
         detected.unwrap_or_else(|| "hicolor".to_owned())
+    }
+}
+
+/// A value rebuilt when it is older than [`REFRESH_AFTER`].
+struct Refreshing<T>(Mutex<Option<(Instant, Arc<T>)>>);
+
+impl<T> Refreshing<T> {
+    fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    fn get(&self, build: impl FnOnce() -> T) -> Arc<T> {
+        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*slot {
+            Some((at, value)) if at.elapsed() < REFRESH_AFTER => Arc::clone(value),
+            _ => {
+                let value = Arc::new(build());
+                *slot = Some((Instant::now(), Arc::clone(&value)));
+                value
+            }
+        }
     }
 }
 
@@ -149,12 +185,12 @@ fn gsettings_theme() -> Option<String> {
     theme::parse_gsettings(&out)
 }
 
-/// Resolves icons from desktop entries and icon themes. The desktop
-/// entries and themes are read once, on first use.
+/// Resolves icons from desktop entries and icon themes, which are read on
+/// first use and again after [`REFRESH_AFTER`].
 pub struct LinuxResolver {
     dirs: Dirs,
-    desktop: OnceLock<DesktopIndex>,
-    themes: OnceLock<IconThemes>,
+    desktop: Refreshing<DesktopIndex>,
+    themes: Refreshing<IconThemes>,
 }
 
 /// Which step found an icon, for the logs.
@@ -171,21 +207,21 @@ impl LinuxResolver {
     pub fn new(dirs: Dirs) -> Self {
         Self {
             dirs,
-            desktop: OnceLock::new(),
-            themes: OnceLock::new(),
+            desktop: Refreshing::new(),
+            themes: Refreshing::new(),
         }
     }
 
-    fn desktop(&self) -> &DesktopIndex {
-        self.desktop.get_or_init(|| {
+    fn desktop(&self) -> Arc<DesktopIndex> {
+        self.desktop.get(|| {
             let index = DesktopIndex::scan(&self.dirs.application_dirs());
             tracing::debug!(entries = index.len(), "indexed desktop entries");
             index
         })
     }
 
-    fn themes(&self) -> &IconThemes {
-        self.themes.get_or_init(|| {
+    fn themes(&self) -> Arc<IconThemes> {
+        self.themes.get(|| {
             let current = self.dirs.current_theme();
             tracing::debug!(theme = %current, "icon theme");
             IconThemes::load(self.dirs.icon_bases(), self.dirs.pixmaps.clone(), &current)
@@ -207,11 +243,12 @@ impl LinuxResolver {
         self.themes().lookup(name, px)
     }
 
-    /// The icon files to try for a request, in order, with the step that
-    /// produced each. Computed lazily: later steps only run if earlier
-    /// files are missing or unreadable.
-    pub fn find(&self, request: &Request) -> Option<(PathBuf, Rgba, Via)> {
-        let key = &request.key;
+    /// The first icon that can be found and decoded, trying in order: the
+    /// declared icon name, the desktop entry for the app id, the Steam app id
+    /// of the process, then the desktop entries for the binary and for the
+    /// name. Steam comes before the binary because Proton games run as
+    /// Wine, whose own desktop entry would match the binary.
+    pub fn find(&self, key: &IconKey) -> Option<(PathBuf, Rgba, Via)> {
         let px = key.size;
         let attempt = |icon: Option<String>, via: Via| -> Option<(PathBuf, Rgba, Via)> {
             let path = self.icon_file(&icon?, px)?;
@@ -225,7 +262,7 @@ impl LinuxResolver {
                 attempt(desktop().by_app_id(app_id).map(str::to_owned), Via::AppId)
             })
             .or_else(|| {
-                let app = steam::app_id_of(&self.dirs.proc_root, request.process_id?)?;
+                let app = steam::app_id_of(&self.dirs.proc_root, key.process_id?)?;
                 attempt(Some(steam::icon_name(app)), Via::Steam)
             })
             .or_else(|| {
@@ -237,17 +274,17 @@ impl LinuxResolver {
 }
 
 impl Resolver for LinuxResolver {
-    fn resolve(&self, request: &Request) -> Option<Rgba> {
-        let found = self.find(request);
+    fn resolve(&self, key: &IconKey) -> Option<Rgba> {
+        let found = self.find(key);
         match &found {
             Some((path, _, via)) => tracing::debug!(
-                app = %request.key.name,
+                app = %key.name,
                 path = %path.display(),
                 ?via,
-                size = request.key.size,
+                size = key.size,
                 "resolved application icon"
             ),
-            None => tracing::debug!(app = %request.key.name, "no application icon found"),
+            None => tracing::debug!(app = %key.name, "no application icon found"),
         }
         found.map(|(_, rgba, _)| rgba)
     }
@@ -255,8 +292,6 @@ impl Resolver for LinuxResolver {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::app_icons::IconKey;
 
@@ -358,22 +393,20 @@ mod tests {
         }
     }
 
-    fn request(name: &str, configure: impl FnOnce(&mut IconKey)) -> Request {
+    fn request(name: &str, configure: impl FnOnce(&mut IconKey)) -> IconKey {
         let mut key = IconKey {
             name: Arc::from(name),
             icon_name: None,
             app_id: None,
             process_binary: None,
+            process_id: None,
             size: 32,
         };
         configure(&mut key);
-        Request {
-            key,
-            process_id: None,
-        }
+        key
     }
 
-    fn via(resolver: &LinuxResolver, request: &Request) -> Option<(String, Via)> {
+    fn via(resolver: &LinuxResolver, request: &IconKey) -> Option<(String, Via)> {
         resolver.find(request).map(|(path, rgba, via)| {
             assert_eq!((rgba.width, rgba.height), (32, 32));
             (

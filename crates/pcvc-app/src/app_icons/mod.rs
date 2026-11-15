@@ -1,11 +1,10 @@
 //! Application icons for the Mixer's session rows.
 //!
 //! A [`Resolver`] turns what a session says about its application
-//! ([`pcvc_audio::AppHint`]) into a square RGBA image; the platform
-//! resolvers search desktop entries and icon themes (Linux) or ask the shell
-//! for the executable's icon (Windows). Resolution blocks on the file
-//! system, so [`IconWorker`] runs it on a background thread and posts each
-//! result to the inbox. [`IconCache`] remembers results, including misses.
+//! ([`pcvc_audio::AppHint`]) into a square RGBA image; on Linux it searches
+//! desktop entries and icon themes. Resolution blocks on the file system,
+//! so [`IconWorker`] runs it on a background thread and posts each result
+//! to the inbox. [`IconCache`] remembers results, including misses.
 
 mod cache;
 #[cfg(target_os = "linux")]
@@ -24,14 +23,16 @@ pub use cache::IconCache;
 use crate::icons::Rgba;
 use crate::inbox::{Inbound, Inbox};
 
-/// What identifies a session's icon. Sessions of one application share it,
-/// whatever their process id.
+/// Everything a lookup depends on, so equal keys always resolve alike.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IconKey {
     pub name: Arc<str>,
     pub icon_name: Option<Arc<str>>,
     pub app_id: Option<Arc<str>>,
     pub process_binary: Option<Arc<str>>,
+    /// The process, where the platform's lookup uses it (Steam games on
+    /// Linux); `None` elsewhere so sessions of one program share a key.
+    pub process_id: Option<u32>,
     /// Edge length in physical pixels.
     pub size: u32,
 }
@@ -43,25 +44,8 @@ impl IconKey {
             icon_name: session.app.icon_name.clone(),
             app_id: session.app.app_id.clone(),
             process_binary: session.app.process_binary.clone(),
+            process_id: session.app.process_id.filter(|_| cfg!(target_os = "linux")),
             size,
-        }
-    }
-}
-
-/// A key plus what only helps to find its icon.
-#[derive(Debug, Clone)]
-pub struct Request {
-    pub key: IconKey,
-    /// Used on Linux to find Steam games.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub process_id: Option<u32>,
-}
-
-impl Request {
-    pub fn new(session: &Session, size: u32) -> Self {
-        Self {
-            key: IconKey::new(session, size),
-            process_id: session.app.process_id,
         }
     }
 }
@@ -69,7 +53,7 @@ impl Request {
 /// Finds and renders application icons. May block.
 pub trait Resolver: Send + Sync {
     /// A `key.size` square image, or `None` if nothing usable was found.
-    fn resolve(&self, request: &Request) -> Option<Rgba>;
+    fn resolve(&self, key: &IconKey) -> Option<Rgba>;
 }
 
 /// Finds nothing; every session gets the fallback tile.
@@ -81,7 +65,7 @@ pub trait Resolver: Send + Sync {
 pub struct NoIcons;
 
 impl Resolver for NoIcons {
-    fn resolve(&self, _: &Request) -> Option<Rgba> {
+    fn resolve(&self, _: &IconKey) -> Option<Rgba> {
         None
     }
 }
@@ -101,30 +85,27 @@ pub struct Resolved {
     pub icon: Option<image::Handle>,
 }
 
-/// Resolves requests one at a time, in order, on a background thread.
+/// Resolves keys one at a time, in order, on a background thread.
 #[derive(Debug, Clone)]
-pub struct IconWorker(mpsc::Sender<Request>);
+pub struct IconWorker(mpsc::Sender<IconKey>);
 
 impl IconWorker {
     pub fn spawn(resolver: Arc<dyn Resolver>, inbox: Inbox) -> Self {
-        let (tx, rx) = mpsc::channel::<Request>();
+        let (tx, rx) = mpsc::channel::<IconKey>();
         let spawned = std::thread::Builder::new()
             .name("app-icons".into())
             .spawn(move || {
-                for request in rx {
+                for key in rx {
                     // A panicking lookup counts as a miss rather than
                     // ending all later lookups.
                     let icon =
-                        std::panic::catch_unwind(AssertUnwindSafe(|| resolver.resolve(&request)))
+                        std::panic::catch_unwind(AssertUnwindSafe(|| resolver.resolve(&key)))
                             .unwrap_or_else(|_| {
-                                tracing::warn!(app = %request.key.name, "icon lookup panicked");
+                                tracing::warn!(app = %key.name, "icon lookup panicked");
                                 None
                             });
                     let icon = icon.map(|i| image::Handle::from_rgba(i.width, i.height, i.pixels));
-                    if !inbox.send(Inbound::AppIcon(Resolved {
-                        key: request.key,
-                        icon,
-                    })) {
+                    if !inbox.send(Inbound::AppIcon(Resolved { key, icon })) {
                         return;
                     }
                 }
@@ -137,7 +118,7 @@ impl IconWorker {
 
     /// Queues a lookup. Without a running thread the session keeps its
     /// placeholder.
-    pub fn request(&self, request: Request) {
-        let _ = self.0.send(request);
+    pub fn request(&self, key: IconKey) {
+        let _ = self.0.send(key);
     }
 }
