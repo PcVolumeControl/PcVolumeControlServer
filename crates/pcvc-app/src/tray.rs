@@ -12,7 +12,7 @@ use tray_icon::{
 
 use crate::icons;
 use crate::inbox::{Inbound, Inbox};
-use crate::placement::ScreenRect;
+use crate::placement::{self, ScreenRect};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrayAction {
@@ -73,14 +73,15 @@ impl TrayAction {
 /// click's position; Linux hosts may send 0, 0 for an unknown position.
 fn click_area(rect: Rect, position: PhysicalPosition<f64>) -> Option<ScreenRect> {
     if rect.size.width > 0 && rect.size.height > 0 {
-        return Some(ScreenRect::new(
-            rect.position.x,
-            rect.position.y,
-            f64::from(rect.size.width),
-            f64::from(rect.size.height),
-        ));
+        return Some(ScreenRect {
+            x: rect.position.x as f32,
+            y: rect.position.y as f32,
+            width: rect.size.width as f32,
+            height: rect.size.height as f32,
+        });
     }
-    (position.x != 0.0 || position.y != 0.0).then(|| ScreenRect::point(position.x, position.y))
+    (position.x != 0.0 || position.y != 0.0)
+        .then(|| placement::point(position.x as f32, position.y as f32))
 }
 
 /// Routes tray clicks and menu choices into the inbox. Call once, before the
@@ -390,7 +391,12 @@ mod tests {
             action(click(Left, Up, icon, 1510.0, 1050.0)),
             Some(TrayAction::Click(
                 Left,
-                Some(ScreenRect::new(1500.0, 1040.0, 24.0, 40.0))
+                Some(ScreenRect {
+                    x: 1500.0,
+                    y: 1040.0,
+                    width: 24.0,
+                    height: 40.0
+                })
             ))
         );
         assert_eq!(action(click(Left, Down, icon, 1510.0, 1050.0)), None);
@@ -401,7 +407,7 @@ mod tests {
             action(click(Middle, Up, none, 1700.0, 12.0)),
             Some(TrayAction::Click(
                 Middle,
-                Some(ScreenRect::point(1700.0, 12.0))
+                Some(placement::point(1700.0, 12.0))
             ))
         );
         assert_eq!(

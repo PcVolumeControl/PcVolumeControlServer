@@ -28,7 +28,7 @@ use crate::logging::LogBuffer;
 use crate::mini::{CloseReason, Event as MiniEvent, MiniWindow};
 use crate::mixer::Mixer;
 use crate::model;
-use crate::placement::Anchoring;
+use crate::placement::{self, Anchoring};
 use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 use crate::tray::{Tray, TrayAction, TrayModel};
 use crate::{autostart, icons, instance, style};
@@ -186,6 +186,11 @@ pub struct App {
     /// What the mini mixer was placed against, where the platform lets it
     /// be placed.
     mini_anchoring: Option<Anchoring>,
+    /// The tray click area of a mini mixer that is hidden until placed.
+    mini_unplaced: Option<Option<placement::ScreenRect>>,
+    /// Looks up where to place the mini mixer; `None` leaves it to the
+    /// platform from the start.
+    mini_locator: Option<mini::Locator>,
     config: Config,
     config_path: Option<PathBuf>,
     settings: SettingsForm,
@@ -249,6 +254,8 @@ impl App {
             mini_height: 0.0,
             mini_picker_open: false,
             mini_anchoring: None,
+            mini_unplaced: None,
+            mini_locator: Some(placement::anchoring),
             settings: SettingsForm::from(&config),
             notice: None,
             config,
@@ -338,12 +345,11 @@ impl App {
                 if !(ours && factor.is_finite() && factor > 0.0) {
                     return Task::none();
                 }
-                self.window_scales.insert(id, factor);
+                let previous = self.window_scales.insert(id, factor);
                 self.update_scale_factor();
-                if self.mini.is(id) {
-                    self.mini_rescaled(id, factor)
-                } else {
-                    Task::none()
+                match previous {
+                    Some(previous) if self.mini.is(id) => self.mini_rescaled(id, previous),
+                    _ => Task::none(),
                 }
             }
             Message::WindowFocus(id, focused) => {

@@ -36,7 +36,7 @@ impl Harness {
         let backend = Arc::new(MockBackend::demo());
         let (inbox, inbox_rx) = inbox::channel();
         let config = Config::default();
-        let (app, _) = App::boot(Boot {
+        let (mut app, _) = App::boot(Boot {
             config,
             config_path: None,
             show_window: false,
@@ -47,6 +47,8 @@ impl Harness {
             inbox_rx,
             logs: LogBuffer::new(10),
         });
+        // The real locator would read this machine's display.
+        app.mini_locator = None;
         let mut harness = Self {
             app,
             backend,
@@ -81,10 +83,7 @@ impl Harness {
     fn open_mini_with(&mut self, action: TrayAction) -> window::Id {
         self.run(vec![Message::Inbound(Inbound::Tray(action))]);
         let id = self.app.mini.id().expect("the action opens the mini mixer");
-        self.run(vec![
-            Message::Mini(MiniMessage::Created(id)),
-            Message::ScaleFactor(id, 1.0),
-        ]);
+        self.run(vec![Message::Mini(MiniMessage::Created(id, 1.0))]);
         id
     }
 
@@ -665,8 +664,48 @@ fn mini_resizes_only_once_created() {
     // A new application before the window exists: sized when it does.
     add_session(&mut h, "vlc", "VLC", 30.0);
     assert_eq!(h.app.mini_height, height(Body::Rows(4)));
-    h.run(vec![Message::Mini(MiniMessage::Created(mini))]);
+    h.run(vec![Message::Mini(MiniMessage::Created(mini, 1.0))]);
     assert_eq!(h.app.mini_height, height(Body::Rows(5)));
+}
+
+/// A 1920x1080 monitor at 150 % with a bottom taskbar, and the anchoring
+/// for an icon on it.
+fn fake_locator(click: Option<placement::ScreenRect>) -> Option<Anchoring> {
+    let bounds = iced::Rectangle::new(iced::Point::ORIGIN, Size::new(1920.0, 1080.0));
+    let monitor = placement::Monitor {
+        bounds,
+        work: iced::Rectangle {
+            height: 1032.0,
+            ..bounds
+        },
+        scale: Some(1.5),
+    };
+    Some(Anchoring::new(click?, monitor))
+}
+
+#[test]
+fn mini_is_placed_before_it_shows() {
+    let mut h = Harness::new();
+    h.app.mini_locator = Some(fake_locator);
+    let icon = iced::Rectangle::new(iced::Point::new(1500.0, 1040.0), Size::new(32.0, 40.0));
+    let click = TrayAction::Click(tray_icon::MouseButton::Left, Some(icon));
+    h.run(vec![Message::Inbound(Inbound::Tray(click))]);
+    let mini = h.app.mini.id().unwrap();
+    // Hidden until created and located.
+    assert_eq!(h.app.mini_unplaced, Some(Some(icon)));
+    h.run(vec![Message::Mini(MiniMessage::Created(mini, 1.0))]);
+    assert_eq!(h.app.mini_unplaced, None);
+    assert_eq!(h.app.window_scale(mini), 1.0);
+    let anchoring = fake_locator(Some(icon));
+    h.run(vec![Message::Mini(MiniMessage::Located(mini, anchoring))]);
+    assert_eq!(h.app.mini_anchoring, anchoring);
+    // Moving to the 150 % monitor makes its scale the window's own.
+    h.run(vec![Message::ScaleFactor(mini, 1.5)]);
+    assert_eq!(h.app.mini_anchoring.unwrap().monitor.scale, None);
+    // A stale lookup for a closed window changes nothing.
+    h.run(vec![Message::Escape(mini)]);
+    h.run(vec![Message::Mini(MiniMessage::Located(mini, None))]);
+    assert_eq!(h.app.mini.id(), None);
 }
 
 #[test]

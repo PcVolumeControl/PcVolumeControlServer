@@ -14,17 +14,23 @@ use super::mixer::{MixerColumns, device_picker, fixed_height, with_tooltip};
 use super::{App, Message};
 use crate::icons;
 use crate::mini::{self, Action, Body, CloseReason, Event};
-use crate::placement::{self, ScreenRect};
+use crate::placement::{self, Anchoring, ScreenRect};
 use crate::style::{self, Button};
 
 static OPEN_WINDOW: LazyLock<svg::Handle> =
     LazyLock::new(|| svg::Handle::from_memory(icons::OPEN_WINDOW));
 static CLOSE: LazyLock<svg::Handle> = LazyLock::new(|| svg::Handle::from_memory(icons::CLOSE));
 
+/// Looks up what to place the mini mixer against; may block on the display
+/// server.
+pub type Locator = fn(Option<ScreenRect>) -> Option<Anchoring>;
+
 #[derive(Debug, Clone)]
 pub enum MiniMessage {
-    /// The window exists.
-    Created(window::Id),
+    /// The window exists, at this scale factor.
+    Created(window::Id, f32),
+    /// What to place it against was looked up.
+    Located(window::Id, Option<Anchoring>),
     /// Its button that opens the full window.
     OpenFull,
     /// Its close button.
@@ -53,7 +59,6 @@ impl App {
             Action::Open => self.open_mini(area),
             Action::Close(id, _) => {
                 self.forget_window(id);
-                self.mini_anchoring = None;
                 window::close(id)
             }
             Action::Refocus(id) => window::gain_focus(id),
@@ -62,10 +67,8 @@ impl App {
 
     pub(super) fn mini_update(&mut self, message: MiniMessage) -> Task<Message> {
         match message {
-            MiniMessage::Created(id) => {
-                let task = self.mini_event(Event::Created(id));
-                Task::batch([task, self.fit_mini()])
-            }
+            MiniMessage::Created(id, scale) => self.mini_created(id, scale),
+            MiniMessage::Located(id, anchoring) => self.show_mini(id, anchoring),
             MiniMessage::OpenFull => {
                 let close = self.mini_event(Event::Close(CloseReason::OpenFull));
                 Task::batch([close, self.open_window()])
@@ -89,17 +92,16 @@ impl App {
         self.mini_event(Event::Escape(id))
     }
 
+    /// Opens the window. With a locator it starts hidden and is shown once
+    /// placed: positions are converted at the scale of the window, which is
+    /// only known once it exists.
     fn open_mini(&mut self, area: Option<ScreenRect>) -> Task<Message> {
         let height = mini::height(self.mini_body());
         let size = Size::new(style::MINI_WIDTH, height);
-        self.mini_anchoring = placement::anchoring(area, self.scale_factor);
-        let position = match &self.mini_anchoring {
-            Some(anchoring) => window::Position::Specific(anchoring.position(size)),
-            None => window::Position::Default,
-        };
+        let hidden = self.mini_locator.is_some();
         let (id, opened) = window::open(window::Settings {
             size,
-            position,
+            visible: !hidden,
             resizable: false,
             decorations: false,
             minimizable: false,
@@ -119,18 +121,70 @@ impl App {
             },
             ..Default::default()
         });
-        tracing::debug!("mini mixer: opening, {size:?} at {position:?}");
+        tracing::debug!("mini mixer: opening, {size:?}, click at {area:?}");
         self.mini.handle(Event::Opened(id), Instant::now());
         self.mini_height = height;
         self.mini_picker_open = false;
+        self.mini_anchoring = None;
+        self.mini_unplaced = hidden.then_some(area);
         self.request_icons();
         opened.then(|id| {
-            Task::batch([
-                Task::done(Message::Mini(MiniMessage::Created(id))),
-                window::gain_focus(id),
-                window::scale_factor(id).map(move |f| Message::ScaleFactor(id, f)),
-            ])
+            window::scale_factor(id).map(move |f| Message::Mini(MiniMessage::Created(id, f)))
         })
+    }
+
+    fn mini_created(&mut self, id: window::Id, scale: f32) -> Task<Message> {
+        let created = self.mini_event(Event::Created(id));
+        if !self.mini.is(id) {
+            return created;
+        }
+        tracing::debug!("mini mixer: created at scale {scale}");
+        if scale.is_finite() && scale > 0.0 {
+            self.window_scales.insert(id, scale);
+            self.update_scale_factor();
+        }
+        let place = match (self.mini_unplaced.take(), self.mini_locator) {
+            (Some(area), Some(locate)) => {
+                window::run(id, placement::can_position).then(move |positionable| {
+                    if !positionable {
+                        tracing::debug!("mini mixer: the platform places it (Wayland)");
+                        return Task::done(Message::Mini(MiniMessage::Located(id, None)));
+                    }
+                    Task::perform(
+                        tokio::task::spawn_blocking(move || locate(area)),
+                        move |found| Message::Mini(MiniMessage::Located(id, found.ok().flatten())),
+                    )
+                })
+            }
+            _ => window::gain_focus(id),
+        };
+        Task::batch([created, place, self.fit_mini()])
+    }
+
+    /// Moves the hidden window into place and shows it.
+    fn show_mini(&mut self, id: window::Id, anchoring: Option<Anchoring>) -> Task<Message> {
+        if !self.mini.is(id) {
+            return Task::none();
+        }
+        self.mini_anchoring = anchoring;
+        let show = window::set_mode(id, window::Mode::Windowed).chain(window::gain_focus(id));
+        match anchoring {
+            Some(anchoring) => {
+                let position = anchoring.position(self.mini_size(), self.window_scale(id));
+                tracing::debug!("mini mixer: shown at {position:?}");
+                window::move_to(id, position).chain(show)
+            }
+            None => show,
+        }
+    }
+
+    fn mini_size(&self) -> Size {
+        Size::new(style::MINI_WIDTH, self.mini_height)
+    }
+
+    /// The scale factor `id` last reported, 1 until it does.
+    pub(super) fn window_scale(&self, id: window::Id) -> f32 {
+        self.window_scales.get(&id).copied().unwrap_or(1.0)
     }
 
     fn mini_body(&self) -> Body {
@@ -153,8 +207,9 @@ impl App {
             return Task::none();
         }
         tracing::debug!("mini mixer: height {} -> {height}", self.mini_height);
+        let grows = height > self.mini_height;
         self.mini_height = height;
-        let size = Size::new(style::MINI_WIDTH, height);
+        let size = self.mini_size();
         // A window that is not resizable keeps its size limits, so they
         // move with it.
         let resize = window::set_min_size::<Message>(id, None)
@@ -162,30 +217,34 @@ impl App {
             .chain(window::resize(id, size))
             .chain(window::set_min_size(id, Some(size)))
             .chain(window::set_max_size(id, Some(size)));
-        // Keeps it against the taskbar as it grows or shrinks.
-        match &self.mini_anchoring {
-            Some(anchoring) => resize.chain(window::move_to(id, anchoring.position(size))),
-            None => resize,
+        let Some(anchoring) = &self.mini_anchoring else {
+            return resize;
+        };
+        // Keeps it against the taskbar, moving first when it grows so it
+        // never reaches over the taskbar.
+        let place = window::move_to(id, anchoring.position(size, self.window_scale(id)));
+        if grows {
+            place.chain(resize)
+        } else {
+            resize.chain(place)
         }
     }
 
-    /// Places the mini mixer again at the scale factor its window reports,
-    /// when that differs from the one it was placed at.
-    pub(super) fn mini_rescaled(&mut self, id: window::Id, factor: f32) -> Task<Message> {
+    /// Places the shown mini mixer again after its scale factor changed
+    /// from `previous`: it moved to another monitor, whose scale is now its
+    /// own.
+    pub(super) fn mini_rescaled(&mut self, id: window::Id, previous: f32) -> Task<Message> {
+        let scale = self.window_scale(id);
+        let size = self.mini_size();
         let Some(anchoring) = &mut self.mini_anchoring else {
             return Task::none();
         };
-        let factor = f64::from(factor);
-        if (anchoring.monitor.scale - factor).abs() < 0.01 {
+        if (scale - previous).abs() < 0.01 {
             return Task::none();
         }
-        tracing::debug!(
-            "mini mixer: placed at scale {}, window has {factor}",
-            anchoring.monitor.scale
-        );
-        anchoring.monitor.scale = factor;
-        let size = Size::new(style::MINI_WIDTH, self.mini_height);
-        window::move_to(id, anchoring.position(size))
+        tracing::debug!("mini mixer: scale {previous} -> {scale}; placing it again");
+        anchoring.monitor.scale = None;
+        window::move_to(id, anchoring.position(size, scale))
     }
 
     pub(super) fn mini_view(&self) -> Element<'_, Message> {
