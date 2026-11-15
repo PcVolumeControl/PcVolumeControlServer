@@ -70,6 +70,14 @@ in `.cargo/config.toml`). To look at every page in both themes:
 PCVC_SNAPSHOT_DIR=/some/dir cargo test -p pcvolumecontrol render_pages -- --ignored
 ```
 
+On Linux, `render_real_mixer` does the same for the Mixer with the streams
+playing right now and the icons this machine resolves for them, and prints
+each lookup. It only reads the sound server:
+
+```sh
+PCVC_SNAPSHOT_DIR=/some/dir cargo test -p pcvolumecontrol render_real_mixer -- --ignored --nocapture
+```
+
 The mDNS test needs working multicast and is ignored by default:
 
 ```sh

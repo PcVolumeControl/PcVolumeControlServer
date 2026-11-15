@@ -425,3 +425,85 @@ fn render_pages() {
         }
     }
 }
+
+/// Renders the Mixer for the real sound server's current streams, with
+/// icons resolved from this machine's desktop entries and themes, into
+/// `PCVC_SNAPSHOT_DIR` (`mixer-real-*.png`), and prints what each stream
+/// resolved to. Only reads: no audio state is changed. Run with
+/// `--ignored --nocapture`.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "reads the real sound server and icon themes"]
+fn render_real_mixer() {
+    let Ok(dir) = std::env::var("PCVC_SNAPSHOT_DIR") else {
+        return;
+    };
+    let _logs = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_env_filter("pcvolumecontrol::app_icons=debug")
+            .with_test_writer()
+            .finish(),
+    );
+    let state = pcvc_audio::PulseBackend::new().unwrap().snapshot().unwrap();
+    let mut h = Harness::new();
+    h.run(vec![Message::Inbound(Inbound::Audio(state.clone()))]);
+    let id = h.open_window();
+    let scale = 2.0;
+    h.run(vec![Message::ScaleFactor(id, scale)]);
+    let resolver = crate::app_icons::system_resolver();
+    for session in state.default_device.iter().flat_map(|d| &d.sessions) {
+        let key = IconKey::new(session, (style::APP_ICON * scale) as u32);
+        let icon = resolver.resolve(&key);
+        println!(
+            "{:?} binary={:?} pid={:?} icon_name={:?} app_id={:?} -> {}",
+            session.name,
+            session.app.process_binary,
+            session.app.process_id,
+            session.app.icon_name,
+            session.app.app_id,
+            if icon.is_some() {
+                "icon"
+            } else {
+                "letter tile"
+            }
+        );
+        let icon = icon.map(|i| image::Handle::from_rgba(i.width, i.height, i.pixels));
+        h.run(vec![Message::Inbound(Inbound::AppIcon(Resolved {
+            key,
+            icon,
+        }))]);
+    }
+    // Hints as other applications on this kind of desktop report them.
+    let probes: [(&str, &str, Option<&str>); 6] = [
+        ("Steam", "steam", Some("steam")),
+        ("discord", "Discord", None),
+        (
+            "Telegram Desktop",
+            "telegram-desktop",
+            Some("snap.telegram-desktop."),
+        ),
+        ("flaxative", "flaxative", None),
+        ("IRON NEST: Heavy Turret Simulator", "IronNest.exe", None),
+        ("Slack", "slack", None),
+    ];
+    for (name, binary, icon_name) in probes {
+        let session = pcvc_audio::Session::new("probe", name, 0.0).with_app(pcvc_audio::AppHint {
+            process_binary: Some(binary.into()),
+            icon_name: icon_name.map(Into::into),
+            ..pcvc_audio::AppHint::default()
+        });
+        let found = resolver.resolve(&IconKey::new(&session, 48)).is_some();
+        println!("probe {name:?} binary={binary:?} icon_name={icon_name:?} -> {found}");
+    }
+    for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+        let default = WindowSize::default();
+        let mut ui = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            Size::new(default.width, default.height),
+            h.app.mixer_view(),
+        );
+        let path = format!("{dir}/mixer-real-{name}.png");
+        let _ = std::fs::remove_file(format!("{dir}/mixer-real-{name}-tiny-skia.png"));
+        ui.snapshot(&theme).unwrap().matches_image(&path).unwrap();
+    }
+}
