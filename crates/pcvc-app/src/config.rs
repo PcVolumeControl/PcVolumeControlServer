@@ -125,11 +125,18 @@ pub struct FileOnly {
     /// Serve application icons to phone clients (the protocol's v8
     /// `icons` feature). Read at startup.
     pub serve_icons: bool,
+    /// Send each session's detail, such as a browser tab's title, to phone
+    /// clients (the protocol's v8 `detail` member). Read at startup; when
+    /// off, the audio backend does not read titles at all.
+    pub serve_details: bool,
 }
 
 impl Default for FileOnly {
     fn default() -> Self {
-        Self { serve_icons: true }
+        Self {
+            serve_icons: true,
+            serve_details: true,
+        }
     }
 }
 
@@ -337,16 +344,18 @@ mod tests {
         std::fs::write(&path, "port = 4000\n").unwrap();
         let loaded = load(&path);
         assert!(loaded.file_only.serve_icons, "on by default");
+        assert!(loaded.file_only.serve_details, "on by default");
         assert!(loaded.warning.is_none());
 
         std::fs::write(
             &path,
-            "port = 4000\nserve_icons = false\nfuture = 1\n[window]\nwidth = 900.0\nlater = true\n",
+            "port = 4000\nserve_icons = false\nserve_details = false\nfuture = 1\n[window]\nwidth = 900.0\nlater = true\n",
         )
         .unwrap();
         let loaded = load(&path);
         assert_eq!(loaded.config.port, 4000);
         assert!(!loaded.file_only.serve_icons);
+        assert!(!loaded.file_only.serve_details);
         // Saving from the Settings page keeps it, and keys it does not know.
         let edited = Config {
             port: 4001,
@@ -356,6 +365,7 @@ mod tests {
         let loaded = load(&path);
         assert_eq!(loaded.config, edited);
         assert!(!loaded.file_only.serve_icons);
+        assert!(!loaded.file_only.serve_details);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = 1"));
         assert!(text.contains("later = true"), "nested keys too:\n{text}");

@@ -27,10 +27,14 @@ fn backend() -> Arc<dyn AudioBackend> {
     let device = Device::new("dev", "Speakers", 50.0)
         .with_session(session("Alpha", "vector"))
         .with_session(session("Beta", "raster"))
-        .with_session(Session::new("dev|Gamma", "Gamma", 50.0).with_app(AppHint {
-            process_binary: Some(Arc::from("gamma")),
-            ..AppHint::default()
-        }));
+        .with_session(
+            Session::new("dev|Gamma", "Gamma", 50.0)
+                .with_app(AppHint {
+                    process_binary: Some(Arc::from("gamma")),
+                    ..AppHint::default()
+                })
+                .with_detail("Gamma tab"),
+        );
     Arc::new(MockBackend::new(vec![device], Some("dev")).unwrap())
 }
 
@@ -153,19 +157,25 @@ async fn phone_clients_get_icons() {
     server.stop().await;
 }
 
-/// The controller gives the provider to the first start and to restarts.
+/// The controller gives the provider and the details switch to the first
+/// start and to restarts.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_server_start_serves_icons() {
+async fn every_server_start_serves_icons_and_details() {
     use iced::futures::StreamExt;
 
     use crate::inbox::{self, Inbound};
     use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 
-    for (icons, expected) in [(icons(), vec!["icons".to_owned()]), (None, vec![])] {
+    for (icons, details, expected) in [
+        (icons(), false, vec!["icons"]),
+        (icons(), true, vec!["icons"]),
+        (None, true, vec![]),
+        (None, false, vec![]),
+    ] {
         let (inbox, receiver) = inbox::channel();
         let mut updates = receiver.take_stream().unwrap();
-        let controller = ServerController::spawn(backend(), icons, inbox);
+        let controller = ServerController::spawn(backend(), icons, details, inbox);
         for _ in 0..2 {
             controller.start(config());
             let addr = loop {
@@ -181,6 +191,13 @@ async fn every_server_start_serves_icons() {
             if expected.is_empty() {
                 assert!(!line.contains("features") && !line.contains("iconId"));
             }
+            let gamma = state
+                .default_device
+                .sessions
+                .iter()
+                .find(|s| s.name == "Gamma");
+            let detail = details.then_some("Gamma tab");
+            assert_eq!(gamma.unwrap().detail.as_deref(), detail);
         }
         controller.shutdown();
     }

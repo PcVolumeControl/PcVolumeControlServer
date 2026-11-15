@@ -3,8 +3,11 @@
 //! `pipewire-pulse`).
 //!
 //! ```text
-//! cargo run -p pcvc-server --example pulse_server -- [--port N] [--no-mdns]
+//! cargo run -p pcvc-server --example pulse_server -- [--port N] [--no-mdns] [--no-detail]
 //! ```
+//!
+//! Sessions carry their stream's title as `detail` (a v8 session member)
+//! unless `--no-detail` is given.
 //!
 //! Logging follows `RUST_LOG` (default `info`).
 
@@ -19,22 +22,24 @@ async fn main() -> std::process::ExitCode {
 
     use pcvc_audio::PulseBackend;
 
-    let config = match common::init("pulse_server", &[]) {
-        Ok((config, _)) => config,
+    let config = match common::init("pulse_server", &["--no-detail"]) {
+        Ok((config, flags)) => config.with_details(!flags.contains(&"--no-detail")),
         Err(code) => return code,
     };
+    let details = config.details;
     // The constructor blocks briefly while it connects.
-    let backend = match tokio::task::spawn_blocking(PulseBackend::new).await {
-        Ok(Ok(backend)) => backend,
-        Ok(Err(e)) => {
-            eprintln!("{e}");
-            return ExitCode::FAILURE;
-        }
-        Err(e) => {
-            eprintln!("starting the PulseAudio backend panicked: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let backend =
+        match tokio::task::spawn_blocking(move || PulseBackend::with_details(details)).await {
+            Ok(Ok(backend)) => backend,
+            Ok(Err(e)) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("starting the PulseAudio backend panicked: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
     common::serve(Arc::new(backend), config, "PulseAudio server").await
 }
 

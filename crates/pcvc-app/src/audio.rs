@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use pcvc_audio::{AudioBackend, MockBackend};
+use pcvc_audio::{AudioBackend, AudioEvent, MockBackend};
 use pcvc_protocol::Command;
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
@@ -19,16 +19,17 @@ pub enum BackendChoice {
     Mock,
 }
 
-/// Creates the backend for `choice`. When the system backend cannot start,
-/// the app runs with no devices so it never presents the mock's scripted
+/// Creates the backend for `choice`, with session details if `details` is
+/// set and the backend has them. When the system backend cannot start, the
+/// app runs with no devices so it never presents the mock's scripted
 /// sessions as real ones.
-pub fn create_backend(choice: BackendChoice) -> Arc<dyn AudioBackend> {
+pub fn create_backend(choice: BackendChoice, details: bool) -> Arc<dyn AudioBackend> {
     match choice {
         BackendChoice::Mock => {
             tracing::info!("using the mock audio backend");
             Arc::new(MockBackend::demo())
         }
-        BackendChoice::System => match system_backend() {
+        BackendChoice::System => match system_backend(details) {
             Ok(backend) => backend,
             Err(e) => {
                 tracing::error!("the system audio backend failed to start: {e}");
@@ -44,10 +45,10 @@ pub fn create_backend(choice: BackendChoice) -> Arc<dyn AudioBackend> {
 const SYSTEM_BACKEND_ATTEMPTS: u32 = 5;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+fn system_backend(details: bool) -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
     let mut attempt = 1;
     loop {
-        match open_system_backend() {
+        match open_system_backend(details) {
             Ok(backend) => return Ok(backend),
             Err(e) if attempt < SYSTEM_BACKEND_ATTEMPTS => {
                 tracing::warn!("system audio backend not ready (attempt {attempt}): {e}");
@@ -60,19 +61,20 @@ fn system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+fn open_system_backend(details: bool) -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
     tracing::info!("using the PulseAudio backend");
-    Ok(Arc::new(pcvc_audio::PulseBackend::new()?))
+    Ok(Arc::new(pcvc_audio::PulseBackend::with_details(details)?))
 }
 
+/// Core Audio has no session details.
 #[cfg(target_os = "windows")]
-fn open_system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+fn open_system_backend(_details: bool) -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
     tracing::info!("using the Core Audio backend");
     Ok(Arc::new(pcvc_audio::WindowsBackend::new()?))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-fn system_backend() -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
+fn system_backend(_details: bool) -> Result<Arc<dyn AudioBackend>, pcvc_audio::AudioError> {
     tracing::warn!("no system audio backend for this platform; using the mock backend");
     Ok(Arc::new(MockBackend::demo()))
 }
@@ -99,9 +101,14 @@ pub fn spawn_watcher(backend: Arc<dyn AudioBackend>, inbox: Inbox) {
                 Ok(Err(e)) => tracing::warn!("reading the audio state failed: {e}"),
                 Err(e) => tracing::error!("audio snapshot task failed: {e}"),
             }
-            match events.recv().await {
-                Ok(_) | Err(RecvError::Lagged(_)) => {}
-                Err(RecvError::Closed) => return,
+            // The windows show no session details, so a title that keeps
+            // changing does not cost a snapshot.
+            loop {
+                match events.recv().await {
+                    Ok(AudioEvent::SessionDetailChanged { .. }) => {}
+                    Ok(_) | Err(RecvError::Lagged(_)) => break,
+                    Err(RecvError::Closed) => return,
+                }
             }
             tokio::time::sleep(COALESCE).await;
             while let Ok(_) | Err(TryRecvError::Lagged(_)) = events.try_recv() {}

@@ -3,32 +3,31 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use pcvc_audio::{AudioState, Session};
 use pcvc_protocol::{
     APPLICATION_VERSION, DeviceState, FEATURE_ICONS, FullState, IconId, PROTOCOL_VERSION,
-    SessionState, clamp_volume,
+    SessionState, clamp_volume, session_detail,
 };
 
 use crate::IconProvider;
 
-/// Protocol extensions a server with or without an icon provider advertises,
-/// in the full state and over mDNS.
+/// Protocol extensions a server advertises, in the full state and over
+/// mDNS, given whether it has an icon provider. Session details need no
+/// feature.
 pub(crate) fn features(icons: bool) -> Vec<&'static str> {
-    if icons {
-        vec![FEATURE_ICONS]
-    } else {
-        Vec::new()
-    }
+    icons.then_some(FEATURE_ICONS).into_iter().collect()
 }
 
 /// Converts a backend snapshot to the plain v7 wire full state. `None` when
 /// there is no default device, since the protocol has no way to express that.
 pub fn to_full_state(state: &AudioState) -> Option<FullState> {
-    to_full_state_with_icons(state, None)
+    to_full_state_with(state, None, false)
 }
 
-/// [`to_full_state`] plus, with a provider, the icon extension: the `icons`
-/// feature and each session's icon id, if the provider knows it.
-pub(crate) fn to_full_state_with_icons(
+/// [`to_full_state`] plus the extensions: with a provider, the `icons`
+/// feature and each session's icon id if the provider knows it; with
+/// `details`, each session's detail.
+pub(crate) fn to_full_state_with(
     state: &AudioState,
     icons: Option<&dyn IconProvider>,
+    details: bool,
 ) -> Option<FullState> {
     let device = state.default_device.as_ref()?;
     Some(FullState {
@@ -57,6 +56,11 @@ pub(crate) fn to_full_state_with_icons(
                     volume: clamp_volume(s.volume),
                     muted: s.muted,
                     icon_id: icons.and_then(|icons| icon_id(icons, s)),
+                    detail: s
+                        .detail
+                        .as_deref()
+                        .filter(|_| details)
+                        .and_then(|detail| session_detail(detail, &s.name)),
                 })
                 .collect(),
         },
@@ -134,7 +138,7 @@ mod tests {
             ),
         };
         let provider = Provider(tokio::sync::broadcast::Sender::new(1));
-        let full = to_full_state_with_icons(&state, Some(&provider)).unwrap();
+        let full = to_full_state_with(&state, Some(&provider), false).unwrap();
         assert_eq!(full.features, [FEATURE_ICONS]);
         let ids: Vec<_> = full
             .default_device
@@ -153,6 +157,36 @@ mod tests {
                 .iter()
                 .all(|s| s.icon_id.is_none())
         );
+    }
+
+    #[test]
+    fn details_are_sanitised_and_only_sent_when_enabled() {
+        let state = AudioState {
+            devices: Vec::new(),
+            default_device: Some(
+                Device::new("a", "A", 50.0)
+                    .with_session(Session::new("a|1", "Firefox", 1.0).with_detail(" Tab\none "))
+                    .with_session(Session::new("a|2", "Firefox", 1.0).with_detail("firefox"))
+                    .with_session(Session::new("a|3", "Firefox", 1.0)),
+            ),
+        };
+        let details = |full: &FullState| -> Vec<Option<String>> {
+            let sessions = &full.default_device.sessions;
+            sessions.iter().map(|s| s.detail.clone()).collect()
+        };
+        let full = to_full_state_with(&state, None, true).unwrap();
+        assert!(full.features.is_empty(), "details are not a feature");
+        assert_eq!(details(&full), [Some("Tab one".to_owned()), None, None]);
+
+        let plain = to_full_state(&state).unwrap();
+        assert!(plain.features.is_empty());
+        assert_eq!(details(&plain), [None, None, None]);
+    }
+
+    #[test]
+    fn only_icons_are_a_feature() {
+        assert!(features(false).is_empty());
+        assert_eq!(features(true), [FEATURE_ICONS]);
     }
 
     #[test]

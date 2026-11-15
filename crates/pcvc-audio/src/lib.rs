@@ -76,21 +76,48 @@ pub struct Session {
     /// Percent, 0.0 to 100.0.
     pub volume: f32,
     pub muted: bool,
+    /// Tells this session apart from others of the same application, such as
+    /// a browser tab's title. The server sends it as the protocol's
+    /// `detail`, after [`pcvc_protocol::session_detail`].
+    pub detail: Option<String>,
     /// Who is playing, for presenting the session locally (icons). Not part
     /// of the protocol.
     pub app: AppHint,
 }
 
 impl Session {
-    /// An unmuted session with no application hints.
+    /// An unmuted session with no detail and no application hints.
     pub fn new(id: impl Into<String>, name: impl Into<String>, volume: f32) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             volume,
             muted: false,
+            detail: None,
             app: AppHint::default(),
         }
+    }
+
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    /// The event for a change from `old` to `self`, if there is one.
+    pub(crate) fn change_from(&self, old: &Session) -> Option<AudioEvent> {
+        if self == old {
+            return None;
+        }
+        let id = self.id.clone();
+        let without_detail = |s: &Session| Session {
+            detail: None,
+            ..s.clone()
+        };
+        Some(if without_detail(self) == without_detail(old) {
+            AudioEvent::SessionDetailChanged { id }
+        } else {
+            AudioEvent::SessionChanged { id }
+        })
     }
 
     pub fn with_app(mut self, app: AppHint) -> Self {
@@ -128,9 +155,20 @@ pub enum AudioEvent {
     DevicesChanged,
     DefaultDeviceChanged,
     MasterChanged,
-    SessionAdded { id: String },
-    SessionRemoved { id: String },
-    SessionChanged { id: String },
+    SessionAdded {
+        id: String,
+    },
+    SessionRemoved {
+        id: String,
+    },
+    SessionChanged {
+        id: String,
+    },
+    /// Only the session's [`Session::detail`] changed. Consumers that do not
+    /// show details can ignore it.
+    SessionDetailChanged {
+        id: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

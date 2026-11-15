@@ -34,6 +34,7 @@ const RECONNECT_MAX: Duration = Duration::from_secs(10);
 
 pub(super) fn run(
     shared: Arc<Shared>,
+    details: bool,
     requests: mpsc::Receiver<Request>,
     wake: UnixStream,
     ready: mpsc::Sender<Result<(), AudioError>>,
@@ -54,6 +55,7 @@ pub(super) fn run(
         conn: None,
         raw: RawState::default(),
         shared,
+        details,
         retry_refresh_at: None,
         reconnect: Backoff::new(),
         woken,
@@ -121,6 +123,8 @@ struct Worker {
     /// The last state read, patched with the effect of commands applied since.
     raw: RawState,
     shared: Arc<Shared>,
+    /// Whether sessions get a [`Session::detail`](crate::Session::detail).
+    details: bool,
     /// Set while a failed state read on a live connection awaits a retry.
     retry_refresh_at: Option<Instant>,
     reconnect: Backoff,
@@ -252,7 +256,7 @@ impl Worker {
         conn.take_dirty();
         let raw = conn.query(&mut self.mainloop, deadline, &self.raw.clients)?;
         self.retry_refresh_at = None;
-        let state = raw.to_audio_state();
+        let state = raw.to_audio_state(self.details);
         self.raw = raw;
         // Events are sent before the lock is released, so whoever sees the
         // new state in a snapshot can also already receive its events.

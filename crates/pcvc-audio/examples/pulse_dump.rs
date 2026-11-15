@@ -22,6 +22,7 @@ fn main() -> std::process::ExitCode {
                 "name": s.name,
                 "volume": s.volume,
                 "muted": s.muted,
+                "detail": s.detail,
             })
         };
         let value = json!({
@@ -52,7 +53,7 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    let backend = match PulseBackend::new() {
+    let backend = match PulseBackend::with_details(true) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{e}");

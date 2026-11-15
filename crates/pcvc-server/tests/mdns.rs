@@ -16,7 +16,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 #[ignore = "requires multicast networking"]
 async fn advertises_while_running_and_withdraws_on_stop() {
     let backend: Arc<dyn AudioBackend> = Arc::new(MockBackend::demo());
-    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0).with_details(true);
     let server = ServerHandle::start(backend, config).await.unwrap();
     let port = server.local_addr().port();
 
@@ -43,7 +43,7 @@ async fn advertises_while_running_and_withdraws_on_stop() {
             {
                 assert_eq!(service.get_property_val_str("version"), Some("1"));
                 assert_eq!(service.get_property_val_str("protocol"), Some("7"));
-                // No icon provider, so no v8 features.
+                // No icon provider, so no v8 features; details are not one.
                 assert_eq!(service.get_property_val_str("features"), None);
                 // Other responders for the same host (avahi, for one) may add
                 // IPv6 addresses, so only check that an IPv4 one is present.

@@ -94,11 +94,12 @@ fn main() -> ExitCode {
             (Config::default(), FileOnly::default())
         }
     };
-    let backend = audio::create_backend(if args.mock_audio {
+    let choice = if args.mock_audio {
         BackendChoice::Mock
     } else {
         BackendChoice::System
-    });
+    };
+    let backend = audio::create_backend(choice, file_only.serve_details);
     tray::install_event_handlers(&inbox);
     let icon_resolver = app_icons::system_resolver();
     let server_icons = icon_provider::for_server(file_only.serve_icons, &icon_resolver);
@@ -110,6 +111,7 @@ fn main() -> ExitCode {
         backend,
         icon_resolver,
         server_icons,
+        server_details: file_only.serve_details,
         inbox,
         inbox_rx,
         logs,

@@ -47,14 +47,16 @@ pub struct ServerController(mpsc::UnboundedSender<Request>);
 impl ServerController {
     /// Spawns the controller task; it must run inside a tokio runtime.
     /// `icons` is given to every server it starts whose config has no icon
-    /// provider of its own.
+    /// provider of its own, and `details` turns on session details for
+    /// every server it starts.
     pub fn spawn(
         backend: Arc<dyn AudioBackend>,
         icons: Option<Arc<dyn IconProvider>>,
+        details: bool,
         inbox: Inbox,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(run(backend, icons, rx, inbox));
+        tokio::spawn(run(backend, icons, details, rx, inbox));
         Self(tx)
     }
 
@@ -109,6 +111,7 @@ impl Running {
 async fn run(
     backend: Arc<dyn AudioBackend>,
     icons: Option<Arc<dyn IconProvider>>,
+    details: bool,
     mut requests: mpsc::UnboundedReceiver<Request>,
     inbox: Inbox,
 ) {
@@ -132,6 +135,7 @@ async fn run(
                 if config.icons.is_none() {
                     config.icons = icons.clone();
                 }
+                config.details |= details;
                 stop(&mut running, &send).await;
                 send(ServerUpdate::Status(ServerStatus::Starting));
                 match ServerHandle::start(Arc::clone(&backend), config).await {

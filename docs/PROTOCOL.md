@@ -5,8 +5,9 @@ host ("server", running on the PC) and the phone apps ("clients"). It
 supersedes the "Client to Server Messages" section of the old
 `PcVolumeControlWindows` README, whose examples use a stale `version` field.
 
-"Protocol v8" is v7 plus optional, additive extensions (currently: app
-icons). It does not change the version number on the wire: see
+"Protocol v8" is v7 plus optional, additive extensions: app icons, which a
+server announces as a feature, and session details, an optional member of
+sessions. It does not change the version number on the wire: see
 [Protocol v8 extensions](#protocol-v8-extensions). Everything before that
 section is v7 as the shipped apps speak it; the few places the extensions
 touch are marked **v8**.
@@ -25,7 +26,8 @@ On connect, the server sends the current full state immediately. After that it
 sends the full state again to **every** connected client whenever anything
 changes: master volume or mute, a session's volume or mute, a session appearing
 or disappearing, a device appearing or disappearing, or the default device
-changing. Bursts of changes are coalesced into one message (about 15 ms).
+changing (**v8**: or a session's `iconId` or `detail`). Bursts of changes are
+coalesced into one message (about 15 ms).
 
 The server never replies directly to a client message (**v8**: except for
 icon replies, which go only to the client that asked). A successful update
@@ -78,8 +80,10 @@ state has not actually changed.
 All fields are always present. Clients must ignore fields they do not know.
 The server sends nothing while there is no default playback device.
 
-**v8:** a server with icon support adds a top-level `features` array and an
-optional `iconId` to sessions; see [Protocol v8 extensions](#protocol-v8-extensions).
+**v8:** sessions may carry an optional `detail` member, and a server that
+serves icons adds a top-level `features` array and an optional `iconId`
+member to sessions; see
+[Protocol v8 extensions](#protocol-v8-extensions).
 
 ### Ids
 
@@ -181,10 +185,15 @@ server, both keep working.
   from any server whose full state has another version and ignores mDNS
   adverts with another `protocol`; the shipped iOS app and the old C# server
   check the version too. Raising the number would cut them off.
-- Support is detected through feature names instead (see below). Clients must
-  ignore feature names they do not know.
-- A server without icon support sends exactly the v7 bytes: no `features`
-  key, no `iconId` keys, and no `features` TXT record.
+- Behaviour a client must detect before relying on it, such as a server
+  that answers `iconRequest`, is announced through feature names instead
+  (see below). Clients must ignore feature names they do not know.
+- Optional members, such as `detail`, need no feature name: clients use
+  them when present and ignore members they do not know. Sending them to
+  a v7 client is safe for the same reason.
+- A server that serves no icons and sends no details sends exactly the v7
+  bytes: no `features` key, no `iconId` or `detail` keys, and no
+  `features` TXT record.
 - New server-to-client line types (icon replies) are only ever sent to the
   client that asked for them. The shipped apps parse every line as a full
   state, and an icon line has no `defaultDevice`, so receiving one would break
@@ -195,7 +204,7 @@ server, both keep working.
 
 ### Feature detection
 
-A server that serves icons adds a top-level array to every full state:
+A server with any feature adds a top-level array to every full state:
 
 ```json
 {"protocolVersion":7,"applicationVersion":"v10","features":["icons"],"deviceIds":{...},"defaultDevice":{...}}
@@ -203,15 +212,19 @@ A server that serves icons adds a top-level array to every full state:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `features` | array of strings | Optional. Absent means no extensions. Unknown entries must be ignored. |
+| `features` | array of strings | Optional. Absent means no features. Unknown entries must be ignored. |
 
 The same list is advertised over mDNS as the TXT record `features`
-(comma-separated, e.g. `features=icons`), so a client can show icon support in
-its server list before connecting. The full state is authoritative.
+(comma-separated, e.g. `features=icons`), so a client can show icon
+support in its server list before connecting. The full state is
+authoritative.
 
 | Feature | Meaning |
 | --- | --- |
 | `icons` | Sessions may carry `iconId`, and the server answers `iconRequest`. |
+
+Session details are not a feature: a v8 session may carry `detail`
+whatever `features` says.
 
 ### Icon ids
 
@@ -293,6 +306,82 @@ Decide by which key is present; once a client has sent an `iconRequest` it
 must not assume every line is a full state. Ignore lines with neither, for
 forward compatibility.
 
+### Session details
+
+Each session object may carry a `detail`, an ordinary optional member of
+v8 sessions with no feature name: a short, human-readable label that tells
+it apart from other sessions of the same application, such as a browser
+tab's title or the title of what a player is playing. Firefox on Linux, for
+example, opens one stream per tab, and every one of them is named
+`Firefox`:
+
+```json
+"sessions": [
+  {"name":"Firefox","id":"alsa_output.pci-0000_0e_00.6.analog-stereo|95","volume":100.0,"muted":false,"iconId":"5c1d0e3f9a8b7c6d5e4f30211203f4e5","detail":"Big Buck Bunny - YouTube"},
+  {"name":"Firefox","id":"alsa_output.pci-0000_0e_00.6.analog-stereo|136","volume":100.0,"muted":false,"iconId":"5c1d0e3f9a8b7c6d5e4f30211203f4e5","detail":"Radio Paradise - Main Mix"},
+  {"name":"Firefox","id":"alsa_output.pci-0000_0e_00.6.analog-stereo|141","volume":100.0,"muted":false,"iconId":"5c1d0e3f9a8b7c6d5e4f30211203f4e5"},
+  {"name":"Spotify","id":"alsa_output.pci-0000_0e_00.6.analog-stereo|127","volume":65.0,"muted":false}
+]
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `sessions[].detail` | string | Optional. One line of 1 to 120 characters. |
+
+- `detail` is omitted when there is nothing useful to say: no label at all,
+  a label equal to the session's `name`, or a generic one such as
+  `Playback`. Many sessions never have one. "Equal" means equal after the
+  cleaning below, with zero-width joiners removed and both lower-cased;
+  there is no Unicode normalisation, so `Cafe` plus a combining acute
+  accent is not equal to `Café`.
+- Clients show it when present; there is nothing to detect or request. A
+  server may be configured not to send details, and then omits `detail`
+  from every session.
+- It is display text only, **not an identity**. It may change at any time
+  (a tab navigating to another page), appear later or disappear. Session
+  `id`, and the `name` where clients key on names, stay the keys for
+  anything a client remembers about a session, such as aliases,
+  favourites or hidden sessions.
+- It is a single line of at most 120 characters (Unicode scalar values),
+  so at most 480 bytes of UTF-8. Runs of whitespace, line breaks and tabs
+  included, are sent as one space. Other control characters are removed,
+  and so are invisible formatting characters that a web page title can
+  carry: the soft hyphen (U+00AD), U+200B, the directional marks U+200E
+  and U+200F, the bidirectional embeddings and overrides U+202A to U+202E,
+  U+2060 to U+2069 (word joiner, invisible operators and the directional
+  isolates) and U+FEFF. Zero-width non-joiners and joiners (U+200C,
+  U+200D) are kept only between two visible characters, where they shape
+  emoji sequences and some scripts. There is no leading or trailing
+  whitespace. Longer text is cut on a character boundary and ends with `…`
+  (U+2026), still within 120 characters. A cut can still split a grapheme
+  cluster, such as an emoji sequence or a letter and its combining mark.
+- A change to a detail is broadcast like any other change, except that a
+  change in `detail` alone wakes connected clients no sooner than one
+  second after the server last broadcast a full state to them. A title
+  that changes constantly therefore costs each client at most one line a
+  second. Other changes are never delayed by this and carry the latest
+  details, and a client that connects meanwhile gets the latest details
+  in its first full state.
+- **Privacy:** the title of every stream that plays audio, browser tabs
+  included, is readable by every client that can reach the server's port;
+  the protocol has no authentication. Private-browsing windows are not
+  treated specially: their tabs' titles are sent like any other. Servers
+  should let users turn details off; the desktop host does with
+  `serve_details = false` (see the README).
+
+What the host sends:
+
+- **Linux** (PulseAudio, or PipeWire through `pipewire-pulse`): the
+  stream's `media.name`, or its `media.title` when `media.name` is not
+  useful. Firefox sets `media.name` to the tab title. Generic labels are
+  dropped: `Playback`, `Playback Stream`, `Audio Stream`, `AudioStream`,
+  `AudioCallbackDriver`, `ALSA Playback`, `Simple DirectMedia Layer` (all
+  ignoring case and extra whitespace) and `cpal-playback-` followed by
+  digits.
+- **Windows**: none. Core Audio gives a session nothing beyond its display
+  name, which is already the `name`, and a browser plays all its tabs
+  through one session.
+
 ### Limits
 
 | Limit | Value |
@@ -303,6 +392,8 @@ forward compatibility.
 | Encoded PNG | At most 512 KiB; a larger image is answered with `notFound`. |
 | Server line length | Icon lines can be several hundred KiB. Clients must accept lines of at least 1 MiB. |
 | Client line length | 64 KiB, as in v7. |
+| `detail` | 120 characters, one line. |
+| Full states that only change `detail` | At most one a second per client. |
 
 The server answers one client's ids one at a time and encodes at most a
 couple of replies ahead of what the socket has accepted, so a client that
@@ -313,6 +404,8 @@ that every requested id gets exactly one reply always holds: a client never
 waits for a reply that will not come.
 
 ### Guidance for client authors
+
+Icons:
 
 - Request icons only when `features` contains `icons`.
 - Cache images by `iconId` (and the size you asked for) indefinitely, across
@@ -328,3 +421,19 @@ waits for a reply that will not come.
   connection is fine.
 - Request the size you draw at in physical pixels (48 dp at 3x density is
   144). The reply's `size` may be smaller; scale it.
+
+Session details:
+
+- Show `detail` whenever a session has one; there is nothing to detect or
+  request. Put it below or beside the name in a smaller or
+  dimmer style, on one line, ellipsized at the end when it does not fit. A
+  session without one shows its name alone, as in v7.
+- Do not use it to identify a session. Keep keying aliases, favourites,
+  hidden lists and any saved state on the session `id` (or on `name`, as
+  before); a remembered detail would stop matching as soon as the tab moves
+  on.
+- Expect it to change often, appear late and disappear. Update the row in
+  place: do not reorder or re-sort rows on a detail change, and do not
+  animate or announce it.
+- A user's alias for a session replaces its name, not its detail. Showing
+  the detail under the alias still helps tell same-named rows apart.

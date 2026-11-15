@@ -5,14 +5,17 @@
 //! extensions are additive and keep `protocolVersion` at 7: a server that
 //! serves icons lists [`FEATURE_ICONS`] in [`FullState::features`], tags
 //! sessions with an [`IconId`], and answers a client's [`IconRequest`] with
-//! [`IconMessage`] lines sent to that client only. See `docs/PROTOCOL.md` at
-//! the repository root for the full specification.
+//! [`IconMessage`] lines sent to that client only. Sessions may also carry a
+//! [`SessionState::detail`], which needs no feature. See
+//! `docs/PROTOCOL.md` at the repository root for the full specification.
 
+mod detail;
 mod framing;
 mod icon;
 mod model;
 mod update;
 
+pub use detail::{DETAIL_MAX_CHARS, session_detail};
 pub use framing::{MAX_LINE_LEN, ProtocolError, encode_full_state, parse_client_line};
 pub use icon::{
     FEATURE_ICONS, ICON_ERROR_NOT_FOUND, ICON_ID_MAX_LEN, ICON_MIME_PNG, ICON_SIZE_DEFAULT,
