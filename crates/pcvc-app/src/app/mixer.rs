@@ -434,13 +434,21 @@ fn session_label<'a>(
         .detail
         .as_deref()
         .map(|detail| (detail, fit(detail, density.detail_text, width)));
-    let full = label_tooltip(
+    let bubble = label_tooltip(
         &session.name,
         matches!(name, Cow::Owned(_)),
         detail
             .as_ref()
             .map(|(full, fitted)| (*full, matches!(fitted, Cow::Owned(_)))),
-    );
+    )
+    .map(|(name, detail)| {
+        let lines = column![text(name).size(style::TEXT_SMALL)];
+        match detail {
+            None => lines,
+            Some(detail) => lines.push(text(detail).size(style::TEXT_SMALL)),
+        }
+        .into()
+    });
     let name = text(name).size(density.text).wrapping(text::Wrapping::None);
     let lines = match detail {
         None => column![name],
@@ -452,25 +460,23 @@ fn session_label<'a>(
                 .style(style::session_detail(muted))
         ],
     };
-    with_tooltip(
+    with_bubble(
         container(lines).height(density.name_height).align_y(Center),
-        full,
+        bubble,
     )
 }
 
-/// The tooltip of a session's label, given whether its name and detail
-/// were shortened: nothing when neither was, otherwise the full name with
-/// the full detail on the next line.
+/// The lines of a session label's tooltip, given whether its name and
+/// detail were shortened: none when neither was, otherwise the full name
+/// and the full detail beneath it.
 fn label_tooltip<'a>(
     name: &'a str,
     name_cut: bool,
-    detail: Option<(&str, bool)>,
-) -> Option<Cow<'a, str>> {
+    detail: Option<(&'a str, bool)>,
+) -> Option<(&'a str, Option<&'a str>)> {
     match detail {
-        Some((detail, detail_cut)) if name_cut || detail_cut => {
-            Some(Cow::Owned(format!("{name}\n{detail}")))
-        }
-        _ if name_cut => Some(Cow::Borrowed(name)),
+        Some((detail, detail_cut)) if name_cut || detail_cut => Some((name, Some(detail))),
+        _ if name_cut => Some((name, None)),
         _ => None,
     }
 }
@@ -478,13 +484,24 @@ fn label_tooltip<'a>(
 /// `content`, with `full` in a tooltip on hover when given.
 pub(super) fn with_tooltip<'a>(
     content: impl Into<Element<'a, Message>>,
-    full: Option<impl text::IntoFragment<'a>>,
+    full: Option<&'a str>,
 ) -> Element<'a, Message> {
-    match full {
+    with_bubble(
+        content,
+        full.map(|full| text(full).size(style::TEXT_SMALL).into()),
+    )
+}
+
+/// `content`, with `bubble` in a tooltip on hover when given.
+fn with_bubble<'a>(
+    content: impl Into<Element<'a, Message>>,
+    bubble: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    match bubble {
         None => content.into(),
-        Some(full) => tooltip(
+        Some(bubble) => tooltip(
             content,
-            container(text(full).size(style::TEXT_SMALL))
+            container(bubble)
                 .padding([style::SPACE_XS, style::SPACE_S])
                 .style(style::tooltip),
             tooltip::Position::Top,
@@ -572,15 +589,14 @@ mod tests {
         let tip = |name_cut, detail| label_tooltip("Firefox", name_cut, detail);
         assert_eq!(tip(false, None), None);
         assert_eq!(tip(false, Some(("Main Mix", false))), None);
-        assert_eq!(tip(true, None).as_deref(), Some("Firefox"));
-        // Either line shortened shows both, the detail beneath.
+        assert_eq!(tip(true, None), Some(("Firefox", None)));
+        // Either line shortened shows both.
         for cuts in [(true, false), (false, true), (true, true)] {
             assert_eq!(
-                tip(cuts.0, Some(("Main Mix", cuts.1))).as_deref(),
-                Some("Firefox\nMain Mix")
+                tip(cuts.0, Some(("Main Mix", cuts.1))),
+                Some(("Firefox", Some("Main Mix")))
             );
         }
-        assert!(matches!(tip(true, None), Some(Cow::Borrowed(_))));
     }
 
     #[test]

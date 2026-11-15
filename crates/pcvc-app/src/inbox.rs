@@ -56,7 +56,7 @@ pub fn channel() -> (Inbox, InboxReceiver) {
 
 impl InboxReceiver {
     /// The raw receiver, for tests that read the inbox without iced.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub fn take_stream(&self) -> Option<mpsc::UnboundedReceiver<Inbound>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
     }

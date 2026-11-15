@@ -133,6 +133,9 @@ the tray. It sits on top of other windows, grows with the number of
 applications (then scrolls), and has buttons to open the full window and to
 close it.
 
+In both windows a session's detail, such as a browser tab's title, shows in
+smaller text beneath its name (Linux; off with `serve_details = false`).
+
 | To | Do |
 | --- | --- |
 | Open or close it | Left click the tray icon, middle click it, or choose Mixer in the tray menu |

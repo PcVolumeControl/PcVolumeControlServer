@@ -13,16 +13,60 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const ELLIPSIS: char = '\u{2026}';
 
-/// Labels whose fit is remembered per thread; the same labels are laid out
-/// on every frame.
+/// Labels whose fit is remembered per thread, in each of two generations;
+/// the same labels are laid out on every frame.
 const CACHE_CAPACITY: usize = 256;
 
-/// Fitted labels by content, then by (size, width) bits. `None` means the
-/// content fits as it is.
-type FitCache = HashMap<String, Vec<((u32, u32), Option<String>)>>;
+/// Fits remembered per label: the window being resized must not grow them.
+const SIZES_PER_LABEL: usize = 4;
+
+/// Fits by (size, width) bits. `None` means the content fits as it is.
+type Fits = Vec<((u32, u32), Option<String>)>;
+
+/// Fitted labels by content. When the current generation is full it
+/// becomes the previous one and the oldest is dropped; a label found in the
+/// previous generation moves back to the current one. Labels on screen thus
+/// stay cached while ones that changed (a tab's title) age out, without
+/// re-measuring everything at once.
+#[derive(Debug, Default)]
+struct FitCache {
+    current: HashMap<String, Fits>,
+    previous: HashMap<String, Fits>,
+}
+
+impl FitCache {
+    fn get(&mut self, content: &str, key: (u32, u32)) -> Option<Option<String>> {
+        if !self.current.contains_key(content)
+            && let Some((content, fits)) = self.previous.remove_entry(content)
+        {
+            self.make_room();
+            self.current.insert(content, fits);
+        }
+        let fits = self.current.get(content)?;
+        let (_, fitted) = fits.iter().find(|(k, _)| *k == key)?;
+        Some(fitted.clone())
+    }
+
+    fn insert(&mut self, content: &str, key: (u32, u32), fitted: Option<String>) {
+        if !self.current.contains_key(content) {
+            self.make_room();
+        }
+        let fits = self.current.entry(content.to_owned()).or_default();
+        if fits.len() >= SIZES_PER_LABEL {
+            fits.remove(0);
+        }
+        fits.push((key, fitted));
+    }
+
+    fn make_room(&mut self) {
+        if self.current.len() >= CACHE_CAPACITY {
+            self.previous = std::mem::take(&mut self.current);
+        }
+    }
+}
 
 thread_local! {
-    static FITTED: RefCell<FitCache> = RefCell::new(HashMap::new());
+    static FITTED: RefCell<FitCache> = RefCell::new(FitCache::default());
 }
 
 /// Width of `content` on one line at `size`. Measured in the default font,
@@ -45,26 +89,13 @@ pub fn measure(content: &str, size: f32) -> f32 {
 /// `content` shortened with an ellipsis to fit `max_width` at `size`.
 pub fn fit(content: &str, size: f32, max_width: f32) -> Cow<'_, str> {
     let key = (size.to_bits(), max_width.to_bits());
-    let cached = FITTED.with(|cache| {
-        let cache = cache.borrow();
-        let (_, fitted) = cache.get(content)?.iter().find(|(k, _)| *k == key)?;
-        Some(fitted.clone())
-    });
+    let cached = FITTED.with(|cache| cache.borrow_mut().get(content, key));
     let fitted = cached.unwrap_or_else(|| {
         let fitted = match ellipsize(content, max_width, |s| measure(s, size)) {
             Cow::Borrowed(_) => None,
             Cow::Owned(short) => Some(short),
         };
-        FITTED.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if cache.len() >= CACHE_CAPACITY {
-                cache.clear();
-            }
-            cache
-                .entry(content.to_owned())
-                .or_default()
-                .push((key, fitted.clone()));
-        });
+        FITTED.with(|cache| cache.borrow_mut().insert(content, key, fitted.clone()));
         fitted
     });
     fitted.map_or(Cow::Borrowed(content), Cow::Owned)
@@ -144,6 +175,39 @@ mod tests {
         let flag = "\u{1f1e9}\u{1f1ea} Radio";
         assert_eq!(ellipsize(flag, 30.0, width), "\u{1f1e9}\u{1f1ea}\u{2026}");
         assert_eq!(ellipsize(flag, 25.0, width), "\u{2026}");
+    }
+
+    #[test]
+    fn labels_in_use_outlive_changing_ones() {
+        let mut cache = FitCache::default();
+        let key = (1, 2);
+        cache.insert("Firefox", key, None);
+        // A title changing every second for an hour, with the name looked
+        // up on every frame.
+        for n in 0..3600 {
+            let title = format!("Title {n}");
+            assert_eq!(cache.get(&title, key), None);
+            cache.insert(&title, key, Some("Title\u{2026}".into()));
+            assert_eq!(cache.get("Firefox", key), Some(None), "after {n}");
+            assert!(cache.current.len() <= CACHE_CAPACITY);
+            assert!(cache.previous.len() <= CACHE_CAPACITY);
+        }
+        assert_eq!(
+            cache.get("Title 3599", key),
+            Some(Some("Title\u{2026}".into()))
+        );
+        assert_eq!(cache.get("Title 0", key), None);
+    }
+
+    #[test]
+    fn resizing_keeps_a_few_fits_per_label() {
+        let mut cache = FitCache::default();
+        for width in 0..100 {
+            cache.insert("Firefox", (1, width), None);
+        }
+        assert_eq!(cache.current["Firefox"].len(), SIZES_PER_LABEL);
+        assert_eq!(cache.get("Firefox", (1, 99)), Some(None));
+        assert_eq!(cache.get("Firefox", (1, 0)), None);
     }
 
     #[test]

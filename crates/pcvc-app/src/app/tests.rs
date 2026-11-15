@@ -444,8 +444,8 @@ fn render_pages() {
 /// Renders the window's Mixer page for the real sound server's current
 /// streams, with icons resolved from this machine's desktop entries and
 /// themes, into `PCVC_SNAPSHOT_DIR` (`real-mixer-*.png`), the mini mixer
-/// too (`real-mini-*.png`), and prints what each stream resolved to. Only reads: no audio state is changed. Run with
-/// `--ignored --nocapture`.
+/// too (`real-mini-*.png`), and prints what each stream resolved to. Only
+/// reads: no audio state is changed. Run with `--ignored --nocapture`.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "reads the real sound server and icon themes"]
@@ -1129,6 +1129,8 @@ fn detail_changes_keep_a_held_volume() {
     h.open_window();
     h.open_mini();
     let spotify = h.sessions()[1].clone();
+    let red = image::Handle::from_rgba(1, 1, vec![255, 0, 0, 255]);
+    h.resolve_icon(&spotify, Some(red));
     let target = Target::Session(spotify.id.clone());
     // The first value goes out, the second is held by the throttle.
     h.run(vec![
@@ -1144,6 +1146,9 @@ fn detail_changes_keep_a_held_volume() {
         assert_eq!(h.app.mixer.volume(&target, spotify.volume), 21.0);
         assert_eq!(h.app.mixer_timer, timer);
         simulator(h.app.mixer_view()).find("21%").unwrap();
-        h.mini_ui().find("21%").unwrap();
+        let mut ui = h.mini_ui();
+        ui.find("21%").unwrap();
+        // The icon is kept, not looked up again.
+        ui.find(icon_id("image", &spotify)).unwrap();
     }
 }

@@ -341,16 +341,16 @@ pub fn muted_text(theme: &Theme) -> text::Style {
     text::secondary(theme)
 }
 
-/// A session's detail beneath its name; fainter when it is muted.
+/// A session's detail beneath its name, de-emphasised like `muted_text`
+/// and fainter still when the session is muted.
 pub fn session_detail(muted: bool) -> impl Fn(&Theme) -> text::Style {
     move |theme| {
-        let color = theme.extended_palette().secondary.base.color;
+        let style = muted_text(theme);
+        if !muted {
+            return style;
+        }
         text::Style {
-            color: Some(if muted {
-                color.scale_alpha(MUTED_DETAIL_OPACITY)
-            } else {
-                color
-            }),
+            color: style.color.map(|c| c.scale_alpha(MUTED_DETAIL_OPACITY)),
         }
     }
 }
