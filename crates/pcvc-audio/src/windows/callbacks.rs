@@ -2,12 +2,16 @@
 //! registered.
 //!
 //! Core Audio calls these objects on its own threads, possibly concurrently.
-//! They only post a [`Change`] to the COM thread, which never blocks, so they
+//! They only post a message to the COM thread, which never blocks, so they
 //! cannot deadlock against the unregister calls made from that thread.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
-use ::windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+use ::windows::Win32::Devices::FunctionDiscovery::{
+    PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName,
+};
 use ::windows::Win32::Foundation::PROPERTYKEY;
 use ::windows::Win32::Media::Audio::Endpoints::{
     IAudioEndpointVolume, IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl,
@@ -17,14 +21,15 @@ use ::windows::Win32::Media::Audio::{
     AudioSessionStateExpired, DEVICE_STATE, EDataFlow, ERole, IAudioSessionControl,
     IAudioSessionEvents, IAudioSessionEvents_Impl, IAudioSessionManager2,
     IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDeviceEnumerator,
-    IMMNotificationClient, IMMNotificationClient_Impl, eRender,
+    IMMNotificationClient, IMMNotificationClient_Impl, eMultimedia, eRender,
 };
 use ::windows::core::{BOOL, GUID, PCWSTR, Ref, Result, implement};
 
-use super::logic::Change;
+use super::com::EVENT_CONTEXT;
+use super::logic::{self, Change};
 use super::worker::Msg;
 
-/// Posts changes to the COM thread.
+/// Posts messages to the COM thread.
 #[derive(Clone)]
 pub(super) struct Poster(Sender<Msg>);
 
@@ -40,10 +45,25 @@ impl Poster {
     }
 }
 
+/// A session control handed to `OnSessionCreated`, moved to the COM thread.
+pub(super) struct MtaSession(IAudioSessionControl);
+
+// SAFETY: the pointer was obtained in the multithreaded apartment (Core Audio
+// calls back on MTA threads, and a thread of a process that has an MTA is
+// implicitly in it) and is only used on the backend's COM thread, which is
+// also in the MTA. COM allows any MTA thread to use an MTA interface pointer.
+unsafe impl Send for MtaSession {}
+
+impl MtaSession {
+    pub fn into_inner(self) -> IAudioSessionControl {
+        self.0
+    }
+}
+
 /// A callback registered with a Core Audio object, unregistered on drop.
 /// Holding a reference to the callback keeps it alive for as long as it is
 /// registered, which Core Audio requires and does not do itself for every
-/// interface.
+/// interface; holding the source keeps the registration's owner alive.
 pub(super) struct Registration<S, C> {
     source: S,
     callback: C,
@@ -58,7 +78,8 @@ impl<S, C> Drop for Registration<S, C> {
     }
 }
 
-/// Device added, removed, state changed, renamed, or default changed.
+/// Render device added, removed, state changed or renamed, or default
+/// multimedia render device changed.
 pub(super) fn register_endpoint_notifications(
     enumerator: &IMMDeviceEnumerator,
     poster: Poster,
@@ -78,7 +99,7 @@ pub(super) fn register_endpoint_notifications(
     })
 }
 
-/// Master volume or mute changed.
+/// Master volume or mute changed by someone other than this backend.
 pub(super) fn register_volume_notifications(
     volume: &IAudioEndpointVolume,
     poster: Poster,
@@ -94,14 +115,19 @@ pub(super) fn register_volume_notifications(
     })
 }
 
-/// A session was created on the endpoint. The caller must have called
-/// `GetSessionEnumerator` on `manager` first, or Core Audio never delivers
-/// these, and must keep `manager` alive.
+/// A session was created on the endpoint `endpoint_id`. The caller must have
+/// requested a session enumerator from `manager` first, or Core Audio never
+/// delivers these.
 pub(super) fn register_session_created(
     manager: &IAudioSessionManager2,
+    endpoint_id: String,
     poster: Poster,
 ) -> Result<Registration<IAudioSessionManager2, IAudioSessionNotification>> {
-    let callback: IAudioSessionNotification = SessionCreatedNotifier { poster }.into();
+    let callback: IAudioSessionNotification = SessionCreatedNotifier {
+        endpoint_id,
+        poster,
+    }
+    .into();
     // SAFETY: as for `register_endpoint_notifications`.
     unsafe { manager.RegisterSessionNotification(&callback) }?;
     Ok(Registration {
@@ -112,13 +138,15 @@ pub(super) fn register_session_created(
     })
 }
 
-/// A session's volume, mute, display name or state changed, or it was
-/// disconnected.
+/// A session's volume, mute or display name changed by someone other than
+/// this backend, or it expired or was disconnected. The latter also set
+/// `gone`.
 pub(super) fn register_session_events(
     control: &IAudioSessionControl,
+    gone: Arc<AtomicBool>,
     poster: Poster,
 ) -> Result<Registration<IAudioSessionControl, IAudioSessionEvents>> {
-    let callback: IAudioSessionEvents = SessionNotifier { poster }.into();
+    let callback: IAudioSessionEvents = SessionNotifier { gone, poster }.into();
     // SAFETY: as for `register_endpoint_notifications`.
     unsafe { control.RegisterAudioSessionNotification(&callback) }?;
     Ok(Registration {
@@ -131,43 +159,73 @@ pub(super) fn register_session_events(
     })
 }
 
+/// Whether `context` is the one this backend passes to its own changes.
+///
+/// # Safety
+///
+/// `context` must be null or point to a GUID valid for the call.
+unsafe fn is_own_change(context: *const GUID) -> bool {
+    // SAFETY: per the contract.
+    !context.is_null() && unsafe { *context } == EVENT_CONTEXT
+}
+
 #[implement(IMMNotificationClient)]
 struct DeviceNotifier {
     poster: Poster,
 }
 
+impl DeviceNotifier {
+    fn post_if_render(&self, device_id: &PCWSTR) {
+        let id = if device_id.is_null() {
+            None
+        } else {
+            // SAFETY: Core Audio passes a nul-terminated string valid for the
+            // duration of the callback.
+            unsafe { device_id.to_string() }.ok()
+        };
+        if id.is_none_or(|id| logic::may_be_render_endpoint(&id)) {
+            self.poster.post(Change::Devices);
+        }
+    }
+}
+
 impl IMMNotificationClient_Impl for DeviceNotifier_Impl {
-    fn OnDeviceStateChanged(&self, _device_id: &PCWSTR, _new_state: DEVICE_STATE) -> Result<()> {
-        self.poster.post(Change::Devices);
+    fn OnDeviceStateChanged(&self, device_id: &PCWSTR, _new_state: DEVICE_STATE) -> Result<()> {
+        self.post_if_render(device_id);
         Ok(())
     }
 
-    fn OnDeviceAdded(&self, _device_id: &PCWSTR) -> Result<()> {
-        self.poster.post(Change::Devices);
+    fn OnDeviceAdded(&self, device_id: &PCWSTR) -> Result<()> {
+        self.post_if_render(device_id);
         Ok(())
     }
 
-    fn OnDeviceRemoved(&self, _device_id: &PCWSTR) -> Result<()> {
-        self.poster.post(Change::Devices);
+    fn OnDeviceRemoved(&self, device_id: &PCWSTR) -> Result<()> {
+        self.post_if_render(device_id);
         Ok(())
     }
 
     fn OnDefaultDeviceChanged(
         &self,
         flow: EDataFlow,
-        _role: ERole,
+        role: ERole,
         _default_device_id: &PCWSTR,
     ) -> Result<()> {
-        if flow == eRender {
+        // The backend follows the multimedia role only.
+        if flow == eRender && role == eMultimedia {
             self.poster.post(Change::Default);
         }
         Ok(())
     }
 
-    fn OnPropertyValueChanged(&self, _device_id: &PCWSTR, key: &PROPERTYKEY) -> Result<()> {
-        // Fires often and for many properties; only the name is shown.
-        if key.fmtid == PKEY_Device_FriendlyName.fmtid && key.pid == PKEY_Device_FriendlyName.pid {
-            self.poster.post(Change::Devices);
+    fn OnPropertyValueChanged(&self, device_id: &PCWSTR, key: &PROPERTYKEY) -> Result<()> {
+        // Fires often and for many properties. Renaming an endpoint changes
+        // its description, from which the friendly name is derived.
+        let is_name = [PKEY_Device_FriendlyName, PKEY_Device_DeviceDesc]
+            .iter()
+            .any(|k| k.fmtid == key.fmtid && k.pid == key.pid);
+        if is_name {
+            self.post_if_render(device_id);
         }
         Ok(())
     }
@@ -179,32 +237,56 @@ struct VolumeNotifier {
 }
 
 impl IAudioEndpointVolumeCallback_Impl for VolumeNotifier_Impl {
-    fn OnNotify(&self, _data: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> Result<()> {
-        self.poster.post(Change::Master);
+    fn OnNotify(&self, data: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> Result<()> {
+        // SAFETY: Core Audio passes null or a structure valid for the duration
+        // of the callback; only its first field is read.
+        let own = !data.is_null() && unsafe { is_own_change(&raw const (*data).guidEventContext) };
+        if !own {
+            self.poster.post(Change::Master);
+        }
         Ok(())
     }
 }
 
 #[implement(IAudioSessionNotification)]
 struct SessionCreatedNotifier {
+    endpoint_id: String,
     poster: Poster,
 }
 
 impl IAudioSessionNotification_Impl for SessionCreatedNotifier_Impl {
-    fn OnSessionCreated(&self, _new_session: Ref<'_, IAudioSessionControl>) -> Result<()> {
-        self.poster.post(Change::SessionList);
+    fn OnSessionCreated(&self, new_session: Ref<'_, IAudioSessionControl>) -> Result<()> {
+        // The session enumerator may not list a session reported here, so it
+        // is handed over directly.
+        if let Ok(session) = new_session.ok() {
+            let _ = self.poster.0.send(Msg::SessionCreated {
+                endpoint_id: self.endpoint_id.clone(),
+                session: MtaSession(session.clone()),
+            });
+        }
         Ok(())
     }
 }
 
 #[implement(IAudioSessionEvents)]
 struct SessionNotifier {
+    gone: Arc<AtomicBool>,
     poster: Poster,
 }
 
+impl SessionNotifier {
+    fn gone(&self) {
+        self.gone.store(true, Ordering::Release);
+        self.poster.post(Change::SessionList);
+    }
+}
+
 impl IAudioSessionEvents_Impl for SessionNotifier_Impl {
-    fn OnDisplayNameChanged(&self, _name: &PCWSTR, _context: *const GUID) -> Result<()> {
-        self.poster.post(Change::SessionValues);
+    fn OnDisplayNameChanged(&self, _name: &PCWSTR, context: *const GUID) -> Result<()> {
+        // SAFETY: Core Audio passes null or a GUID valid for the callback.
+        if !unsafe { is_own_change(context) } {
+            self.poster.post(Change::SessionValues);
+        }
         Ok(())
     }
 
@@ -212,13 +294,11 @@ impl IAudioSessionEvents_Impl for SessionNotifier_Impl {
         Ok(())
     }
 
-    fn OnSimpleVolumeChanged(
-        &self,
-        _volume: f32,
-        _mute: BOOL,
-        _context: *const GUID,
-    ) -> Result<()> {
-        self.poster.post(Change::SessionValues);
+    fn OnSimpleVolumeChanged(&self, _volume: f32, _mute: BOOL, context: *const GUID) -> Result<()> {
+        // SAFETY: Core Audio passes null or a GUID valid for the callback.
+        if !unsafe { is_own_change(context) } {
+            self.poster.post(Change::SessionValues);
+        }
         Ok(())
     }
 
@@ -239,13 +319,13 @@ impl IAudioSessionEvents_Impl for SessionNotifier_Impl {
     fn OnStateChanged(&self, state: AudioSessionState) -> Result<()> {
         // Active and inactive sessions are both listed.
         if state == AudioSessionStateExpired {
-            self.poster.post(Change::SessionList);
+            self.gone();
         }
         Ok(())
     }
 
     fn OnSessionDisconnected(&self, _reason: AudioSessionDisconnectReason) -> Result<()> {
-        self.poster.post(Change::SessionList);
+        self.gone();
         Ok(())
     }
 }

@@ -9,7 +9,6 @@
 use std::ffi::c_void;
 use std::iter;
 use std::marker::PhantomData;
-use std::ptr;
 
 use ::windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use ::windows::Win32::Foundation::ERROR_NOT_FOUND;
@@ -29,9 +28,13 @@ use ::windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use ::windows::Win32::UI::Shell::SHLoadIndirectString;
-use ::windows::core::{Interface, Owned, PCWSTR, PWSTR, Result};
+use ::windows::core::{GUID, Interface, Owned, PCWSTR, PWSTR, Result};
 
 use super::logic;
+
+/// Event context passed with this backend's own volume and mute changes, so
+/// that the callbacks they trigger can be told apart.
+pub(super) const EVENT_CONTEXT: GUID = GUID::from_u128(0x5b1f6c2e_8a43_4d0b_9e7a_3c2d1f0e6a91);
 
 /// Membership of the calling thread in the multithreaded apartment, left on
 /// drop. Every COM object the thread holds must be released first.
@@ -170,13 +173,13 @@ pub(super) fn set_master(
     muted: Option<bool>,
 ) -> Result<()> {
     if let Some(muted) = muted {
-        // SAFETY: a null event context is allowed.
-        unsafe { volume.SetMute(muted, ptr::null()) }?;
+        // SAFETY: the event context points to a static GUID.
+        unsafe { volume.SetMute(muted, &EVENT_CONTEXT) }?;
     }
     if let Some(percent) = percent {
-        // SAFETY: a null event context is allowed.
+        // SAFETY: the event context points to a static GUID.
         unsafe {
-            volume.SetMasterVolumeLevelScalar(logic::percent_to_scalar(percent), ptr::null())
+            volume.SetMasterVolumeLevelScalar(logic::percent_to_scalar(percent), &EVENT_CONTEXT)
         }?;
     }
     Ok(())
@@ -257,10 +260,10 @@ pub(super) fn set_session_volume(
     percent: f32,
     muted: bool,
 ) -> Result<()> {
-    // SAFETY: a null event context is allowed.
-    unsafe { volume.SetMasterVolume(logic::percent_to_scalar(percent), ptr::null()) }?;
-    // SAFETY: a null event context is allowed.
-    unsafe { volume.SetMute(muted, ptr::null()) }
+    // SAFETY: the event context points to a static GUID.
+    unsafe { volume.SetMasterVolume(logic::percent_to_scalar(percent), &EVENT_CONTEXT) }?;
+    // SAFETY: the event context points to a static GUID.
+    unsafe { volume.SetMute(muted, &EVENT_CONTEXT) }
 }
 
 /// Resolves an indirect string such as `@%SystemRoot%\System32\x.dll,-202`.

@@ -173,27 +173,38 @@ impl Dirty {
     }
 }
 
-/// Splits `existing` items against the ids now present: returns the items
-/// still present, in their existing order, and the ids not yet known, in
-/// `current` order without duplicates. Keeping the order stable means a
-/// re-enumeration never reorders sessions on the phones.
-pub(crate) fn reconcile<T>(
-    existing: Vec<T>,
-    id_of: impl Fn(&T) -> &str,
+/// The ids in `current` that are not in `known`, in `current` order and
+/// without duplicates.
+pub(crate) fn unknown_ids<'a>(
+    known: impl IntoIterator<Item = &'a str>,
     current: &[String],
-) -> (Vec<T>, Vec<String>) {
-    let present: HashSet<&str> = current.iter().map(String::as_str).collect();
-    let kept: Vec<T> = existing
-        .into_iter()
-        .filter(|item| present.contains(id_of(item)))
-        .collect();
-    let mut known: HashSet<String> = kept.iter().map(|item| id_of(item).to_owned()).collect();
-    let added = current
+) -> Vec<String> {
+    let mut seen: HashSet<&str> = known.into_iter().collect();
+    current
         .iter()
-        .filter(|id| known.insert((*id).clone()))
+        .filter(|id| seen.insert(id.as_str()))
         .cloned()
-        .collect();
-    (kept, added)
+        .collect()
+}
+
+/// Stable-sorts `items` into the order their ids had in `previous`, with ids
+/// not in `previous` after the others in their current order. Keeps the
+/// phones' session list from reordering when a device's sessions are re-read
+/// from scratch.
+pub(crate) fn sort_like<T>(items: &mut [T], id_of: impl Fn(&T) -> &str, previous: &[String]) {
+    items.sort_by_key(|item| {
+        previous
+            .iter()
+            .position(|id| id == id_of(item))
+            .unwrap_or(usize::MAX)
+    });
+}
+
+/// False only for ids that are certainly capture endpoints
+/// (`{0.0.1.00000000}.{GUID}`). The flow digit is not documented, so any
+/// other shape counts as possibly render.
+pub(crate) fn may_be_render_endpoint(endpoint_id: &str) -> bool {
+    !endpoint_id.starts_with("{0.0.1.")
 }
 
 /// The events that describe the change from `old` to `new`; empty only when
@@ -388,15 +399,35 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_keeps_order_and_appends_new() {
-        let existing = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+    fn unknown_ids_in_order_without_duplicates() {
         let current: Vec<String> = ["d", "c", "a", "d", "e"].map(String::from).to_vec();
-        let (kept, added) = reconcile(existing, String::as_str, &current);
-        assert_eq!(kept, ["a", "c"]);
-        assert_eq!(added, ["d", "e"]);
+        assert_eq!(unknown_ids(["a", "b", "c"], &current), ["d", "e"]);
+        assert_eq!(unknown_ids([], &current), ["d", "c", "a", "e"]);
+        assert!(unknown_ids(["a"], &[]).is_empty());
+    }
 
-        let (kept, added) = reconcile(Vec::<String>::new(), String::as_str, &[]);
-        assert!(kept.is_empty() && added.is_empty());
+    #[test]
+    fn sort_like_restores_previous_order() {
+        let previous: Vec<String> = ["c", "a", "b"].map(String::from).to_vec();
+        let mut items = ["x", "a", "b", "y", "c"];
+        sort_like(&mut items, |s| s, &previous);
+        assert_eq!(items, ["c", "a", "b", "x", "y"]);
+
+        let mut items = ["b", "a"];
+        sort_like(&mut items, |s| s, &[]);
+        assert_eq!(items, ["b", "a"]);
+    }
+
+    #[test]
+    fn capture_endpoints_are_recognised() {
+        assert!(!may_be_render_endpoint(
+            "{0.0.1.00000000}.{c98e4030-926b-4e62-8c83-1c529574cc51}"
+        ));
+        assert!(may_be_render_endpoint(
+            "{0.0.0.00000000}.{0f4090a9-dee2-4563-ba29-0ad6b93d9e22}"
+        ));
+        assert!(may_be_render_endpoint("SWD\\MMDEVAPI\\x"));
+        assert!(may_be_render_endpoint(""));
     }
 
     fn state(default: Option<Device>) -> AudioState {
