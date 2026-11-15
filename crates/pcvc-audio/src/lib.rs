@@ -7,7 +7,11 @@
 //! PulseAudio) will live in `cfg`-gated modules of this crate.
 
 mod mock;
+#[cfg(any(target_os = "windows", test))]
+mod windows;
 
+#[cfg(target_os = "windows")]
+pub use self::windows::WindowsBackend;
 pub use mock::MockBackend;
 use pcvc_protocol::Command;
 use tokio::sync::broadcast;

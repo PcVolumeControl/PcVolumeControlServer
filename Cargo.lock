@@ -2521,6 +2521,9 @@ dependencies = [
  "pcvc-protocol",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
