@@ -27,6 +27,12 @@ const OP_TIMEOUT: Duration = Duration::from_secs(4);
 /// Delay before retrying a failed state read on a live connection.
 const REFRESH_RETRY: Duration = Duration::from_secs(1);
 
+/// How long reported changes gather before the state is read. A browser tab
+/// that changes its title retitles each of its streams separately, a few
+/// milliseconds apart; read in between, the tab's session would split in
+/// two and merge again.
+const SETTLE: Duration = Duration::from_millis(30);
+
 /// How often the first state read is attempted before startup gives up.
 const STARTUP_READ_ATTEMPTS: u32 = 3;
 
@@ -58,6 +64,7 @@ pub(super) fn run(
         raw: RawState::default(),
         shared,
         details,
+        settle: Settle::new(SETTLE),
         retry_refresh_at: None,
         reconnect: Backoff::new(),
         woken,
@@ -119,6 +126,31 @@ impl Backoff {
     }
 }
 
+/// When reported changes are read: `window` after the first report since
+/// the last read. Later reports do not move it, so changes that keep coming
+/// (a slider being dragged in another mixer) are still read regularly.
+#[derive(Debug)]
+struct Settle {
+    window: Duration,
+    due: Option<Instant>,
+}
+
+impl Settle {
+    fn new(window: Duration) -> Self {
+        Self { window, due: None }
+    }
+
+    /// Whether to read the state at `now`, given whether the server has
+    /// reported changes since the last read.
+    fn read_due(&mut self, reported: bool, now: Instant) -> bool {
+        reported && now >= *self.due.get_or_insert(now + self.window)
+    }
+
+    fn clear(&mut self) {
+        self.due = None;
+    }
+}
+
 struct Worker {
     /// Declared before `mainloop` so the context is freed first.
     conn: Option<Connection>,
@@ -127,6 +159,8 @@ struct Worker {
     shared: Arc<Shared>,
     /// Whether sessions get a [`Session::detail`](crate::Session::detail).
     details: bool,
+    /// When the changes the server reported are read.
+    settle: Settle,
     /// Set while a failed state read on a live connection awaits a retry.
     retry_refresh_at: Option<Instant>,
     reconnect: Backoff,
@@ -185,16 +219,16 @@ impl Worker {
         }
     }
 
-    /// Refreshes after reported changes, notices a lost connection and
-    /// reconnects when the backoff allows. Returns when the loop should next
-    /// wake up on its own, if ever.
+    /// Refreshes once reported changes have settled, notices a lost
+    /// connection and reconnects when the backoff allows. Returns when the
+    /// loop should next wake up on its own, if ever.
     fn maintain(&mut self, now: Instant) -> Option<Instant> {
         if let Some(conn) = &self.conn {
             let retry_due = self.retry_refresh_at.is_some_and(|at| now >= at);
             if conn.is_dead() {
                 tracing::warn!("lost the PulseAudio connection, reconnecting");
                 self.disconnect(now);
-            } else if (conn.is_dirty() || retry_due)
+            } else if (retry_due || self.settle.read_due(conn.is_dirty(), now))
                 && let Err(e) = self.refresh(now + OP_TIMEOUT)
             {
                 self.refresh_failed(&e, now);
@@ -210,7 +244,10 @@ impl Worker {
             }
         }
         match &self.conn {
-            Some(_) => self.retry_refresh_at,
+            Some(_) => [self.retry_refresh_at, self.settle.due]
+                .into_iter()
+                .flatten()
+                .min(),
             None => self.reconnect.next_attempt,
         }
     }
@@ -219,6 +256,7 @@ impl Worker {
     /// reconnect.
     fn disconnect(&mut self, now: Instant) {
         self.conn = None;
+        self.settle.clear();
         self.retry_refresh_at = None;
         self.reconnect.schedule(now);
     }
@@ -256,6 +294,7 @@ impl Worker {
             return Ok(());
         };
         conn.take_dirty();
+        self.settle.clear();
         let raw = conn.query(&mut self.mainloop, deadline, &self.raw.clients)?;
         self.retry_refresh_at = None;
         let state = raw.to_audio_state(self.details);
@@ -450,5 +489,125 @@ impl Ctx<'_> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CString;
+
+    use super::*;
+    use crate::AudioEvent;
+    use crate::pulse::model::{AppProps, RawSink, RawSinkInput};
+
+    /// Speakers with two streams of one Firefox tab, titled `first` and
+    /// `second`.
+    fn tab(first: &str, second: &str) -> RawState {
+        let stream = |index: u32, title: &str| RawSinkInput {
+            index,
+            sink: 1,
+            client: Some(9),
+            volume: vec![65536; 2],
+            has_volume: true,
+            volume_writable: true,
+            app: AppProps {
+                name: Some("Firefox".into()),
+                process_id: Some(500),
+                ..AppProps::default()
+            },
+            media_name: Some(title.to_owned()),
+            ..RawSinkInput::default()
+        };
+        RawState {
+            default_sink: Some(CString::new("speakers").unwrap()),
+            sinks: vec![RawSink {
+                index: 1,
+                name: CString::new("speakers").unwrap(),
+                description: None,
+                volume: vec![65536; 2],
+                muted: false,
+            }],
+            inputs: vec![stream(10, first), stream(11, second)],
+            clients: Default::default(),
+        }
+    }
+
+    /// Runs `changes` (when, and the server state from then on) through a
+    /// [`Settle`] of `window` as the worker loop does: it wakes at each
+    /// report and when a read is due, and reads the state as it is then.
+    /// Returns the events of every read.
+    fn play(base: &RawState, changes: &[(u64, RawState)], window: Duration) -> Vec<AudioEvent> {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut settle = Settle::new(window);
+        let mut published = base.to_audio_state(true);
+        let mut current = base;
+        let mut reported = false;
+        let mut events = Vec::new();
+        let mut pending = changes.iter().peekable();
+        loop {
+            let next_change = pending.peek().map(|(ms, _)| at(*ms));
+            let Some(now) = [next_change, settle.due.filter(|_| reported)]
+                .into_iter()
+                .flatten()
+                .min()
+            else {
+                return events;
+            };
+            while let Some((_, raw)) = pending.next_if(|(ms, _)| at(*ms) <= now) {
+                current = raw;
+                reported = true;
+            }
+            if settle.read_due(reported, now) {
+                reported = false;
+                settle.clear();
+                let state = current.to_audio_state(true);
+                events.extend(diff(&published, &state));
+                published = state;
+            }
+        }
+    }
+
+    #[test]
+    fn a_staggered_title_change_is_one_update() {
+        let base = tab("Old", "Old");
+        let changes = [(0, tab("New", "Old")), (3, tab("New", "New"))];
+        assert_eq!(
+            play(&base, &changes, SETTLE),
+            vec![AudioEvent::SessionDetailChanged {
+                id: "speakers|10".into()
+            }]
+        );
+        // Read at once, the group splits and merges again.
+        assert_eq!(
+            play(&base, &changes, Duration::ZERO),
+            vec![
+                AudioEvent::SessionDetailChanged {
+                    id: "speakers|10".into()
+                },
+                AudioEvent::SessionAdded {
+                    id: "speakers|11".into()
+                },
+                AudioEvent::SessionRemoved {
+                    id: "speakers|11".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn settle_reads_a_window_after_the_first_report() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut settle = Settle::new(Duration::from_millis(30));
+        assert!(!settle.read_due(false, at(0)));
+        assert_eq!(settle.due, None);
+        assert!(!settle.read_due(true, at(0)));
+        assert!(!settle.read_due(true, at(20)));
+        assert!(!settle.read_due(true, at(29)));
+        assert!(settle.read_due(true, at(30)));
+        settle.clear();
+        assert!(!settle.read_due(true, at(31)));
+        assert!(settle.read_due(true, at(70)));
     }
 }
