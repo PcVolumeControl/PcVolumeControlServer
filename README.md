@@ -133,8 +133,11 @@ machine (or let it discover the server). Options: `--port N`, `--no-mdns`,
 The mock server serves the v8 `icons` feature by default (`--no-icons` turns
 it off and makes it a plain v7 server). Its demo provider draws a coloured
 rounded square per app at whatever size is asked for, and resolves icon ids
-in the background like a real one: each session first appears without an
-`iconId` and gains it about half a second later. See
+in the background like a real one: a session it has not seen before appears
+without an `iconId` and gains it in a state about half a second later.
+Sessions on the default device at startup are resolved before you can
+connect; switch the default device to the headphones or the headset to see
+the delayed path. See
 [docs/PROTOCOL.md](docs/PROTOCOL.md#protocol-v8-extensions) for the format.
 
 To poke at it by hand, run it on a spare port and connect with `nc`:
@@ -144,9 +147,9 @@ cargo run -p pcvc-server --example mock_server -- --port 3001 --no-mdns
 nc localhost 3001
 ```
 
-The first line is a full state with `"features":["icons"]`; once the ids are
-resolved a second state follows with an `iconId` on every session. Paste a
-request using one of them and the reply line comes back:
+The first line is a full state with `"features":["icons"]` and an `iconId` on
+every session. Paste a request using one of them and the reply lines come
+back, one per id:
 
 ```json
 {"protocolVersion":7,"iconRequest":{"ids":["<iconId>","nosuchid"],"size":96}}
@@ -163,7 +166,8 @@ state = json.loads(lines.readline())
 assert "icons" in state.get("features", [])
 while not all("iconId" in x for x in state["defaultDevice"]["sessions"]):
     state = json.loads(lines.readline())
-ids = [x["iconId"] for x in state["defaultDevice"]["sessions"]]
+# Sessions can share an icon; the server answers each distinct id once.
+ids = list(dict.fromkeys(x["iconId"] for x in state["defaultDevice"]["sessions"]))
 
 request = {"protocolVersion": 7, "iconRequest": {"ids": ids, "size": 96}}
 s.sendall((json.dumps(request) + "\n").encode())

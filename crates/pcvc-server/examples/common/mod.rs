@@ -74,11 +74,6 @@ pub async fn serve(backend: Arc<dyn AudioBackend>, config: ServerConfig, what: &
         loop {
             match events.recv().await {
                 Ok(ServerEvent::BackendError(e)) => tracing::warn!("{e}"),
-                Ok(ServerEvent::IconsRequested {
-                    client,
-                    count,
-                    size,
-                }) => tracing::info!(addr = %client.addr, count, size, "icon request"),
                 Ok(_) => {}
                 Err(RecvError::Lagged(n)) => tracing::warn!("missed {n} server events"),
                 Err(RecvError::Closed) => break,

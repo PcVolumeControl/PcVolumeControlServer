@@ -7,9 +7,12 @@
 //!
 //! Icons (the v8 `icons` feature) are on by default and come from a demo
 //! provider: a coloured rounded square per app, rendered at the requested
-//! size. Like a real provider it resolves ids in the background, so each
-//! session first appears without an `iconId` and gains one about half a
-//! second later. `--no-icons` serves plain v7.
+//! size. Like a real provider it resolves ids in the background, so a session
+//! the provider has not seen before appears without an `iconId` and gains one
+//! about half a second later. Sessions on the default device at startup are
+//! resolved before anyone can connect; switching the default device to the
+//! headphones or headset shows the delayed path. `--no-icons` serves plain
+//! v7.
 //!
 //! Logging follows `RUST_LOG` (default `info`).
 
@@ -17,7 +20,7 @@ mod common;
 
 use std::collections::{HashMap, HashSet};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use pcvc_audio::{MockBackend, Session};
@@ -39,27 +42,37 @@ async fn main() -> ExitCode {
 /// Pretend lookup time before a session's icon id becomes known.
 const RESOLVE_DELAY: Duration = Duration::from_millis(500);
 
+/// Prefix of demo icon ids, followed by the colour as six hex digits. The
+/// image is a function of the colour alone, so this is content-derived: apps
+/// that happen to share a colour share an id. The version digit changes
+/// whenever the drawing does.
+const ID_PREFIX: &str = "demo1";
+
 /// Generated icons: one colour per app name, drawn at any size.
 struct DemoIcons {
     inner: Arc<Inner>,
 }
 
 struct Inner {
-    /// App name to icon id, once resolved.
-    ids: Mutex<HashMap<String, IconId>>,
-    /// Names being resolved.
-    pending: Mutex<HashSet<String>>,
-    colours: Mutex<HashMap<IconId, [u8; 3]>>,
+    state: Mutex<State>,
     changed: broadcast::Sender<()>,
+}
+
+#[derive(Default)]
+struct State {
+    /// App name to icon id, once resolved.
+    ids: HashMap<String, IconId>,
+    /// Names being resolved.
+    pending: HashSet<String>,
+    /// Rendered PNGs by id and edge length.
+    pngs: HashMap<(IconId, u32), Arc<[u8]>>,
 }
 
 impl Default for DemoIcons {
     fn default() -> Self {
         Self {
             inner: Arc::new(Inner {
-                ids: Mutex::default(),
-                pending: Mutex::default(),
-                colours: Mutex::default(),
+                state: Mutex::default(),
                 changed: broadcast::Sender::new(16),
             }),
         }
@@ -67,22 +80,29 @@ impl Default for DemoIcons {
 }
 
 impl Inner {
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn resolve(&self, name: &str) {
-        let colour = colour_for(name);
-        let id = icon_id_for(colour);
-        lock(&self.colours).insert(id.clone(), colour);
-        lock(&self.ids).insert(name.to_owned(), id);
-        lock(&self.pending).remove(name);
+        {
+            let mut state = self.state();
+            state
+                .ids
+                .insert(name.to_owned(), icon_id_for(colour_for(name)));
+            state.pending.remove(name);
+        }
         let _ = self.changed.send(());
     }
 }
 
 impl IconProvider for DemoIcons {
     fn icon_id(&self, session: &Session) -> Option<IconId> {
-        if let Some(id) = lock(&self.inner.ids).get(&session.name) {
+        let mut state = self.inner.state();
+        if let Some(id) = state.ids.get(&session.name) {
             return Some(id.clone());
         }
-        if lock(&self.inner.pending).insert(session.name.clone()) {
+        if state.pending.insert(session.name.clone()) {
             let inner = Arc::clone(&self.inner);
             let name = session.name.clone();
             std::thread::spawn(move || {
@@ -94,11 +114,16 @@ impl IconProvider for DemoIcons {
     }
 
     fn icon_png(&self, id: &IconId, size: u32) -> Option<IconImage> {
-        let colour = *lock(&self.inner.colours).get(id)?;
-        Some(IconImage {
-            size,
-            png: render(colour, size).into(),
-        })
+        let key = (id.clone(), size);
+        if let Some(png) = self.inner.state().pngs.get(&key) {
+            return Some(IconImage {
+                size,
+                png: Arc::clone(png),
+            });
+        }
+        let png: Arc<[u8]> = render(colour_of(id)?, size).into();
+        self.inner.state().pngs.insert(key, Arc::clone(&png));
+        Some(IconImage { size, png })
     }
 
     fn subscribe(&self) -> broadcast::Receiver<()> {
@@ -106,32 +131,30 @@ impl IconProvider for DemoIcons {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+fn icon_id_for([r, g, b]: [u8; 3]) -> IconId {
+    IconId::new(format!("{ID_PREFIX}{r:02x}{g:02x}{b:02x}")).expect("a valid icon id")
 }
 
-/// FNV-1a, 128 bit.
-fn fnv1a_128(bytes: &[u8]) -> u128 {
-    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013b;
-    bytes.iter().fold(OFFSET, |hash, &b| {
-        (hash ^ u128::from(b)).wrapping_mul(PRIME)
+/// The colour a demo id encodes, if it is one.
+fn colour_of(id: &IconId) -> Option<[u8; 3]> {
+    let hex = id.as_str().strip_prefix(ID_PREFIX)?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
+}
+
+/// FNV-1a, 64 bit.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf29ce484222325, |hash, &b| {
+        (hash ^ u64::from(b)).wrapping_mul(0x100000001b3)
     })
-}
-
-/// The image is a function of the colour alone, so the id is derived from
-/// it: apps that happen to share a colour share an icon id. The version
-/// tag changes whenever the drawing does.
-fn icon_id_for(colour: [u8; 3]) -> IconId {
-    // The fixed suffix diffuses the colour bytes through the whole hash.
-    let mut content = colour.to_vec();
-    content.extend_from_slice(b":pcvc-demo-icon-v1");
-    IconId::new(format!("{:032x}", fnv1a_128(&content))).expect("hex is a valid icon id")
 }
 
 /// A saturated colour picked by hashing the app name.
 fn colour_for(name: &str) -> [u8; 3] {
-    let hue = (fnv1a_128(name.as_bytes()) % 360) as f32;
+    let hue = (fnv1a(name.as_bytes()) % 360) as f32;
     let (s, v) = (0.65, 0.85);
     let c = v * s;
     let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());

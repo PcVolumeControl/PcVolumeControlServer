@@ -102,7 +102,7 @@ impl Intake {
                 "{total} icon ids outstanding, at most {MAX_OUTSTANDING_ICON_IDS} are allowed"
             )));
         }
-        tracing::debug!(addr = %client.addr, count = ids.len(), size, "icon request");
+        tracing::info!(addr = %client.addr, count = ids.len(), size, "icon request");
         shared.emit(ServerEvent::IconsRequested {
             client: client.clone(),
             count: ids.len(),
