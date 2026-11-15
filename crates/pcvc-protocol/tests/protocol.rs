@@ -222,6 +222,7 @@ fn current() -> FullState {
     FullState {
         protocol_version: PROTOCOL_VERSION,
         application_version: "test".into(),
+        features: Vec::new(),
         device_ids: BTreeMap::from([
             (SPEAKERS.into(), "Speakers".into()),
             (HEADSET.into(), "Headset".into()),
@@ -237,12 +238,14 @@ fn current() -> FullState {
                     id: STEAM.into(),
                     volume: 80.0,
                     muted: false,
+                    icon_id: None,
                 },
                 SessionState {
                     name: "Chrome".into(),
                     id: CHROME.into(),
                     volume: 35.0,
                     muted: false,
+                    icon_id: None,
                 },
             ],
         },

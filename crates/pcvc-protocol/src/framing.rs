@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde_json::{Number, Value};
 
-use crate::{ClientUpdate, FullState, PROTOCOL_VERSION};
+use crate::{ClientUpdate, FullState, MAX_ICON_IDS_PER_REQUEST, PROTOCOL_VERSION};
 
 /// Longest client line, in bytes excluding the terminator, that is accepted.
 /// Real client messages are a few hundred bytes.
@@ -15,6 +15,7 @@ pub enum ProtocolError {
     Malformed(serde_json::Error),
     LineTooLong { len: usize },
     VersionMismatch { received: Option<Number> },
+    TooManyIconIds { count: usize },
 }
 
 impl fmt::Display for ProtocolError {
@@ -33,6 +34,10 @@ impl fmt::Display for ProtocolError {
             Self::VersionMismatch { received: None } => {
                 write!(f, "missing protocolVersion, expected {PROTOCOL_VERSION}")
             }
+            Self::TooManyIconIds { count } => write!(
+                f,
+                "iconRequest has {count} ids, at most {MAX_ICON_IDS_PER_REQUEST} are allowed"
+            ),
         }
     }
 }
@@ -41,7 +46,9 @@ impl std::error::Error for ProtocolError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Malformed(e) => Some(e),
-            Self::LineTooLong { .. } | Self::VersionMismatch { .. } => None,
+            Self::LineTooLong { .. }
+            | Self::VersionMismatch { .. }
+            | Self::TooManyIconIds { .. } => None,
         }
     }
 }
@@ -79,6 +86,13 @@ pub fn parse_client_line(line: &str) -> Result<Option<ClientUpdate>, ProtocolErr
             received: update.protocol_version,
         });
     }
+    if let Some(request) = &update.icon_request
+        && request.ids.len() > MAX_ICON_IDS_PER_REQUEST
+    {
+        return Err(ProtocolError::TooManyIconIds {
+            count: request.ids.len(),
+        });
+    }
     Ok(Some(update))
 }
 
@@ -94,6 +108,12 @@ fn check_shape(value: &Value) -> Result<(), &'static str> {
     let Some(root) = value.as_object() else {
         return Err("expected a JSON object");
     };
+    if root
+        .get("iconRequest")
+        .is_some_and(|v| !v.is_null() && !v.is_object())
+    {
+        return Err("iconRequest must be an object");
+    }
     let Some(device) = root.get("defaultDevice").filter(|v| !v.is_null()) else {
         return Ok(());
     };

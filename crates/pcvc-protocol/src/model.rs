@@ -3,12 +3,19 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
 
+use crate::{IconId, IconRequest};
+
 /// Full audio state sent by the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FullState {
     pub protocol_version: u32,
     pub application_version: String,
+    /// Extensions the server supports, such as [`crate::FEATURE_ICONS`].
+    /// Omitted from the wire when empty, which keeps the line identical to
+    /// plain v7.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
     /// Active playback devices, id to friendly name.
     pub device_ids: BTreeMap<String, String>,
     pub default_device: DeviceState,
@@ -31,6 +38,9 @@ pub struct SessionState {
     pub id: String,
     pub volume: f32,
     pub muted: bool,
+    /// Omitted until the server knows the session's icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_id: Option<IconId>,
 }
 
 /// A client message: a partial [`FullState`].
@@ -48,6 +58,8 @@ pub struct ClientUpdate {
     pub device_ids: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_device: Option<DeviceUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_request: Option<IconRequest>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

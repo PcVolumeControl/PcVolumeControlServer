@@ -10,6 +10,7 @@ pub fn to_full_state(state: &AudioState) -> Option<FullState> {
     Some(FullState {
         protocol_version: PROTOCOL_VERSION,
         application_version: APPLICATION_VERSION.to_owned(),
+        features: Vec::new(),
         device_ids: state
             .devices
             .iter()
@@ -28,6 +29,7 @@ pub fn to_full_state(state: &AudioState) -> Option<FullState> {
                     id: s.id.clone(),
                     volume: clamp_volume(s.volume),
                     muted: s.muted,
+                    icon_id: None,
                 })
                 .collect(),
         },
