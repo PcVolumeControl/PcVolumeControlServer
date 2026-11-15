@@ -34,6 +34,20 @@ advertises `_pcvolumecontrol._tcp`. Point the iOS or Android app at this
 machine (or let it discover the server). Options: `--port N`, `--no-mdns`;
 logging follows `RUST_LOG`.
 
+## Windows audio backend
+
+`pcvc_audio::WindowsBackend` drives Windows Core Audio: active playback
+devices, the default device's master volume and sessions, default-device
+switching, and change notifications. On Windows:
+
+```powershell
+cargo run -p pcvc-audio --example windows_dump      # print the state, then every change
+cargo run -p pcvc-server --example windows_server   # serve the phones from the real mixer
+```
+
+It has not been run on Windows yet; [docs/WINDOWS-TESTING.md](docs/WINDOWS-TESTING.md)
+is the checklist to verify it.
+
 ## Crates
 
 | Crate | Purpose |
