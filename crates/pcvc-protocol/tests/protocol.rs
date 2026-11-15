@@ -256,7 +256,7 @@ fn update(json: Value) -> ClientUpdate {
 #[test]
 fn no_default_device_is_noop() {
     let u = update(serde_json::json!({ "protocolVersion": 7 }));
-    assert!(plan_commands(&current(), &u).is_empty());
+    assert!(plan_commands(Some(&current()), &u).is_empty());
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn missing_device_id_is_noop() {
         "protocolVersion": 7,
         "defaultDevice": { "masterVolume": 10.0 }
     }));
-    assert!(plan_commands(&current(), &u).is_empty());
+    assert!(plan_commands(Some(&current()), &u).is_empty());
 }
 
 #[test]
@@ -280,7 +280,7 @@ fn device_switch_wins_over_everything_else() {
         }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetDefaultDevice {
             device_id: HEADSET.into()
         }]
@@ -297,11 +297,27 @@ fn switch_to_unknown_device_is_left_to_the_backend() {
         }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetDefaultDevice {
             device_id: "nope".into()
         }]
     );
+}
+
+#[test]
+fn without_default_device_only_a_switch_applies() {
+    let u = update(serde_json::json!({
+        "protocolVersion": 7,
+        "defaultDevice": { "deviceId": HEADSET, "masterVolume": 10.0 }
+    }));
+    assert_eq!(
+        plan_commands(None, &u),
+        vec![Command::SetDefaultDevice {
+            device_id: HEADSET.into()
+        }]
+    );
+    let u = update(serde_json::json!({ "protocolVersion": 7, "defaultDevice": {} }));
+    assert!(plan_commands(None, &u).is_empty());
 }
 
 #[test]
@@ -315,7 +331,7 @@ fn master_wins_over_sessions() {
         }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetMaster {
             volume: Some(10.0),
             muted: None
@@ -330,7 +346,7 @@ fn master_mute_only() {
         "defaultDevice": { "deviceId": SPEAKERS, "masterMuted": true }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetMaster {
             volume: None,
             muted: Some(true)
@@ -344,7 +360,7 @@ fn swift_master_update_sets_both() {
         r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":true,"masterVolume":64}}}}"#
     ));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetMaster {
             volume: Some(64.0),
             muted: Some(true)
@@ -366,7 +382,7 @@ fn sessions_apply_volume_and_mute_for_live_ids_only() {
         }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![
             Command::SetSession {
                 session_id: STEAM.into(),
@@ -395,7 +411,7 @@ fn duplicate_session_entries_use_the_first() {
         }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetSession {
             session_id: CHROME.into(),
             volume: 1.0,
@@ -410,7 +426,7 @@ fn same_device_without_changes_is_noop() {
         "protocolVersion": 7,
         "defaultDevice": { "deviceId": SPEAKERS, "sessions": [] }
     }));
-    assert!(plan_commands(&current(), &u).is_empty());
+    assert!(plan_commands(Some(&current()), &u).is_empty());
 }
 
 // Clamping.
@@ -435,7 +451,7 @@ fn planned_volumes_are_clamped() {
         }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetMaster {
             volume: Some(100.0),
             muted: None
@@ -450,7 +466,7 @@ fn planned_volumes_are_clamped() {
         }
     }));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetSession {
             session_id: CHROME.into(),
             volume: 0.0,
@@ -465,7 +481,7 @@ fn huge_volume_parses_and_clamps() {
         r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":1e300}}}}"#
     ));
     assert_eq!(
-        plan_commands(&current(), &u),
+        plan_commands(Some(&current()), &u),
         vec![Command::SetMaster {
             volume: Some(100.0),
             muted: None

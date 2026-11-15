@@ -22,7 +22,11 @@ or disappearing, a device appearing or disappearing, or the default device
 changing. Bursts of changes are coalesced into one message (about 15 ms).
 
 The server never replies directly to a client message. A successful update
-changes the audio system, which triggers a broadcast like any other change.
+changes the audio system, which triggers a broadcast like any other change. If
+an update cannot be applied (an unknown device id, a session that has just
+gone away), the server re-sends the current full state to every client so the
+sender can drop its optimistic change. The server may skip a broadcast when the
+state has not actually changed.
 
 ```json
 {
@@ -97,7 +101,11 @@ checks them in this order, applying only the first that matches:
    unknown sessions are ignored.
 
 A message without `defaultDevice`, or without `defaultDevice.deviceId`, does
-nothing. Volumes outside 0 to 100 are clamped.
+nothing. While there is no default device, any `deviceId` is treated as kind 1.
+Volumes outside 0 to 100 are clamped.
+
+Updates are judged against the last full state the server sent, which is the
+state the client is acting on.
 
 Change the default device:
 

@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use pcvc_audio::{AudioBackend, AudioState};
+use pcvc_protocol::FullState;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Notify, broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -75,18 +76,17 @@ pub enum DisconnectReason {
     ServerStopped,
 }
 
-/// Things a front end may want to show or log.
+/// Things a front end may want to show or log. Only events after
+/// [`ServerHandle::start`] returns can be observed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerEvent {
-    Listening {
-        addr: SocketAddr,
-    },
     ClientConnected(ClientInfo),
     ClientDisconnected {
         client: ClientInfo,
         reason: DisconnectReason,
     },
-    /// Reading the state or applying a client command failed.
+    /// Reading the state or applying a client command failed, or the backend's
+    /// event stream ended.
     BackendError(String),
     Stopped,
 }
@@ -100,14 +100,22 @@ pub enum ServerError {
     },
 }
 
+/// The last published full state and its encoded line.
+struct Frame {
+    state: FullState,
+    line: String,
+}
+
 /// State shared by the server's tasks.
 struct Shared {
     backend: Arc<dyn AudioBackend>,
-    /// The encoded full state line, or `None` while there is no default device.
-    /// Each client's writer follows this channel, so a slow client skips
-    /// intermediate states rather than queueing them.
-    frames: watch::Sender<Option<Arc<str>>>,
+    /// `None` while there is no default device. Each client's writer follows
+    /// this channel, so a slow client skips intermediate states rather than
+    /// queueing them.
+    frames: watch::Sender<Option<Arc<Frame>>>,
     state: watch::Sender<AudioState>,
+    /// Asks the broadcaster to re-send the state even if it has not changed.
+    resync: Notify,
     clients: watch::Sender<Vec<ClientInfo>>,
     events: broadcast::Sender<ServerEvent>,
     next_client_id: AtomicU64,
@@ -146,23 +154,24 @@ impl ServerHandle {
             backend,
             frames: watch::Sender::new(None),
             state: watch::Sender::new(AudioState::default()),
+            resync: Notify::new(),
             clients: watch::Sender::new(Vec::new()),
             events: broadcast::Sender::new(EVENT_CAPACITY),
             next_client_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
         });
-        broadcaster::rebuild(&shared).await;
+        let initial_ok = broadcaster::rebuild(&shared, true).await;
 
         let tracker = TaskTracker::new();
         tracker.spawn(broadcaster::run(
             Arc::clone(&shared),
             audio_events,
             config.coalesce,
+            initial_ok,
         ));
         tracker.spawn(accept_loop(Arc::clone(&shared), listener, tracker.clone()));
 
         tracing::info!(%local_addr, "server listening");
-        shared.emit(ServerEvent::Listening { addr: local_addr });
         Ok(Self {
             shared,
             tracker,

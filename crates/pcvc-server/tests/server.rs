@@ -172,6 +172,46 @@ async fn default_device_switch_is_applied_and_broadcast() {
 }
 
 #[tokio::test]
+async fn rejected_update_triggers_resync() {
+    let (_mock, server) = start().await;
+    let mut events = server.events();
+    let mut client = Client::connect(server.local_addr()).await;
+    let before = client.read_state().await;
+
+    client
+        .send(r#"{"protocolVersion":7,"defaultDevice":{"deviceId":"no-such-device"}}"#)
+        .await;
+    assert_eq!(client.read_state().await, before);
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        ServerEvent::ClientConnected(_)
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap(),
+        ServerEvent::BackendError(_)
+    ));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn unchanged_state_is_not_resent() {
+    let (mock, server) = start().await;
+    let mut client = Client::connect(server.local_addr()).await;
+    let state = client.read_state().await;
+
+    // Replacing a device with an identical copy emits events but changes
+    // nothing visible.
+    let device = mock.snapshot().unwrap().default_device.unwrap();
+    mock.add_device(device).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    mock.set_master(Some(1.0), None).unwrap();
+    let next = client.read_state().await;
+    assert_eq!(next.default_device.master_volume, 1.0);
+    assert_ne!(next, state);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn backend_changes_are_broadcast() {
     let (mock, server) = start().await;
     let mut client = Client::connect(server.local_addr()).await;
@@ -370,5 +410,21 @@ async fn no_default_device_sends_nothing_until_one_appears() {
         .unwrap();
     let state = client.read_state().await;
     assert_eq!(state.default_device.device_id, "dev");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn client_can_pick_a_default_device_when_there_is_none() {
+    let devices = vec![pcvc_audio::Device::new("a", "A", 10.0)];
+    let mock = Arc::new(MockBackend::new(devices, None).unwrap());
+    let backend: Arc<dyn AudioBackend> = mock.clone();
+    let config = ServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+    let server = ServerHandle::start(backend, config).await.unwrap();
+    let mut client = Client::connect(server.local_addr()).await;
+
+    client
+        .send(r#"{"protocolVersion":7,"defaultDevice":{"deviceId":"a"}}"#)
+        .await;
+    assert_eq!(client.read_state().await.default_device.device_id, "a");
     server.stop().await;
 }

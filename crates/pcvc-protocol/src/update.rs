@@ -27,7 +27,8 @@ pub fn clamp_volume(volume: f32) -> f32 {
 }
 
 /// Decides which backend commands a client update produces, given the current
-/// state. The kinds are mutually exclusive and checked in order:
+/// state (`None` when there is no default device). The kinds are mutually
+/// exclusive and checked in order:
 ///
 /// 1. `defaultDevice.deviceId` differs from the current default: switch the
 ///    default device and nothing else. The id is not checked against
@@ -37,21 +38,23 @@ pub fn clamp_volume(volume: f32) -> f32 {
 ///    mute from the first `sessions[]` entry with a matching `id`.
 ///
 /// An update without `defaultDevice` or without `defaultDevice.deviceId`
-/// produces nothing. The protocol version is not checked here.
-pub fn plan_commands(current: &FullState, update: &ClientUpdate) -> Vec<Command> {
+/// produces nothing. Without a current default device, any `deviceId` counts as
+/// a switch. The protocol version is not checked here.
+pub fn plan_commands(current: Option<&FullState>, update: &ClientUpdate) -> Vec<Command> {
     let Some(device) = &update.default_device else {
         return Vec::new();
     };
     let Some(device_id) = device.device_id.as_deref() else {
         return Vec::new();
     };
-    let current_device = &current.default_device;
-
-    if device_id != current_device.device_id {
-        return vec![Command::SetDefaultDevice {
-            device_id: device_id.to_owned(),
-        }];
-    }
+    let current_device = match current {
+        Some(current) if current.default_device.device_id == device_id => &current.default_device,
+        _ => {
+            return vec![Command::SetDefaultDevice {
+                device_id: device_id.to_owned(),
+            }];
+        }
+    };
 
     if device.master_volume.is_some() || device.master_muted.is_some() {
         return vec![Command::SetMaster {

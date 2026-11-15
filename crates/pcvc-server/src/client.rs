@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
-use crate::{ClientInfo, DisconnectReason, ServerEvent, Shared, to_full_state};
+use crate::{ClientInfo, DisconnectReason, ServerEvent, Shared};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -67,48 +67,46 @@ async fn write_loop(shared: &Shared, mut write: OwnedWriteHalf) -> DisconnectRea
     loop {
         let frame = frames.borrow_and_update().clone();
         if let Some(frame) = frame {
-            match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(frame.as_bytes())).await {
+            match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(frame.line.as_bytes())).await
+            {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => return DisconnectReason::Io(e.to_string()),
                 Err(_) => return DisconnectReason::WriteTimeout,
             }
         }
+        // Cannot fail while `shared` (which owns the sender) is alive; shutdown
+        // is signalled through the cancel token instead.
         if frames.changed().await.is_err() {
             return DisconnectReason::ServerStopped;
         }
     }
 }
 
-/// Plans against a fresh snapshot and runs the resulting commands. The client
-/// gets no direct reply; the backend's change events trigger a broadcast.
+/// Plans against the last published state, which is what the client has seen,
+/// and runs the resulting commands. The client gets no direct reply: the
+/// backend's change events trigger a broadcast, and a failed command triggers a
+/// resync broadcast so the client does not keep showing a rejected change.
 async fn apply_update(shared: &Shared, update: ClientUpdate) {
+    let current = shared.frames.borrow().clone();
+    let commands = plan_commands(current.as_ref().map(|f| &f.state), &update);
+    if commands.is_empty() {
+        tracing::debug!(?update, "update produced no commands");
+        return;
+    }
     let backend = Arc::clone(&shared.backend);
-    let result = tokio::task::spawn_blocking(move || -> Result<(), Vec<AudioError>> {
-        let state = backend.snapshot().map_err(|e| vec![e])?;
-        let Some(current) = to_full_state(&state) else {
-            return Ok(());
-        };
-        let commands = plan_commands(&current, &update);
-        if commands.is_empty() {
-            tracing::debug!(?update, "update produced no commands");
-        }
-        let errors: Vec<_> = commands
+    let result = tokio::task::spawn_blocking(move || {
+        commands
             .iter()
             .filter_map(|command| {
                 tracing::debug!(?command, "applying");
                 backend.apply(command).err()
             })
-            .collect();
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+            .collect::<Vec<AudioError>>()
     })
     .await;
     match result {
-        Ok(Ok(())) => {}
-        Ok(Err(errors)) => {
+        Ok(errors) if errors.is_empty() => return,
+        Ok(errors) => {
             for e in errors {
                 tracing::warn!("client command failed: {e}");
                 shared.emit(ServerEvent::BackendError(format!("command failed: {e}")));
@@ -119,4 +117,5 @@ async fn apply_update(shared: &Shared, update: ClientUpdate) {
             shared.emit(ServerEvent::BackendError(format!("command panicked: {e}")));
         }
     }
+    shared.resync.notify_one();
 }
