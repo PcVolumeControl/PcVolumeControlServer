@@ -17,8 +17,8 @@ use pcvc_server::{
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::broadcast;
 use tokio::time::timeout;
 
@@ -75,12 +75,28 @@ impl TestProvider {
         self.gate.1.notify_all();
     }
 
+    /// Holds `icon_png` calls until the guard is dropped. Dropping it on a
+    /// failed assertion too keeps the runtime from waiting forever on a
+    /// blocked call.
+    fn close_gate(self: &Arc<Self>) -> GateGuard {
+        self.set_gate(false);
+        GateGuard(Arc::clone(self))
+    }
+
     fn png_calls(&self) -> usize {
         self.png_sizes.lock().unwrap().len()
     }
 
     fn png(id: &str, size: u32) -> Vec<u8> {
         format!("png:{id}:{size}").into_bytes()
+    }
+}
+
+struct GateGuard(Arc<TestProvider>);
+
+impl Drop for GateGuard {
+    fn drop(&mut self) {
+        self.0.set_gate(true);
     }
 }
 
@@ -133,7 +149,18 @@ struct Client {
 
 impl Client {
     async fn connect(addr: SocketAddr) -> Self {
-        let stream = TcpStream::connect(addr).await.unwrap();
+        Self::from_stream(TcpStream::connect(addr).await.unwrap())
+    }
+
+    /// A client whose socket buffers as little as the OS allows, so that the
+    /// server's writes back up quickly when it stops reading.
+    async fn connect_small_buffer(addr: SocketAddr) -> Self {
+        let socket = TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        Self::from_stream(socket.connect(addr).await.unwrap())
+    }
+
+    fn from_stream(stream: TcpStream) -> Self {
         let (read, writer) = stream.into_split();
         Self {
             reader: BufReader::new(read),
@@ -589,7 +616,7 @@ async fn malformed_requests_drop_the_client() {
 #[tokio::test]
 async fn up_to_64_ids_may_be_outstanding_and_are_answered_in_order() {
     let provider = TestProvider::new(&DEMO_NAMES);
-    provider.set_gate(false);
+    let gate = provider.close_gate();
     let (_mock, server) = start(Some(provider.clone())).await;
     let mut client = Client::connect(server.local_addr()).await;
     client.read_state().await;
@@ -599,7 +626,7 @@ async fn up_to_64_ids_may_be_outstanding_and_are_answered_in_order() {
     client.send(&icon_request(&ids[..32], None)).await;
     client.send(&icon_request(&ids[32..], None)).await;
     client.assert_quiet().await;
-    provider.set_gate(true);
+    drop(gate);
     for id in ids {
         assert_not_found(&client.read_icon().await, id);
     }
@@ -610,7 +637,7 @@ async fn up_to_64_ids_may_be_outstanding_and_are_answered_in_order() {
 #[tokio::test]
 async fn going_over_64_outstanding_ids_drops_the_client() {
     let provider = TestProvider::new(&DEMO_NAMES);
-    provider.set_gate(false);
+    let gate = provider.close_gate();
     let (_mock, server) = start(Some(provider.clone())).await;
     let mut events = server.events();
     let mut client = Client::connect(server.local_addr()).await;
@@ -630,19 +657,19 @@ async fn going_over_64_outstanding_ids_drops_the_client() {
     );
     // At most one provider call was in progress for the client.
     assert!(provider.png_calls() <= 1);
-    provider.set_gate(true);
+    drop(gate);
     server.stop().await;
 }
 
 #[tokio::test]
 async fn a_client_that_stops_reading_does_not_hold_up_others() {
     let provider = TestProvider::new(&DEMO_NAMES);
-    provider.padding.store(400 * 1024, Ordering::Relaxed);
+    provider.padding.store(500 * 1024, Ordering::Relaxed);
     let (mock, server) = start(Some(provider.clone())).await;
     let mut clients = server.clients();
 
-    // Asks for 64 large replies (about 35 MB of lines) and never reads them.
-    let mut stalled = Client::connect(server.local_addr()).await;
+    // Asks for 64 large replies (about 44 MB of lines) and never reads them.
+    let mut stalled = Client::connect_small_buffer(server.local_addr()).await;
     stalled.read_state().await;
     let ids: Vec<IconId> = DEMO_NAMES.iter().map(|n| TestProvider::id_for(n)).collect();
     let ids: Vec<&str> = ids.iter().map(IconId::as_str).collect();
@@ -664,5 +691,43 @@ async fn a_client_that_stops_reading_does_not_hold_up_others() {
     let calls = provider.png_calls();
     assert!(calls < 64, "{calls} icons rendered for a stalled client");
     assert_eq!(clients.borrow_and_update().len(), 2);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn provider_calls_are_capped_across_clients() {
+    let provider = TestProvider::new(&DEMO_NAMES);
+    let gate = provider.close_gate();
+    let (_mock, server) = start(Some(provider.clone())).await;
+    let firefox = TestProvider::id_for("Firefox");
+
+    // Clients that request and then hang up leave their provider calls
+    // running.
+    let mut leaving = Vec::new();
+    for _ in 0..10 {
+        let mut client = Client::connect(server.local_addr()).await;
+        client.read_state().await;
+        client.send(&icon_request(&[firefox.as_str()], None)).await;
+        leaving.push(client);
+    }
+    timeout(TIMEOUT, async {
+        while provider.png_calls() < 4 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("provider calls did not start");
+    drop(leaving);
+
+    let mut waiting = Client::connect(server.local_addr()).await;
+    waiting.read_state().await;
+    waiting.send(&icon_request(&[firefox.as_str()], None)).await;
+    tokio::time::sleep(QUIET).await;
+    assert_eq!(provider.png_calls(), 4);
+
+    drop(gate);
+    let reply = waiting.read_icon().await;
+    let (id, _, _) = image(&reply);
+    assert_eq!(id, firefox.as_str());
     server.stop().await;
 }

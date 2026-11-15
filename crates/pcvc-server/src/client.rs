@@ -14,7 +14,10 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use crate::icon_replies::{self, Intake, Outstanding};
 use crate::{ClientInfo, DisconnectReason, ServerEvent, Shared};
 
+/// A client that accepts less than `WRITE_CHUNK` bytes in `WRITE_TIMEOUT` is
+/// dropped.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_CHUNK: usize = 64 * 1024;
 
 pub(crate) async fn run(shared: Arc<Shared>, stream: TcpStream, info: ClientInfo) {
     tracing::info!(addr = %info.addr, "client connected");
@@ -80,8 +83,9 @@ async fn read_loop(
 }
 
 /// Sends the current state immediately, then every newer one, interleaved
-/// with this client's icon replies. States go first when both are ready, so a
-/// state waits for at most one icon line.
+/// with this client's icon replies. Each pass writes one line, picked fairly
+/// when both kinds are ready, so a state waits for at most one icon line and
+/// a stream of states cannot starve the replies.
 async fn write_loop(
     shared: &Shared,
     mut write: OwnedWriteHalf,
@@ -92,7 +96,6 @@ async fn write_loop(
     frames.mark_changed();
     loop {
         let written = tokio::select! {
-            biased;
             changed = frames.changed() => {
                 // Cannot fail while `shared` (which owns the sender) is alive;
                 // shutdown is signalled through the cancel token instead.
@@ -117,12 +120,17 @@ async fn write_loop(
     }
 }
 
+/// Writes in chunks, each with its own timeout, so a large icon line on a slow
+/// link is not mistaken for a stalled client.
 async fn write_line(write: &mut OwnedWriteHalf, line: &str) -> Result<(), DisconnectReason> {
-    match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(line.as_bytes())).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(DisconnectReason::Io(e.to_string())),
-        Err(_) => Err(DisconnectReason::WriteTimeout),
+    for chunk in line.as_bytes().chunks(WRITE_CHUNK) {
+        match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(chunk)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(DisconnectReason::Io(e.to_string())),
+            Err(_) => return Err(DisconnectReason::WriteTimeout),
+        }
     }
+    Ok(())
 }
 
 /// Plans against the last published state, which is what the client has seen,

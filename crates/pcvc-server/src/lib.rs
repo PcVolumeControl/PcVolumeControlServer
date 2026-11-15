@@ -129,7 +129,8 @@ pub enum DisconnectReason {
     /// over an icon request limit.
     Protocol(String),
     Io(String),
-    /// Writing a state or an icon reply to the client did not finish in time.
+    /// The client stopped accepting data: writing a state or an icon reply
+    /// made no progress in time.
     WriteTimeout,
     ServerStopped,
 }
@@ -174,6 +175,8 @@ struct Frame {
 struct Shared {
     backend: Arc<dyn AudioBackend>,
     icons: Option<Arc<dyn IconProvider>>,
+    /// Permits for concurrent `IconProvider::icon_png` calls.
+    icon_renders: Arc<tokio::sync::Semaphore>,
     /// `None` while there is no default device. Each client's writer follows
     /// this channel, so a slow client skips intermediate states rather than
     /// queueing them.
@@ -226,6 +229,7 @@ impl ServerHandle {
         let shared = Arc::new(Shared {
             backend,
             icons: config.icons,
+            icon_renders: icon_replies::render_limit(),
             frames: watch::Sender::new(None),
             state: watch::Sender::new(AudioState::default()),
             resync: Notify::new(),

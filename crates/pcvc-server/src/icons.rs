@@ -32,7 +32,8 @@ pub trait IconProvider: Send + Sync + 'static {
 
     /// PNG bytes for `id` with an edge of about `size` pixels (already clamped
     /// to the protocol's range). `None` if the id is unknown. May block; the
-    /// server calls it on a blocking thread, one call at a time per client.
+    /// server calls it on a blocking thread, one call at a time per client and
+    /// a few at a time overall.
     fn icon_png(&self, id: &IconId, size: u32) -> Option<IconImage>;
 
     /// Fires when an icon id became available for some session. Lagging is
