@@ -8,8 +8,10 @@ use pcvc_protocol::{ClientUpdate, MAX_LINE_LEN, parse_client_line, plan_commands
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
+use crate::icon_replies::{self, Intake, Outstanding};
 use crate::{ClientInfo, DisconnectReason, ServerEvent, Shared};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -23,10 +25,13 @@ pub(crate) async fn run(shared: Arc<Shared>, stream: TcpStream, info: ClientInfo
         tracing::debug!(addr = %info.addr, "set_nodelay failed: {e}");
     }
     let (read, write) = stream.into_split();
+    let (intake, worker, icon_lines) = icon_replies::pipeline();
+    let outstanding = Outstanding::default();
     let reason = tokio::select! {
         () = shared.cancel.cancelled() => DisconnectReason::ServerStopped,
-        reason = read_loop(&shared, read) => reason,
-        reason = write_loop(&shared, write) => reason,
+        reason = read_loop(&shared, &info, read, &intake, &outstanding) => reason,
+        reason = write_loop(&shared, write, icon_lines, &outstanding) => reason,
+        never = worker.run(&shared) => match never {},
     };
 
     tracing::info!(addr = %info.addr, ?reason, "client disconnected");
@@ -39,7 +44,13 @@ pub(crate) async fn run(shared: Arc<Shared>, stream: TcpStream, info: ClientInfo
     });
 }
 
-async fn read_loop(shared: &Shared, read: OwnedReadHalf) -> DisconnectReason {
+async fn read_loop(
+    shared: &Shared,
+    info: &ClientInfo,
+    read: OwnedReadHalf,
+    icons: &Intake,
+    outstanding: &Outstanding,
+) -> DisconnectReason {
     let mut lines = FramedRead::new(read, LinesCodec::new_with_max_length(MAX_LINE_LEN));
     loop {
         let line = match lines.next().await {
@@ -55,30 +66,62 @@ async fn read_loop(shared: &Shared, read: OwnedReadHalf) -> DisconnectReason {
         };
         match parse_client_line(&line) {
             Ok(None) => {}
-            Ok(Some(update)) => apply_update(shared, update).await,
+            Ok(Some(update)) => {
+                if let Some(request) = &update.icon_request
+                    && let Err(reason) = icons.queue(shared, info, outstanding, request)
+                {
+                    return reason;
+                }
+                apply_update(shared, update).await;
+            }
             Err(e) => return DisconnectReason::Protocol(e.to_string()),
         }
     }
 }
 
-/// Sends the current state immediately, then every newer one.
-async fn write_loop(shared: &Shared, mut write: OwnedWriteHalf) -> DisconnectReason {
+/// Sends the current state immediately, then every newer one, interleaved
+/// with this client's icon replies. States go first when both are ready, so a
+/// state waits for at most one icon line.
+async fn write_loop(
+    shared: &Shared,
+    mut write: OwnedWriteHalf,
+    mut icon_lines: mpsc::Receiver<String>,
+    outstanding: &Outstanding,
+) -> DisconnectReason {
     let mut frames = shared.frames.subscribe();
+    frames.mark_changed();
     loop {
-        let frame = frames.borrow_and_update().clone();
-        if let Some(frame) = frame {
-            match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(frame.line.as_bytes())).await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return DisconnectReason::Io(e.to_string()),
-                Err(_) => return DisconnectReason::WriteTimeout,
+        let written = tokio::select! {
+            biased;
+            changed = frames.changed() => {
+                // Cannot fail while `shared` (which owns the sender) is alive;
+                // shutdown is signalled through the cancel token instead.
+                if changed.is_err() {
+                    return DisconnectReason::ServerStopped;
+                }
+                let frame = frames.borrow_and_update().clone();
+                match frame {
+                    Some(frame) => write_line(&mut write, &frame.line).await,
+                    None => Ok(()),
+                }
             }
+            Some(line) = icon_lines.recv() => {
+                let written = write_line(&mut write, &line).await;
+                outstanding.written();
+                written
+            }
+        };
+        if let Err(reason) = written {
+            return reason;
         }
-        // Cannot fail while `shared` (which owns the sender) is alive; shutdown
-        // is signalled through the cancel token instead.
-        if frames.changed().await.is_err() {
-            return DisconnectReason::ServerStopped;
-        }
+    }
+}
+
+async fn write_line(write: &mut OwnedWriteHalf, line: &str) -> Result<(), DisconnectReason> {
+    match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(line.as_bytes())).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(DisconnectReason::Io(e.to_string())),
+        Err(_) => Err(DisconnectReason::WriteTimeout),
     }
 }
 

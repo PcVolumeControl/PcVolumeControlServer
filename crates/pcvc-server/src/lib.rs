@@ -14,6 +14,7 @@
 
 mod broadcaster;
 mod client;
+mod icon_replies;
 mod icons;
 mod mdns;
 mod state;
@@ -124,10 +125,11 @@ pub struct ClientInfo {
 pub enum DisconnectReason {
     /// The client closed the connection.
     Closed,
-    /// The client sent malformed input or the wrong protocol version.
+    /// The client sent malformed input or the wrong protocol version, or went
+    /// over an icon request limit.
     Protocol(String),
     Io(String),
-    /// Writing a state to the client did not finish in time.
+    /// Writing a state or an icon reply to the client did not finish in time.
     WriteTimeout,
     ServerStopped,
 }
@@ -140,6 +142,12 @@ pub enum ServerEvent {
     ClientDisconnected {
         client: ClientInfo,
         reason: DisconnectReason,
+    },
+    /// A client asked for icons: `count` distinct ids at `size` pixels.
+    IconsRequested {
+        client: ClientInfo,
+        count: usize,
+        size: u32,
     },
     /// Reading the state or applying a client command failed, or the backend's
     /// event stream ended.
