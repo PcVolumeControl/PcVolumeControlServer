@@ -13,7 +13,6 @@ use desktop::DesktopIndex;
 use theme::IconThemes;
 
 use super::{Found, IconKey, Resolver, raster};
-use crate::icons::Rgba;
 
 /// Longest wait for `gsettings`.
 const GSETTINGS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -274,10 +273,6 @@ impl LinuxResolver {
 }
 
 impl Resolver for LinuxResolver {
-    fn resolve(&self, key: &IconKey) -> Option<Rgba> {
-        self.resolve_found(key).map(|found| found.rgba)
-    }
-
     fn resolve_found(&self, key: &IconKey) -> Option<Found> {
         let found = self.find(key);
         match &found {

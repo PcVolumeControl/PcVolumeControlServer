@@ -2858,6 +2858,7 @@ name = "pcvolumecontrol"
 version = "0.1.0"
 dependencies = [
  "auto-launch",
+ "base64",
  "chrono",
  "directories",
  "iced",
@@ -2869,6 +2870,7 @@ dependencies = [
  "pcvc-server",
  "resvg",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",

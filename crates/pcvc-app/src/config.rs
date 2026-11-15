@@ -115,10 +115,28 @@ impl Config {
     }
 }
 
+/// Settings with no control in the window, set by editing the file. They
+/// are kept apart from [`Config`], which the Settings page rebuilds field by
+/// field, and [`save`] leaves them in the file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileOnly {
+    /// Serve application icons to phone clients (the protocol's v8
+    /// `icons` feature). Read at startup.
+    pub serve_icons: bool,
+}
+
+impl Default for FileOnly {
+    fn default() -> Self {
+        Self { serve_icons: true }
+    }
+}
+
 /// The outcome of [`load`]: a usable config plus anything worth logging.
 #[derive(Debug)]
 pub struct Loaded {
     pub config: Config,
+    pub file_only: FileOnly,
     pub warning: Option<String>,
     /// `false` when the file exists but could not be read or moved aside;
     /// saving would then overwrite the user's settings with defaults.
@@ -134,6 +152,7 @@ pub fn load(path: &Path) -> Loaded {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Loaded {
                 config: Config::default(),
+                file_only: FileOnly::default(),
                 warning: None,
                 writable: true,
             };
@@ -141,6 +160,7 @@ pub fn load(path: &Path) -> Loaded {
         Err(e) => {
             return Loaded {
                 config: Config::default(),
+                file_only: FileOnly::default(),
                 warning: Some(format!(
                     "could not read {}: {e}; using defaults and not saving",
                     path.display()
@@ -152,13 +172,25 @@ pub fn load(path: &Path) -> Loaded {
     match toml::from_str::<Config>(&text) {
         Ok(mut config) => {
             config.window = config.window.sanitized();
-            let warning = (config.port == 0).then(|| {
+            let mut warnings = Vec::new();
+            if config.port == 0 {
                 config.port = DEFAULT_PORT;
-                format!("port 0 in {} replaced by {DEFAULT_PORT}", path.display())
+                warnings.push(format!(
+                    "port 0 in {} replaced by {DEFAULT_PORT}",
+                    path.display()
+                ));
+            }
+            let file_only = toml::from_str::<FileOnly>(&text).unwrap_or_else(|e| {
+                warnings.push(format!(
+                    "ignoring invalid settings in {}: {e}",
+                    path.display()
+                ));
+                FileOnly::default()
             });
             Loaded {
                 config,
-                warning,
+                file_only,
+                warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
                 writable: true,
             }
         }
@@ -170,6 +202,7 @@ pub fn load(path: &Path) -> Loaded {
             };
             Loaded {
                 config: Config::default(),
+                file_only: FileOnly::default(),
                 warning: Some(format!(
                     "invalid config {} ({moved}); using defaults: {e}",
                     path.display()
@@ -188,11 +221,21 @@ fn backup_path(path: &Path) -> PathBuf {
 }
 
 /// Writes the config atomically (synced temporary file, then rename),
-/// creating the directory if needed.
+/// creating the directory if needed. Top-level keys in the existing file
+/// that `config` does not have ([`FileOnly`] settings, or settings of a
+/// newer version) are kept.
 pub fn save(path: &Path, config: &Config) -> io::Result<()> {
     use std::io::Write as _;
 
-    let text = toml::to_string_pretty(config).map_err(io::Error::other)?;
+    let mut table = toml::Table::try_from(config).map_err(io::Error::other)?;
+    let old = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .unwrap_or_default();
+    for (key, value) in old {
+        table.entry(key).or_insert(value);
+    }
+    let text = toml::to_string_pretty(&table).map_err(io::Error::other)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -271,6 +314,42 @@ mod tests {
             .collect();
         assert_eq!(backups.len(), 1);
         assert!(backups[0].starts_with("config.toml.corrupt-"));
+    }
+
+    #[test]
+    fn file_only_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // A file from before the setting existed.
+        std::fs::write(&path, "port = 4000\n").unwrap();
+        let loaded = load(&path);
+        assert!(loaded.file_only.serve_icons, "on by default");
+        assert!(loaded.warning.is_none());
+
+        std::fs::write(&path, "port = 4000\nserve_icons = false\nfuture = 1\n").unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.config.port, 4000);
+        assert!(!loaded.file_only.serve_icons);
+        // Saving from the Settings page keeps it, and keys it does not know.
+        let edited = Config {
+            port: 4001,
+            ..loaded.config
+        };
+        save(&path, &edited).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.config, edited);
+        assert!(!loaded.file_only.serve_icons);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("future = 1")
+        );
+
+        std::fs::write(&path, "port = 4000\nserve_icons = \"no\"\n").unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.config.port, 4000, "the rest still loads");
+        assert!(loaded.file_only.serve_icons);
+        assert!(loaded.warning.unwrap().contains("serve_icons"));
     }
 
     #[test]

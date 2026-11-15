@@ -16,11 +16,13 @@ type FakeIcon = ([u8; 4], Option<u32>);
 
 /// Knows icons by declared icon name: a solid colour drawn at any size,
 /// from a vector source or from a raster of the given edge. The icon name
-/// `panic` panics. Lookups wait while the gate is closed.
+/// `panic` panics. Lookups wait while the gate is closed, and lookups at
+/// the sizes in `fail_at` find nothing.
 pub(super) struct FakeResolver {
     icons: Mutex<HashMap<String, FakeIcon>>,
     calls: Mutex<Vec<IconKey>>,
     gate: (Mutex<bool>, Condvar),
+    fail_at: Mutex<Vec<u32>>,
 }
 
 impl FakeResolver {
@@ -34,7 +36,12 @@ impl FakeResolver {
             ),
             calls: Mutex::new(Vec::new()),
             gate: (Mutex::new(true), Condvar::new()),
+            fail_at: Mutex::new(Vec::new()),
         })
+    }
+
+    fn set_icon(&self, name: &str, icon: FakeIcon) {
+        self.icons.lock().unwrap().insert(name.to_owned(), icon);
     }
 
     fn calls(&self) -> Vec<IconKey> {
@@ -48,10 +55,6 @@ impl FakeResolver {
 }
 
 impl Resolver for FakeResolver {
-    fn resolve(&self, key: &IconKey) -> Option<Rgba> {
-        self.resolve_found(key).map(|found| found.rgba)
-    }
-
     fn resolve_found(&self, key: &IconKey) -> Option<Found> {
         self.calls.lock().unwrap().push(key.clone());
         let (open, wake) = &self.gate;
@@ -59,6 +62,9 @@ impl Resolver for FakeResolver {
             wake.wait_while(open.lock().unwrap(), |open| !*open)
                 .unwrap(),
         );
+        if self.fail_at.lock().unwrap().contains(&key.size) {
+            return None;
+        }
         let name = key.icon_name.as_deref()?;
         assert_ne!(name, "panic", "a resolver bug");
         let (colour, source_edge) = *self.icons.lock().unwrap().get(name)?;
@@ -85,7 +91,7 @@ pub(super) fn session(name: &str, icon: &str) -> Session {
 }
 
 fn provider(resolver: &Arc<FakeResolver>) -> ResolverIcons {
-    ResolverIcons::new(Arc::clone(resolver) as Arc<dyn Resolver>)
+    ResolverIcons::new(Arc::clone(resolver) as Arc<dyn Resolver>).unwrap()
 }
 
 fn wait_until(what: &str, done: impl Fn() -> bool) {
@@ -288,19 +294,93 @@ fn renders_are_cached() {
     let image = icons.icon_png(&vector, REFERENCE_EDGE).unwrap();
     assert_eq!(image.size, REFERENCE_EDGE);
     assert_eq!(resolver.calls().len(), lookups);
+    // Another size: a check at the reference edge, then the render.
     icons.icon_png(&vector, 128).unwrap();
-    assert_eq!(resolver.calls().len(), lookups + 1);
+    let sizes: Vec<u32> = resolver.calls()[lookups..].iter().map(|k| k.size).collect();
+    assert_eq!(sizes, [REFERENCE_EDGE, 128]);
     assert_eq!(icons.icon_png(&vector, 128).unwrap().size, 128);
-    assert_eq!(resolver.calls().len(), lookups + 1);
+    assert_eq!(resolver.calls().len(), lookups + 2);
 
-    // A capped request resolves again at the capped edge, once.
+    // A capped request resolves again at the capped edge, once, and later
+    // requests above the cap share that rendering.
     let raster = resolved_id(&icons, &session("R", "raster32"));
     let lookups = resolver.calls().len();
     assert_eq!(icons.icon_png(&raster, 200).unwrap().size, 64);
-    assert_eq!(resolver.calls().len(), lookups + 2);
-    assert_eq!(resolver.calls().last().unwrap().size, 64);
-    icons.icon_png(&raster, 200).unwrap();
-    assert_eq!(resolver.calls().len(), lookups + 2);
+    let sizes: Vec<u32> = resolver.calls()[lookups..].iter().map(|k| k.size).collect();
+    assert_eq!(sizes, [REFERENCE_EDGE, 200, 64]);
+    for size in [200, 256, 64] {
+        assert_eq!(icons.icon_png(&raster, size).unwrap().size, 64);
+    }
+    assert_eq!(resolver.calls().len(), lookups + 3);
+    assert_eq!(icons.inner.state().pngs.len(), 3, "one PNG per served edge");
+}
+
+#[test]
+fn capped_renders_fall_back_to_scaling_down() {
+    let resolver = FakeResolver::new(&[("raster40", GREEN, Some(40))]);
+    let icons = provider(&resolver);
+    let id = resolved_id(&icons, &session("R", "raster40"));
+    resolver.fail_at.lock().unwrap().push(80);
+    let image = icons.icon_png(&id, 200).unwrap();
+    assert_eq!(image.size, 80);
+    let p = decode(&image).pixel(40, 40).unwrap();
+    assert_eq!((p.red(), p.green(), p.blue(), p.alpha()), (0, 255, 0, 255));
+}
+
+#[test]
+fn changed_icons_get_new_ids() {
+    let resolver = FakeResolver::new(&[("app", RED, None)]);
+    let icons = provider(&resolver);
+    let app = session("App", "app");
+    let old = resolved_id(&icons, &app);
+    // The theme changes: the old id is not rendered from the new artwork,
+    // and the app moves to a new id.
+    resolver.set_icon("app", (BLUE, None));
+    let mut changed = icons.subscribe();
+    assert_eq!(icons.icon_png(&old, 128), None);
+    assert_eq!(drain(&mut changed), 1);
+    let new = icons.icon_id(&app).unwrap();
+    assert_eq!(new, content_id(&solid(BLUE, REFERENCE_EDGE)));
+    assert_eq!(icons.icon_png(&new, 128).unwrap().size, 128);
+    // What was already rendered for the old id stays valid for it.
+    assert!(icons.icon_png(&old, REFERENCE_EDGE).is_some());
+}
+
+#[test]
+fn shared_ids_render_from_the_first_app_seen() {
+    // Identical at the reference edge, different sources.
+    let resolver = FakeResolver::new(&[("svg", RED, None), ("png", RED, Some(32))]);
+    let icons = provider(&resolver);
+    let vector = session("Vector", "svg");
+    let raster = session("Raster", "png");
+    let id = resolved_id(&icons, &vector);
+    assert_eq!(resolved_id(&icons, &raster), id);
+    for _ in 0..3 {
+        icons.icon_id(&raster);
+    }
+    assert_eq!(icons.icon_png(&id, 256).unwrap().size, 256);
+}
+
+#[test]
+fn full_queues_drop_lookups_without_recording_misses() {
+    let resolver = FakeResolver::new(&[("red", RED, None)]);
+    let icons = provider(&resolver);
+    resolver.set_gate(false);
+    let sessions: Vec<Session> = (0..QUEUE_CAPACITY + 2)
+        .map(|i| session(&format!("App{i}"), "red"))
+        .collect();
+    for s in &sessions {
+        assert_eq!(icons.icon_id(s), None);
+    }
+    let last = IconKey::new(sessions.last().unwrap(), 0);
+    assert!(
+        icons.inner.state().apps.get(&last).is_none(),
+        "dropped, so the next rebuild asks again"
+    );
+    resolver.set_gate(true);
+    wait_until("the dropped lookup", || {
+        icons.icon_id(sessions.last().unwrap()).is_some()
+    });
 }
 
 #[test]

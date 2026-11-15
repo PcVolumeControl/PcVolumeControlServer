@@ -28,7 +28,7 @@ use iced::widget::image;
 use pcvc_audio::Session;
 
 pub use cache::{IconCache, Slot};
-pub use raster::encode_png;
+pub use raster::{encode_png, fit_rgba};
 
 use crate::icons::Rgba;
 use crate::inbox::{Inbound, Inbox};
@@ -78,16 +78,13 @@ pub struct Found {
 
 /// Finds and renders application icons. May block.
 pub trait Resolver: Send + Sync {
-    /// A `key.size` square image, or `None` if nothing usable was found.
-    fn resolve(&self, key: &IconKey) -> Option<Rgba>;
+    /// A `key.size` square image and what it was drawn from, or `None` if
+    /// nothing usable was found.
+    fn resolve_found(&self, key: &IconKey) -> Option<Found>;
 
-    /// [`Resolver::resolve`], also reporting the source's size where the
-    /// resolver knows it.
-    fn resolve_found(&self, key: &IconKey) -> Option<Found> {
-        self.resolve(key).map(|rgba| Found {
-            rgba,
-            source_edge: None,
-        })
+    /// The image alone.
+    fn resolve(&self, key: &IconKey) -> Option<Rgba> {
+        self.resolve_found(key).map(|found| found.rgba)
     }
 
     /// False for a resolver that never finds anything.
@@ -105,7 +102,7 @@ pub trait Resolver: Send + Sync {
 pub struct NoIcons;
 
 impl Resolver for NoIcons {
-    fn resolve(&self, _: &IconKey) -> Option<Rgba> {
+    fn resolve_found(&self, _: &IconKey) -> Option<Found> {
         None
     }
 

@@ -36,10 +36,15 @@ impl<K: Eq + Hash + Clone, V> Lru<K, V> {
 
     /// The value for `key`, marking it as used.
     pub fn get(&mut self, key: &K) -> Option<&V> {
+        self.get_mut(key).map(|value| &*value)
+    }
+
+    /// The value for `key`, marking it as used.
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.clock += 1;
         let entry = self.entries.get_mut(key)?;
         entry.used = self.clock;
-        Some(&entry.value)
+        Some(&mut entry.value)
     }
 
     pub fn insert(&mut self, key: K, value: V, weight: usize) {

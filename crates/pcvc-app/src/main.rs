@@ -27,7 +27,7 @@ use std::sync::Mutex;
 use app::{App, Boot};
 use audio::BackendChoice;
 use cli::Parsed;
-use config::Config;
+use config::{Config, FileOnly};
 use instance::{AcquireError, Instance};
 
 fn main() -> ExitCode {
@@ -73,7 +73,7 @@ fn main() -> ExitCode {
     };
 
     let mut config_path = paths::config_file();
-    let config = match &config_path {
+    let (config, file_only) = match &config_path {
         Some(path) => {
             let loaded = config::load(path);
             if let Some(warning) = loaded.warning {
@@ -82,11 +82,11 @@ fn main() -> ExitCode {
             if !loaded.writable {
                 config_path = None;
             }
-            loaded.config
+            (loaded.config, loaded.file_only)
         }
         None => {
             tracing::warn!("no home directory; settings will not be saved");
-            Config::default()
+            (Config::default(), FileOnly::default())
         }
     };
     let backend = audio::create_backend(if args.mock_audio {
@@ -96,7 +96,7 @@ fn main() -> ExitCode {
     });
     tray::install_event_handlers(&inbox);
     let icon_resolver = app_icons::system_resolver();
-    let server_icons = icon_provider::for_server(true, &icon_resolver);
+    let server_icons = icon_provider::for_server(file_only.serve_icons, &icon_resolver);
 
     let boot = Mutex::new(Some(Boot {
         show_window: args.show || config.show_on_launch,

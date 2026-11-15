@@ -58,7 +58,6 @@ pub fn png(data: &[u8], size: u32) -> Option<Pixmap> {
     fit_pixmap(source, size)
 }
 
-#[cfg(any(target_os = "windows", test))]
 /// `rgba` centred into a `size` square, keeping its aspect ratio.
 pub fn fit_rgba(rgba: &Rgba, size: u32) -> Option<Rgba> {
     let source = Pixmap::from_vec(

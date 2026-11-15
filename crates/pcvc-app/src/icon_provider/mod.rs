@@ -10,9 +10,14 @@
 //! [`ResolverIcons::icon_png`] resolves the application again at the
 //! requested size, so vector icons are drawn at that size and raster icons
 //! resampled, but a raster source is scaled up at most [`MAX_UPSCALE`]
-//! times: larger requests get that edge instead.
+//! times: larger requests get that edge instead. Each render first checks
+//! that the application still draws the requested id at the reference
+//! edge (its icon theme or executable may have changed); if not, the
+//! application gets its new id and the old one is not rendered from it.
 
 mod lru;
+#[cfg(test)]
+mod server_tests;
 #[cfg(test)]
 mod tests;
 
@@ -26,7 +31,7 @@ use pcvc_server::{IconId, IconImage, IconProvider};
 use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
-use crate::app_icons::{Found, IconCache, IconKey, Resolver, Slot, encode_png};
+use crate::app_icons::{Found, IconCache, IconKey, Resolver, Slot, encode_png, fit_rgba};
 use crate::icons::Rgba;
 use lru::Lru;
 
@@ -45,22 +50,33 @@ const MAX_UPSCALE: u32 = 2;
 const APP_CAPACITY: usize = 256;
 /// Ids that can be rendered.
 const ID_CAPACITY: usize = 256;
+/// Applications remembered per id to render it from.
+const APPS_PER_ID: usize = 4;
 /// Rendered PNGs kept, by count and by total size.
 const PNG_CAPACITY: usize = 256;
 const PNG_CACHE_BYTES: usize = 16 * 1024 * 1024;
-/// Lookups waiting for the background thread; beyond this they count as
-/// misses (retried later).
+/// Lookups waiting for the background thread. A lookup that does not fit
+/// is dropped and requested again on a later state rebuild.
 const QUEUE_CAPACITY: usize = 256;
 
 /// The icon provider for the server, or `None` when icons are not served:
-/// turned off in the config, or no resolver on this platform. Without a
-/// provider the server speaks plain v7.
+/// `serve_icons` is off in the config, there is no resolver on this
+/// platform, or the lookup thread cannot start. Without a provider the
+/// server speaks plain v7.
 pub fn for_server(
     serve_icons: bool,
     resolver: &Arc<dyn Resolver>,
 ) -> Option<Arc<dyn IconProvider>> {
-    (serve_icons && resolver.finds_icons())
-        .then(|| Arc::new(ResolverIcons::new(Arc::clone(resolver))) as Arc<dyn IconProvider>)
+    if !(serve_icons && resolver.finds_icons()) {
+        return None;
+    }
+    match ResolverIcons::new(Arc::clone(resolver)) {
+        Ok(icons) => Some(Arc::new(icons)),
+        Err(e) => {
+            tracing::error!("cannot start the served icon thread: {e}; not serving icons");
+            None
+        }
+    }
 }
 
 /// An [`IconProvider`] backed by a [`Resolver`].
@@ -79,21 +95,77 @@ struct State {
     /// By application identity (an [`IconKey`] of size 0): its id once
     /// resolved, or a miss.
     apps: IconCache<IconKey, IconId>,
-    /// By id: the identity of an application last seen with it, which is
-    /// what gets resolved to render the id at other sizes.
-    ids: Lru<IconId, IconKey>,
-    /// By id and requested edge.
+    ids: Lru<IconId, IdEntry>,
+    /// By id and served edge.
     pngs: Lru<(IconId, u32), IconImage>,
+    /// Ticks whenever an application is seen with an id, to tell which
+    /// application of an id was seen least recently.
+    clock: u64,
+}
+
+impl State {
+    fn saw(&mut self, id: &IconId, app: &IconKey) {
+        self.clock += 1;
+        let clock = self.clock;
+        match self.ids.get_mut(id) {
+            Some(entry) => entry.saw(app, clock),
+            None => {
+                let entry = IdEntry {
+                    apps: vec![(app.clone(), clock)],
+                    max_edge: None,
+                };
+                self.ids.insert(id.clone(), entry, 1);
+            }
+        }
+    }
+}
+
+struct IdEntry {
+    /// Applications seen with this id, in the order first seen, with the
+    /// clock when last seen. Renders come from the first that still draws
+    /// the id, so they do not depend on which was seen last.
+    apps: Vec<(IconKey, u64)>,
+    /// Served edges are capped here once a request was answered smaller
+    /// than asked (a small raster source).
+    max_edge: Option<u32>,
+}
+
+impl IdEntry {
+    /// Records `app` as seen at `clock`. A new application replaces the
+    /// least recently seen one when the entry is full, so an id stays
+    /// renderable from running applications (on Linux a Steam game's
+    /// lookup depends on its process).
+    fn saw(&mut self, app: &IconKey, clock: u64) {
+        if let Some(seen) = self.apps.iter_mut().find(|(a, _)| a == app) {
+            seen.1 = clock;
+            return;
+        }
+        if self.apps.len() >= APPS_PER_ID
+            && let Some(oldest) = (0..self.apps.len()).min_by_key(|&i| self.apps[i].1)
+        {
+            self.apps.remove(oldest);
+        }
+        self.apps.push((app.clone(), clock));
+    }
+}
+
+/// The outcome of rendering an id from one application.
+enum Render {
+    Image(IconImage),
+    /// The application now draws another id.
+    Moved,
+    Failed,
 }
 
 impl ResolverIcons {
-    pub fn new(resolver: Arc<dyn Resolver>) -> Self {
+    pub fn new(resolver: Arc<dyn Resolver>) -> std::io::Result<Self> {
         let inner = Arc::new(Inner {
             resolver,
             state: Mutex::new(State {
                 apps: IconCache::new(APP_CAPACITY),
                 ids: Lru::new(ID_CAPACITY, usize::MAX),
                 pngs: Lru::new(PNG_CAPACITY, PNG_CACHE_BYTES),
+                clock: 0,
             }),
             changed: broadcast::Sender::new(16),
         });
@@ -101,17 +173,18 @@ impl ResolverIcons {
         let worker = Arc::clone(&inner);
         // The thread ends when the provider, and with it the sender, is
         // dropped.
-        let spawned = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("served-icons".into())
             .spawn(move || {
-                for key in queue {
-                    worker.look_up(key);
+                for app in queue {
+                    let found = worker.resolve(&app, REFERENCE_EDGE);
+                    match found {
+                        Some(found) => worker.record(app, found),
+                        None => worker.state().apps.finish(app, None, Instant::now()),
+                    }
                 }
-            });
-        if let Err(e) = spawned {
-            tracing::error!("cannot start the served icon thread: {e}");
-        }
-        Self { inner, lookups }
+            })?;
+        Ok(Self { inner, lookups })
     }
 }
 
@@ -120,15 +193,9 @@ impl Inner {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Resolves the application `app` at the reference edge and records its
-    /// id, or the miss.
-    fn look_up(&self, app: IconKey) {
-        let found = self.resolve(&app, REFERENCE_EDGE);
-        let now = Instant::now();
-        let Some(found) = found else {
-            self.state().apps.finish(app, None, now);
-            return;
-        };
+    /// Records `found`, the application's reference rendering, as its icon
+    /// and tells the server.
+    fn record(&self, app: IconKey, found: Found) {
         let id = content_id(&found.rgba);
         // An upscaled reference rendering is used for the id but not served.
         let png = (served_edge(found.source_edge, REFERENCE_EDGE) == REFERENCE_EDGE)
@@ -137,9 +204,18 @@ impl Inner {
             .filter(|png| png.len() <= MAX_ICON_PNG_BYTES);
         tracing::debug!(app = %app.name, %id, "served icon id");
         {
-            let mut state = self.state();
-            state.apps.finish(app.clone(), Some(id.clone()), now);
-            state.ids.insert(id.clone(), app, 1);
+            let mut guard = self.state();
+            let state = &mut *guard;
+            if let Some(Slot::Ready(Some(old))) = state.apps.get(&app)
+                && *old != id
+                && let Some(entry) = state.ids.get_mut(old)
+            {
+                entry.apps.retain(|(a, _)| *a != app);
+            }
+            state
+                .apps
+                .finish(app.clone(), Some(id.clone()), Instant::now());
+            state.saw(&id, &app);
             if let Some(png) = png {
                 let image = IconImage {
                     size: REFERENCE_EDGE,
@@ -167,20 +243,46 @@ impl Inner {
             })
     }
 
-    /// Renders `app` for a request of `size` pixels.
-    fn render(&self, app: &IconKey, size: u32) -> Option<IconImage> {
-        let mut found = self.resolve(app, size)?;
-        let edge = served_edge(found.source_edge, size);
-        if edge < size {
-            found = self.resolve(app, edge)?;
+    /// Renders `id` from `app` for a request of `size` pixels.
+    fn render(&self, id: &IconId, app: &IconKey, size: u32) -> Render {
+        let Some(reference) = self.resolve(app, REFERENCE_EDGE) else {
+            return Render::Failed;
+        };
+        if content_id(&reference.rgba) != *id {
+            self.record(app.clone(), reference);
+            return Render::Moved;
         }
-        let png = encode_png(&found.rgba)?;
+        let found = if size == REFERENCE_EDGE {
+            reference
+        } else {
+            match self.resolve(app, size) {
+                Some(found) => found,
+                None => return Render::Failed,
+            }
+        };
+        let edge = served_edge(found.source_edge, size);
+        let rgba = if edge < size {
+            // Resolving at the smaller edge can pick a different source, or
+            // fail; scaling down what is at hand is the fallback.
+            match self.resolve(app, edge) {
+                Some(smaller) if served_edge(smaller.source_edge, edge) == edge => smaller.rgba,
+                _ => match fit_rgba(&found.rgba, edge) {
+                    Some(rgba) => rgba,
+                    None => return Render::Failed,
+                },
+            }
+        } else {
+            found.rgba
+        };
+        let Some(png) = encode_png(&rgba) else {
+            return Render::Failed;
+        };
         if png.len() > MAX_ICON_PNG_BYTES {
             tracing::debug!(app = %app.name, size, bytes = png.len(), "icon PNG too large");
-            return None;
+            return Render::Failed;
         }
-        Some(IconImage {
-            size: found.rgba.width,
+        Render::Image(IconImage {
+            size: rgba.width,
             png: png.into(),
         })
     }
@@ -198,37 +300,52 @@ impl IconProvider for ResolverIcons {
                 _ => None,
             };
             if let Some(id) = &id {
-                // Renders the id from a running application, whose lookup
-                // can depend on its process (Steam games on Linux).
-                state.ids.insert(id.clone(), app.clone(), 1);
+                state.saw(id, &app);
             }
             (id, look_up)
         };
         if look_up && let Err(e) = self.lookups.try_send(app) {
-            let app = match e {
-                mpsc::TrySendError::Full(app) | mpsc::TrySendError::Disconnected(app) => app,
-            };
-            self.inner.state().apps.finish(app, None, now);
+            let mut state = self.inner.state();
+            match e {
+                mpsc::TrySendError::Full(app) => state.apps.forget(&app),
+                // The thread is gone, so no lookup will ever finish.
+                mpsc::TrySendError::Disconnected(app) => state.apps.finish(app, None, now),
+            }
         }
         id
     }
 
     fn icon_png(&self, id: &IconId, size: u32) -> Option<IconImage> {
-        let cache_key = (id.clone(), size);
-        let app = {
-            let mut state = self.inner.state();
-            if let Some(image) = state.pngs.get(&cache_key) {
+        let (apps, edge) = {
+            let mut guard = self.inner.state();
+            let state = &mut *guard;
+            let entry = state.ids.get_mut(id)?;
+            let edge = entry.max_edge.map_or(size, |max| size.min(max));
+            if let Some(image) = state.pngs.get(&(id.clone(), edge)) {
                 return Some(image.clone());
             }
-            state.ids.get(id)?.clone()
+            let apps: Vec<IconKey> = entry.apps.iter().map(|(app, _)| app.clone()).collect();
+            (apps, edge)
         };
-        let image = self.inner.render(&app, size)?;
-        let weight = image.png.len();
-        self.inner
-            .state()
-            .pngs
-            .insert(cache_key, image.clone(), weight);
-        Some(image)
+        for app in apps {
+            match self.inner.render(id, &app, edge) {
+                Render::Image(image) => {
+                    let mut state = self.inner.state();
+                    if image.size < edge
+                        && let Some(entry) = state.ids.get_mut(id)
+                    {
+                        entry.max_edge = Some(image.size);
+                    }
+                    let weight = image.png.len();
+                    state
+                        .pngs
+                        .insert((id.clone(), image.size), image.clone(), weight);
+                    return Some(image);
+                }
+                Render::Moved | Render::Failed => {}
+            }
+        }
+        None
     }
 
     fn subscribe(&self) -> broadcast::Receiver<()> {

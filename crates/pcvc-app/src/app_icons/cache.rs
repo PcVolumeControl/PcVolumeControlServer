@@ -91,6 +91,11 @@ impl<K: Eq + Hash + Clone, T> IconCache<K, T> {
         self.evict();
     }
 
+    /// Drops `key`, so that the next request looks it up as new.
+    pub fn forget(&mut self, key: &K) {
+        self.entries.remove(key);
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -147,6 +152,16 @@ mod tests {
         assert!(!cache.request(&"a", later), "already in flight");
         cache.finish("a", None, later);
         assert!(!cache.request(&"a", later));
+    }
+
+    #[test]
+    fn forgotten_keys_are_looked_up_again() {
+        let t0 = Instant::now();
+        let mut cache = IconCache::<u32, u32>::new(4);
+        assert!(cache.request(&1, t0));
+        cache.forget(&1);
+        assert!(cache.get(&1).is_none());
+        assert!(cache.request(&1, t0));
     }
 
     #[test]

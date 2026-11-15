@@ -33,13 +33,10 @@ const MAX_EDGE: i32 = 1024;
 pub struct WindowsResolver;
 
 impl Resolver for WindowsResolver {
-    fn resolve(&self, key: &IconKey) -> Option<Rgba> {
-        self.resolve_found(key).map(|found| found.rgba)
-    }
-
-    /// The source edge is that of the bitmap the shell returned. The shell
-    /// scales icons to the requested size itself, except for the
-    /// [`Source::Shell`] fallback at the system icon size.
+    /// The shell picks the image in the file that best fits the requested
+    /// size and scales it to that size, without saying what it started
+    /// from, so only the [`Source::Shell`] fallback (fixed at the system
+    /// icon size) reports a source edge.
     fn resolve_found(&self, key: &IconKey) -> Option<Found> {
         let Some(path) = key.process_binary.as_deref() else {
             tracing::debug!("no executable path for an application icon");
@@ -52,8 +49,12 @@ impl Resolver for WindowsResolver {
             .find_map(|source| {
                 let icon = source.extract(&wide_path, key.size)?;
                 let rgba = icon_rgba(&icon)?;
+                let source_edge = match source {
+                    Source::Shell => Some(rgba.width.max(rgba.height)),
+                    Source::Executable | Source::ShellLocation => None,
+                };
                 let found = Found {
-                    source_edge: Some(rgba.width.max(rgba.height)),
+                    source_edge,
                     rgba: raster::fit_rgba(&rgba, key.size)?,
                 };
                 Some((source, found))
