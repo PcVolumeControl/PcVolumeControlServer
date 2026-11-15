@@ -24,7 +24,7 @@ fn parse(line: &str) -> ClientUpdate {
 #[test]
 fn readme_full_state_round_trips() {
     let state = readme_state();
-    assert_eq!(state.protocol_version, 7);
+    assert_eq!(state.protocol_version, 8);
     assert_eq!(state.device_ids.len(), 3);
     assert_eq!(state.default_device.device_id, SPEAKERS);
     assert_eq!(state.default_device.master_volume, 80.0);
@@ -59,13 +59,13 @@ fn full_state_encodes_non_ascii_as_utf8() {
     assert!(line.contains("Musique \u{e9}t\u{e9} \u{1f3b5}"));
 }
 
-// Client messages exactly as the shipped clients serialise them.
+// Client messages as the Swift and Kotlin clients serialise them.
 
 // Swift and Kotlin emit byte-identical default device updates.
 #[test]
 fn parses_default_device_update() {
     let u = parse(&format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#
     ));
     let d = u.default_device.unwrap();
     assert_eq!(d.device_id.as_deref(), Some(HEADSET));
@@ -77,7 +77,7 @@ fn parses_default_device_update() {
 #[test]
 fn parses_swift_master_update_with_both_fields() {
     let u = parse(&format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":false,"masterVolume":42.5}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":false,"masterVolume":42.5}}}}"#
     ));
     let d = u.default_device.unwrap();
     assert_eq!(d.master_muted, Some(false));
@@ -87,7 +87,7 @@ fn parses_swift_master_update_with_both_fields() {
 #[test]
 fn parses_kotlin_master_update() {
     let u = parse(&format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":42.0,"masterMuted":true}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":42.0,"masterMuted":true}}}}"#
     ));
     let d = u.default_device.unwrap();
     assert_eq!(d.master_muted, Some(true));
@@ -99,7 +99,7 @@ fn parses_swift_session_update_with_name_and_escaped_slashes() {
     // Swift's JSONEncoder writes integral doubles without a fraction and
     // escapes '/' as "\/".
     let u = parse(
-        r#"{"protocolVersion":7,"defaultDevice":{"sessions":[{"name":"Google Chrome","id":"a\/b","volume":29,"muted":true}],"deviceId":"x"}}"#,
+        r#"{"protocolVersion":8,"defaultDevice":{"sessions":[{"name":"Google Chrome","id":"a\/b","volume":29,"muted":true}],"deviceId":"x"}}"#,
     );
     let d = u.default_device.unwrap();
     let s = &d.sessions.unwrap()[0];
@@ -114,7 +114,7 @@ fn parses_kotlin_session_update_without_name() {
     // Gson omits nulls and HTML-escapes '=' as a unicode escape sequence.
     let escaped_eq = format!("{}u003d", '\\');
     let u = parse(&format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"x","sessions":[{{"id":"a{escaped_eq}b","volume":29.5,"muted":false}}]}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"x","sessions":[{{"id":"a{escaped_eq}b","volume":29.5,"muted":false}}]}}}}"#
     ));
     let s = &u.default_device.unwrap().sessions.unwrap()[0];
     assert_eq!(s.name, None);
@@ -125,7 +125,7 @@ fn parses_kotlin_session_update_without_name() {
 #[test]
 fn accepts_crlf_and_ignores_unknown_fields() {
     let u = parse(
-        "{\"protocolVersion\":7,\"applicationVersion\":\"x\",\"extra\":1,\"defaultDevice\":{\"deviceId\":\"x\",\"what\":[]}}\r\n",
+        "{\"protocolVersion\":8,\"applicationVersion\":\"x\",\"extra\":1,\"defaultDevice\":{\"deviceId\":\"x\",\"what\":[]}}\r\n",
     );
     assert_eq!(u.default_device.unwrap().device_id.as_deref(), Some("x"));
 }
@@ -137,18 +137,27 @@ fn blank_line_is_not_a_message() {
 }
 
 #[test]
-fn rejects_wrong_version() {
-    let err =
-        parse_client_line(r#"{"protocolVersion":6,"defaultDevice":{"deviceId":"x"}}"#).unwrap_err();
-    match err {
-        ProtocolError::VersionMismatch { received: Some(v) } => assert_eq!(v.as_i64(), Some(6)),
-        other => panic!("unexpected {other:?}"),
+fn rejects_other_versions() {
+    for (version, expected) in [
+        ("7", 7.0),
+        ("7.0", 7.0),
+        ("6", 6.0),
+        ("9", 9.0),
+        ("80", 80.0),
+    ] {
+        let line = format!(r#"{{"protocolVersion":{version},"defaultDevice":{{"deviceId":"x"}}}}"#);
+        match parse_client_line(&line) {
+            Err(ProtocolError::VersionMismatch { received: Some(v) }) => {
+                assert_eq!(v.as_f64(), Some(expected), "{line}");
+            }
+            other => panic!("{line}: unexpected {other:?}"),
+        }
     }
 }
 
 #[test]
 fn rejects_fractional_version() {
-    let err = parse_client_line(r#"{"protocolVersion":7.5}"#).unwrap_err();
+    let err = parse_client_line(r#"{"protocolVersion":8.5}"#).unwrap_err();
     assert!(matches!(
         err,
         ProtocolError::VersionMismatch { received: Some(_) }
@@ -157,7 +166,7 @@ fn rejects_fractional_version() {
 
 #[test]
 fn rejects_stale_version_field() {
-    let err = parse_client_line(r#"{"defaultDevice":{"deviceId":"x"},"version":7}"#).unwrap_err();
+    let err = parse_client_line(r#"{"defaultDevice":{"deviceId":"x"},"version":8}"#).unwrap_err();
     assert!(matches!(
         err,
         ProtocolError::VersionMismatch { received: None }
@@ -172,13 +181,13 @@ fn rejects_malformed() {
         "[]",
         "[7]",
         // Positional (array) encodings of nested structs.
-        r#"{"protocolVersion":7,"defaultDevice":["x",null,50.0,true,null]}"#,
-        r#"{"protocolVersion":7,"defaultDevice":{"deviceId":"x","sessions":[[null,"a",5,true]]}}"#,
+        r#"{"protocolVersion":8,"defaultDevice":["x",null,50.0,true,null]}"#,
+        r#"{"protocolVersion":8,"defaultDevice":{"deviceId":"x","sessions":[[null,"a",5,true]]}}"#,
         "null",
-        r#"{"protocolVersion":"7"}"#,
+        r#"{"protocolVersion":"8"}"#,
         // Session entries require both volume and muted.
-        r#"{"protocolVersion":7,"defaultDevice":{"deviceId":"x","sessions":[{"id":"a","volume":1}]}}"#,
-        r#"{"protocolVersion":7,"defaultDevice":{"deviceId":"x","sessions":[{"id":"a","muted":true}]}}"#,
+        r#"{"protocolVersion":8,"defaultDevice":{"deviceId":"x","sessions":[{"id":"a","volume":1}]}}"#,
+        r#"{"protocolVersion":8,"defaultDevice":{"deviceId":"x","sessions":[{"id":"a","muted":true}]}}"#,
     ] {
         assert!(
             matches!(parse_client_line(line), Err(ProtocolError::Malformed(_))),
@@ -189,20 +198,20 @@ fn rejects_malformed() {
 
 #[test]
 fn accepts_integral_float_version() {
-    let u = parse(r#"{"protocolVersion":7.0,"defaultDevice":{"deviceId":"x"}}"#);
+    let u = parse(r#"{"protocolVersion":8.0,"defaultDevice":{"deviceId":"x"}}"#);
     assert!(u.default_device.is_some());
 }
 
 #[test]
 fn null_default_device_is_accepted() {
-    let u = parse(r#"{"protocolVersion":7,"defaultDevice":null}"#);
+    let u = parse(r#"{"protocolVersion":8,"defaultDevice":null}"#);
     assert!(u.default_device.is_none());
 }
 
 #[test]
 fn rejects_overlong_line() {
     let line = format!(
-        r#"{{"protocolVersion":7,"applicationVersion":"{}"}}"#,
+        r#"{{"protocolVersion":8,"applicationVersion":"{}"}}"#,
         "x".repeat(MAX_LINE_LEN)
     );
     assert!(matches!(
@@ -213,7 +222,7 @@ fn rejects_overlong_line() {
 
 #[test]
 fn version_constant_matches_wire() {
-    assert_eq!(PROTOCOL_VERSION, 7);
+    assert_eq!(PROTOCOL_VERSION, 8);
 }
 
 // Precedence.
@@ -222,7 +231,6 @@ fn current() -> FullState {
     FullState {
         protocol_version: PROTOCOL_VERSION,
         application_version: "test".into(),
-        features: Vec::new(),
         device_ids: BTreeMap::from([
             (SPEAKERS.into(), "Speakers".into()),
             (HEADSET.into(), "Headset".into()),
@@ -260,14 +268,14 @@ fn update(json: Value) -> ClientUpdate {
 
 #[test]
 fn no_default_device_is_noop() {
-    let u = update(serde_json::json!({ "protocolVersion": 7 }));
+    let u = update(serde_json::json!({ "protocolVersion": 8 }));
     assert!(plan_commands(Some(&current()), &u).is_empty());
 }
 
 #[test]
 fn missing_device_id_is_noop() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": { "masterVolume": 10.0 }
     }));
     assert!(plan_commands(Some(&current()), &u).is_empty());
@@ -276,7 +284,7 @@ fn missing_device_id_is_noop() {
 #[test]
 fn device_switch_wins_over_everything_else() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "deviceId": HEADSET,
             "masterVolume": 10.0,
@@ -295,7 +303,7 @@ fn device_switch_wins_over_everything_else() {
 #[test]
 fn switch_to_unknown_device_is_left_to_the_backend() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "deviceId": "nope",
             "sessions": [{ "id": CHROME, "volume": 1.0, "muted": true }]
@@ -312,7 +320,7 @@ fn switch_to_unknown_device_is_left_to_the_backend() {
 #[test]
 fn without_default_device_only_a_switch_applies() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": { "deviceId": HEADSET, "masterVolume": 10.0 }
     }));
     assert_eq!(
@@ -321,14 +329,14 @@ fn without_default_device_only_a_switch_applies() {
             device_id: HEADSET.into()
         }]
     );
-    let u = update(serde_json::json!({ "protocolVersion": 7, "defaultDevice": {} }));
+    let u = update(serde_json::json!({ "protocolVersion": 8, "defaultDevice": {} }));
     assert!(plan_commands(None, &u).is_empty());
 }
 
 #[test]
 fn master_wins_over_sessions() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "deviceId": SPEAKERS,
             "masterVolume": 10.0,
@@ -347,7 +355,7 @@ fn master_wins_over_sessions() {
 #[test]
 fn master_mute_only() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": { "deviceId": SPEAKERS, "masterMuted": true }
     }));
     assert_eq!(
@@ -362,7 +370,7 @@ fn master_mute_only() {
 #[test]
 fn swift_master_update_sets_both() {
     let u = parse(&format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":true,"masterVolume":64}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":true,"masterVolume":64}}}}"#
     ));
     assert_eq!(
         plan_commands(Some(&current()), &u),
@@ -376,7 +384,7 @@ fn swift_master_update_sets_both() {
 #[test]
 fn sessions_apply_volume_and_mute_for_live_ids_only() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "deviceId": SPEAKERS,
             "sessions": [
@@ -406,7 +414,7 @@ fn sessions_apply_volume_and_mute_for_live_ids_only() {
 #[test]
 fn duplicate_session_entries_use_the_first() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "deviceId": SPEAKERS,
             "sessions": [
@@ -428,7 +436,7 @@ fn duplicate_session_entries_use_the_first() {
 #[test]
 fn same_device_without_changes_is_noop() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": { "deviceId": SPEAKERS, "sessions": [] }
     }));
     assert!(plan_commands(Some(&current()), &u).is_empty());
@@ -449,7 +457,7 @@ fn clamps_volumes() {
 #[test]
 fn planned_volumes_are_clamped() {
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "deviceId": SPEAKERS,
             "masterVolume": 250.0
@@ -464,7 +472,7 @@ fn planned_volumes_are_clamped() {
     );
 
     let u = update(serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "deviceId": SPEAKERS,
             "sessions": [{ "id": CHROME, "volume": -3.0, "muted": false }]
@@ -483,7 +491,7 @@ fn planned_volumes_are_clamped() {
 #[test]
 fn huge_volume_parses_and_clamps() {
     let u = parse(&format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":1e300}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":1e300}}}}"#
     ));
     assert_eq!(
         plan_commands(Some(&current()), &u),

@@ -96,7 +96,7 @@ pub fn parse_client_line(line: &str) -> Result<Option<ClientUpdate>, ProtocolErr
     Ok(Some(update))
 }
 
-/// Integral floats such as `7.0` are accepted, as the C# server did.
+/// Integral floats such as `8.0` are accepted.
 fn is_supported_version(version: &Number) -> bool {
     version.as_f64() == Some(f64::from(PROTOCOL_VERSION))
 }

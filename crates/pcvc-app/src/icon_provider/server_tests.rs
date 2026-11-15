@@ -130,12 +130,11 @@ async fn phone_clients_get_icons() {
         .await
         .unwrap();
     let mut client = Client::connect(server.local_addr()).await;
-    let (state, ids) = client.icon_ids(&["Alpha", "Beta"]).await;
-    assert_eq!(state.features, ["icons"]);
+    let (_state, ids) = client.icon_ids(&["Alpha", "Beta"]).await;
     assert!(!ids.contains_key("Gamma"), "no icon found for it");
 
     let request = serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "iconRequest": {
             "ids": [ids["Alpha"], ids["Beta"], "0123456789abcdef"],
             "size": 128,
@@ -167,12 +166,13 @@ async fn every_server_start_serves_icons_and_details() {
     use crate::inbox::{self, Inbound};
     use crate::server_ctl::{ServerController, ServerStatus, ServerUpdate};
 
-    for (icons, details, expected) in [
-        (icons(), false, vec!["icons"]),
-        (icons(), true, vec!["icons"]),
-        (None, true, vec![]),
-        (None, false, vec![]),
+    for (icons, details) in [
+        (icons(), false),
+        (icons(), true),
+        (None, true),
+        (None, false),
     ] {
+        let served = icons.is_some();
         let (inbox, receiver) = inbox::channel();
         let mut updates = receiver.take_stream().unwrap();
         let controller = ServerController::spawn(backend(), icons, details, inbox);
@@ -186,10 +186,19 @@ async fn every_server_start_serves_icons_and_details() {
             };
             let mut client = Client::connect(addr).await;
             let line = client.line().await;
-            let state: FullState = serde_json::from_str(&line).unwrap();
-            assert_eq!(state.features, expected);
-            if expected.is_empty() {
-                assert!(!line.contains("features") && !line.contains("iconId"));
+            assert!(!line.contains("features"), "{line}");
+            let mut state: FullState = serde_json::from_str(&line).unwrap();
+            if served {
+                let alpha = state
+                    .default_device
+                    .sessions
+                    .iter()
+                    .find(|s| s.name == "Alpha");
+                if alpha.unwrap().icon_id.is_none() {
+                    state = client.icon_ids(&["Alpha"]).await.0;
+                }
+            } else {
+                assert!(!line.contains("iconId"), "{line}");
             }
             let gamma = state
                 .default_device

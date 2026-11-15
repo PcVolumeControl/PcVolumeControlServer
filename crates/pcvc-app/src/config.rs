@@ -122,11 +122,10 @@ impl Config {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FileOnly {
-    /// Serve application icons to phone clients (the protocol's v8
-    /// `icons` feature). Read at startup.
+    /// Serve application icons to phone clients. Read at startup.
     pub serve_icons: bool,
     /// Send each session's detail, such as a browser tab's title, to phone
-    /// clients (the protocol's v8 `detail` member). Read at startup; when
+    /// clients (the protocol's `detail` member). Read at startup; when
     /// off, the audio backend does not read titles at all, so the app's
     /// own windows show none either.
     pub serve_details: bool,

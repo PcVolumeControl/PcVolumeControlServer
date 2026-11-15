@@ -972,9 +972,6 @@ mod tests {
                 },
             ]
         );
-        for s in &d.sessions {
-            assert!(s.id.contains(&d.id));
-        }
     }
 
     #[test]

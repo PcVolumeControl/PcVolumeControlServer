@@ -1,4 +1,4 @@
-//! The icon extension: icon ids on sessions, icon requests from clients and
+//! Application icons: icon ids on sessions, icon requests from clients and
 //! the replies to them.
 
 use std::fmt;
@@ -9,10 +9,6 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 
 use crate::PROTOCOL_VERSION;
-
-/// Feature name advertised in [`crate::FullState::features`] and in the mDNS
-/// `features` TXT record when the server serves icons.
-pub const FEATURE_ICONS: &str = "icons";
 
 /// Longest valid [`IconId`], in characters.
 pub const ICON_ID_MAX_LEN: usize = 64;

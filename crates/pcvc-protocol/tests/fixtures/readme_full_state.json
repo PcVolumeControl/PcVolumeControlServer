@@ -1,5 +1,5 @@
 {
-    "protocolVersion": 7,
+    "protocolVersion": 8,
     "applicationVersion": "v7",
     "deviceIds": {
         "0f4090a9-dee2-4563-ba29-0ad6b93d9e22": "Speakers (Realtek High Definition Audio)",

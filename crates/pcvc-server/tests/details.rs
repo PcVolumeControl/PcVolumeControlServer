@@ -1,4 +1,4 @@
-//! The v8 session details: an optional session member with no feature name.
+//! Session details: an optional session member, sent when enabled.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -100,9 +100,8 @@ fn details(state: &FullState) -> Vec<(&str, Option<&str>)> {
 }
 
 #[tokio::test]
-async fn details_are_sent_only_when_enabled_and_are_not_a_feature() {
+async fn details_are_sent_only_when_enabled() {
     let tabs = [tab("tab", "Inbox - Mail"), tab("same", " firefox ")];
-    // Without an icon provider and with details off, the line is plain v7.
     let (mock, plain) = start(false, &tabs).await;
     let mut client = Client::connect(plain.local_addr()).await;
     let line = client.read_line().await;
@@ -129,13 +128,14 @@ async fn details_are_sent_only_when_enabled_and_are_not_a_feature() {
 }
 
 #[tokio::test]
-async fn features_list_icons_whether_or_not_details_are_sent() {
+async fn details_are_independent_of_icons() {
     for details_on in [false, true] {
         let icons: Arc<dyn IconProvider> = Arc::new(NoIcons(broadcast::Sender::new(1)));
         let (_mock, server) = start_with(Some(icons), details_on, &[tab("tab", "Inbox")]).await;
         let mut client = Client::connect(server.local_addr()).await;
-        let state = client.read_state().await;
-        assert_eq!(state.features, ["icons"]);
+        let line = client.read_line().await;
+        assert!(!line.contains("features"), "{line}");
+        let state: FullState = serde_json::from_str(&line).unwrap();
         let id = MockBackend::session_id(SPEAKERS, "tab");
         let tab = state.default_device.sessions.iter().find(|s| s.id == id);
         let detail = details_on.then_some("Inbox");

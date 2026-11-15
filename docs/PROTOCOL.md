@@ -1,16 +1,12 @@
-# PcVolumeControl protocol, version 7 (with v8 extensions)
+# PcVolumeControl protocol, version 8
 
 This is the canonical description of the protocol between the PcVolumeControl
 host ("server", running on the PC) and the phone apps ("clients"). It
 supersedes the "Client to Server Messages" section of the old
 `PcVolumeControlWindows` README, whose examples use a stale `version` field.
 
-"Protocol v8" is v7 plus optional, additive extensions: app icons, which a
-server announces as a feature, and session details, an optional member of
-sessions. It does not change the version number on the wire: see
-[Protocol v8 extensions](#protocol-v8-extensions). Everything before that
-section is v7 as the shipped apps speak it; the few places the extensions
-touch are marked **v8**.
+Version 8 does not interoperate with version 7; see
+[Older versions](#older-versions).
 
 ## Transport and framing
 
@@ -19,27 +15,30 @@ touch are marked **v8**.
   trailing `\r` before the `\n` is tolerated.
 - Blank lines from a client are ignored.
 - A client line longer than 64 KiB (excluding the terminator) is malformed.
+- Server lines can be much longer (icon replies); see [Limits](#limits).
 
 ## Server to client: full state
 
 On connect, the server sends the current full state immediately. After that it
 sends the full state again to **every** connected client whenever anything
-changes: master volume or mute, a session's volume or mute, a session appearing
-or disappearing, a device appearing or disappearing, or the default device
-changing (**v8**: or a session's `iconId` or `detail`). Bursts of changes are
-coalesced into one message (about 15 ms).
+changes: master volume or mute, a session's volume, mute, `iconId` or
+`detail`, a session appearing or disappearing, a device appearing or
+disappearing, or the default device changing. Bursts of changes are coalesced
+into one message (about 15 ms), and changes to `detail` alone are rate
+limited (see [Session details](#session-details)).
 
-The server never replies directly to a client message (**v8**: except for
-icon replies, which go only to the client that asked). A successful update
-changes the audio system, which triggers a broadcast like any other change. If
-an update cannot be applied (an unknown device id, a session that has just
-gone away), the server re-sends the current full state to every client so the
-sender can drop its optimistic change. The server may skip a broadcast when the
-state has not actually changed.
+The server never replies directly to a client message, except for icon
+replies, which go only to the client that asked (see
+[Application icons](#application-icons)). A successful update changes the
+audio system, which triggers a broadcast like any other change. If an update
+cannot be applied (an unknown device id, a session that has just gone away),
+the server re-sends the current full state to every client so the sender can
+drop its optimistic change. The server may skip a broadcast when the state
+has not actually changed.
 
 ```json
 {
-  "protocolVersion": 7,
+  "protocolVersion": 8,
   "applicationVersion": "v10",
   "deviceIds": {
     "0f4090a9-dee2-4563-ba29-0ad6b93d9e22": "Speakers (Realtek High Definition Audio)",
@@ -55,7 +54,8 @@ state has not actually changed.
         "name": "Google Chrome",
         "id": "{0.0.0.00000000}.{0f4090a9-dee2-4563-ba29-0ad6b93d9e22}|\\Device\\HarddiskVolume2\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe%b{00000000-0000-0000-0000-000000000000}",
         "volume": 35.0,
-        "muted": false
+        "muted": false,
+        "iconId": "2f0c6a1d9b7e4c35a8d0e6f1b2c3d4e5"
       }
     ]
   }
@@ -64,7 +64,7 @@ state has not actually changed.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `protocolVersion` | integer | Always `7`. Clients should disconnect on a mismatch. |
+| `protocolVersion` | integer | Always `8`. Clients disconnect on any other value; see [Older versions](#older-versions). |
 | `applicationVersion` | string | Server build, informational. |
 | `deviceIds` | object | Active playback devices only, device id to friendly name. |
 | `defaultDevice.deviceId` | string | Id of the current default playback device. |
@@ -76,28 +76,25 @@ state has not actually changed.
 | `sessions[].id` | string | Opaque to clients. |
 | `sessions[].volume` | number | 0.0 to 100.0. |
 | `sessions[].muted` | bool | |
+| `sessions[].iconId` | string | Optional. Names the session's icon; see [Icon ids](#icon-ids). |
+| `sessions[].detail` | string | Optional. Tells sessions of one application apart; see [Session details](#session-details). |
 
-All fields are always present. Clients must ignore fields they do not know.
-The server sends nothing while there is no default playback device.
-
-**v8:** sessions may carry an optional `detail` member, and a server that
-serves icons adds a top-level `features` array and an optional `iconId`
-member to sessions; see
-[Protocol v8 extensions](#protocol-v8-extensions).
+All fields except `iconId` and `detail` are always present. Clients must
+ignore fields they do not know. The server sends nothing while there is no
+default playback device.
 
 ### Ids
 
-Device and session ids are opaque strings, but every session id must contain
-the id of the device it belongs to as a substring. The iOS client relies on
-this: it finds the `deviceId` for a session update by searching the session id
-for a key of `deviceIds`, and falls back to sending the session id itself. On
-Windows, Core Audio session instance identifiers already have this shape.
+Device and session ids are opaque strings. Clients compare them for equality
+and send them back exactly as received; they must not parse them or derive
+one from the other.
 
 ## Client to server: updates
 
 A client message is a partial full state. `protocolVersion` is required and
-must be `7` (an integral float such as `7.0` is accepted). Unknown fields are
-ignored, and `null` is treated as absent.
+must be `8` (an integral float such as `8.0` is accepted). Unknown fields are
+ignored, and `null` is treated as absent. A message may also carry an
+`iconRequest` (see [Requesting icons](#requesting-icons-client-to-server)).
 
 There are three kinds of update. They are mutually exclusive and the server
 checks them in this order, applying only the first that matches:
@@ -124,20 +121,20 @@ state the client is acting on.
 Change the default device:
 
 ```json
-{"protocolVersion":7,"defaultDevice":{"deviceId":"c98e4030-926b-4e62-8c83-1c529574cc51"}}
+{"protocolVersion":8,"defaultDevice":{"deviceId":"c98e4030-926b-4e62-8c83-1c529574cc51"}}
 ```
 
 Change master volume and mute (either field may be omitted):
 
 ```json
-{"protocolVersion":7,"defaultDevice":{"deviceId":"0f4090a9-dee2-4563-ba29-0ad6b93d9e22","masterMuted":false,"masterVolume":64.0}}
+{"protocolVersion":8,"defaultDevice":{"deviceId":"0f4090a9-dee2-4563-ba29-0ad6b93d9e22","masterMuted":false,"masterVolume":64.0}}
 ```
 
 Change a session. `id`, `volume` and `muted` are all required in each entry;
 `name` is optional and ignored:
 
 ```json
-{"protocolVersion":7,"defaultDevice":{"deviceId":"0f4090a9-dee2-4563-ba29-0ad6b93d9e22","sessions":[{"name":"Google Chrome","id":"{0.0.0.00000000}.{0f4090a9-dee2-4563-ba29-0ad6b93d9e22}|...","volume":29.0,"muted":true}]}}
+{"protocolVersion":8,"defaultDevice":{"deviceId":"0f4090a9-dee2-4563-ba29-0ad6b93d9e22","sessions":[{"name":"Google Chrome","id":"{0.0.0.00000000}.{0f4090a9-dee2-4563-ba29-0ad6b93d9e22}|...","volume":29.0,"muted":true}]}}
 ```
 
 ### Errors
@@ -148,87 +145,20 @@ line:
 - is not valid JSON, is not a JSON object, or has a field of the wrong type
   (including a session entry missing `id`, `volume` or `muted`);
 - is longer than the line limit;
-- has a missing or different `protocolVersion`. A message using the stale
-  `version` field is rejected for this reason;
-- (**v8**) has a malformed `iconRequest`, more than 32 ids in one
-  `iconRequest`, or would put more than 64 icon ids outstanding (see
-  [Limits](#limits)).
+- has a missing or different `protocolVersion`, `7` included. A message using
+  the stale `version` field is rejected for this reason;
+- has a malformed `iconRequest`, more than 32 ids in one `iconRequest`, or
+  would put more than 64 icon ids outstanding (see [Limits](#limits)).
 
-## Discovery (mDNS / DNS-SD)
+## Application icons
 
-While the listener is running the server advertises:
-
-| Item | Value |
-| --- | --- |
-| Service type | `_pcvolumecontrol._tcp.local.` |
-| Instance name | `{hostname}-pcvolumecontrol` (renamed by the mDNS stack on conflict) |
-| Host | `{hostname}.local.` |
-| Port | the TCP listening port |
-| TXT `version` | `1` |
-| TXT `protocol` | `7` |
-| TXT `features` | **v8**, only when non-empty: comma-separated feature names, e.g. `icons` |
-
-The advertisement is withdrawn when the server stops. The Android client
-ignores services whose `protocol` TXT record is not its own protocol version;
-the iOS client uses the resolved host and port.
-
-## Protocol v8 extensions
-
-New in v8. Everything in this section is optional for both sides and purely
-additive: a v7 client talking to a v8 server, and a v8 client talking to a v7
-server, both keep working.
-
-### Compatibility rules
-
-- `protocolVersion` stays `7` in every message in both directions, and the
-  mDNS `protocol` TXT record stays `7`. The shipped Android app disconnects
-  from any server whose full state has another version and ignores mDNS
-  adverts with another `protocol`; the shipped iOS app and the old C# server
-  check the version too. Raising the number would cut them off.
-- Behaviour a client must detect before relying on it, such as a server
-  that answers `iconRequest`, is announced through feature names instead
-  (see below). Clients must ignore feature names they do not know.
-- Optional members, such as `detail`, need no feature name: clients use
-  them when present and ignore members they do not know. Sending them to
-  a v7 client is safe for the same reason.
-- A server that serves no icons and sends no details sends exactly the v7
-  bytes: no `features` key, no `iconId` or `detail` keys, and no
-  `features` TXT record.
-- New server-to-client line types (icon replies) are only ever sent to the
-  client that asked for them. The shipped apps parse every line as a full
-  state, and an icon line has no `defaultDevice`, so receiving one would break
-  them.
-- The old C# server ignores unknown members, so it treats an `iconRequest` as
-  an empty update and never replies. Clients must send `iconRequest` only to a
-  server whose full state lists `icons` in `features`.
-
-### Feature detection
-
-A server with any feature adds a top-level array to every full state:
-
-```json
-{"protocolVersion":7,"applicationVersion":"v10","features":["icons"],"deviceIds":{...},"defaultDevice":{...}}
-```
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `features` | array of strings | Optional. Absent means no features. Unknown entries must be ignored. |
-
-The same list is advertised over mDNS as the TXT record `features`
-(comma-separated, e.g. `features=icons`), so a client can show icon
-support in its server list before connecting. The full state is
-authoritative.
-
-| Feature | Meaning |
-| --- | --- |
-| `icons` | Sessions may carry `iconId`, and the server answers `iconRequest`. |
-
-Session details are not a feature: a v8 session may carry `detail`
-whatever `features` says.
+Sessions may carry an `iconId` that names an image of their application, and
+clients fetch the images with an `iconRequest`. Every server answers
+`iconRequest`. A server that serves no icons (it has no way to find them, or
+its user turned them off) never sends an `iconId` and answers every requested
+id with `notFound`.
 
 ### Icon ids
-
-With `icons`, each session object may carry an `iconId`:
 
 ```json
 {"name":"Spotify","id":"...","volume":65.0,"muted":false,"iconId":"2f0c6a1d9b7e4c35a8d0e6f1b2c3d4e5"}
@@ -253,7 +183,7 @@ With `icons`, each session object may carry an `iconId`:
 ### Requesting icons (client to server)
 
 ```json
-{"protocolVersion":7,"iconRequest":{"ids":["2f0c6a1d9b7e4c35a8d0e6f1b2c3d4e5","9a8b7c6d5e4f30211203f4e5d6c7b8a9"],"size":96}}
+{"protocolVersion":8,"iconRequest":{"ids":["2f0c6a1d9b7e4c35a8d0e6f1b2c3d4e5","9a8b7c6d5e4f30211203f4e5d6c7b8a9"],"size":96}}
 ```
 
 | Field | Type | Notes |
@@ -275,11 +205,12 @@ With `icons`, each session object may carry an `iconId`:
 ### Icon replies (server to client)
 
 For each distinct requested id, in request order, the server sends one line
-to the requesting client only:
+to the requesting client only. A client that has not sent an `iconRequest`
+never receives an icon reply.
 
 ```json
-{"protocolVersion":7,"icon":{"id":"2f0c6a1d9b7e4c35a8d0e6f1b2c3d4e5","size":96,"mime":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAA..."}}
-{"protocolVersion":7,"icon":{"id":"9a8b7c6d5e4f30211203f4e5d6c7b8a9","error":"notFound"}}
+{"protocolVersion":8,"icon":{"id":"2f0c6a1d9b7e4c35a8d0e6f1b2c3d4e5","size":96,"mime":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAA..."}}
+{"protocolVersion":8,"icon":{"id":"9a8b7c6d5e4f30211203f4e5d6c7b8a9","error":"notFound"}}
 ```
 
 | Field | Type | Notes |
@@ -303,17 +234,15 @@ one** of:
 - `icon`: an icon reply.
 
 Decide by which key is present; once a client has sent an `iconRequest` it
-must not assume every line is a full state. Ignore lines with neither, for
-forward compatibility.
+must not assume every line is a full state. Ignore lines with neither.
 
-### Session details
+## Session details
 
-Each session object may carry a `detail`, an ordinary optional member of
-v8 sessions with no feature name: a short, human-readable label that tells
-it apart from other sessions of the same application, such as a browser
-tab's title or the title of what a player is playing. Firefox on Linux, for
-example, opens a stream for each tab that plays, and every one of them is
-named `Firefox`:
+Each session object may carry a `detail`: a short, human-readable label that
+tells it apart from other sessions of the same application, such as a
+browser tab's title or the title of what a player is playing. Firefox on
+Linux, for example, opens a stream for each tab that plays, and every one of
+them is named `Firefox`:
 
 ```json
 "sessions": [
@@ -334,9 +263,9 @@ named `Firefox`:
   cleaning below, with zero-width joiners removed and both lower-cased;
   there is no Unicode normalisation, so `Cafe` plus a combining acute
   accent is not equal to `Café`.
-- Clients show it when present; there is nothing to detect or request. A
-  server may be configured not to send details, and then omits `detail`
-  from every session.
+- Clients show it when present; there is nothing to request. A server may
+  be configured not to send details, and then omits `detail` from every
+  session.
 - It is display text only, **not an identity**. It may change at any time
   (a tab navigating to another page), appear later or disappear. Session
   `id`, and the `name` where clients key on names, stay the keys for
@@ -384,7 +313,7 @@ What the host sends:
   name, which is already the `name`, and a browser plays all its tabs
   through one session.
 
-### Limits
+## Limits
 
 | Limit | Value |
 | --- | --- |
@@ -393,7 +322,7 @@ What the host sends:
 | `size` | 16 to 256 pixels after clamping; default 64. |
 | Encoded PNG | At most 512 KiB; a larger image is answered with `notFound`. |
 | Server line length | Icon lines can be several hundred KiB. Clients must accept lines of at least 1 MiB. |
-| Client line length | 64 KiB, as in v7. |
+| Client line length | 64 KiB. |
 | `detail` | 120 characters, one line. |
 | Full states that only change `detail` | At most one a second per client. |
 
@@ -405,11 +334,49 @@ the meantime. Exceeding it disconnects rather than dropping ids, so the rule
 that every requested id gets exactly one reply always holds: a client never
 waits for a reply that will not come.
 
-### Guidance for client authors
+## Discovery (mDNS / DNS-SD)
+
+While the listener is running the server advertises:
+
+| Item | Value |
+| --- | --- |
+| Service type | `_pcvolumecontrol._tcp.local.` |
+| Instance name | `{hostname}-pcvolumecontrol` (renamed by the mDNS stack on conflict) |
+| Host | `{hostname}.local.` |
+| Port | the TCP listening port |
+| TXT `version` | `1` |
+| TXT `protocol` | `8` |
+
+The advertisement is withdrawn when the server stops. A client can use the
+`protocol` record to mark servers of another version in its server list
+before connecting; the full state's `protocolVersion` is authoritative.
+
+## Older versions
+
+Version 8 does not interoperate with version 7, which the original C#
+Windows server (`PcVolumeControlWindows`) and the released phone apps
+speak:
+
+- A version 7 app connecting to a version 8 server receives a full state
+  whose `protocolVersion` it does not accept. The released Android app shows
+  its wrong-version message and disconnects; it also ignores mDNS adverts
+  whose `protocol` is not `7`, so it finds a version 8 server only by
+  address. The released iOS app does not check the version: it displays the
+  state, and the server disconnects it on its first change, because that
+  update carries `protocolVersion` 7.
+- A version 8 app connecting to a version 7 server reads `protocolVersion` 7
+  in the first full state and should tell the user to update the server.
+
+The client rule: on a full state whose `protocolVersion` is not `8`,
+disconnect and tell the user which side is older. A lower version means the
+server needs updating; a higher one means the app does.
+
+## Guidance for client authors
 
 Icons:
 
-- Request icons only when `features` contains `icons`.
+- Request icons without checking anything first: every server answers, with
+  `notFound` for ids it has no image for.
 - Cache images by `iconId` (and the size you asked for) indefinitely, across
   reconnects and across servers. Persisting the cache is encouraged.
 - Request only ids you have not cached and have not already requested on this
@@ -426,14 +393,13 @@ Icons:
 
 Session details:
 
-- Show `detail` whenever a session has one; there is nothing to detect or
-  request. Put it below or beside the name in a smaller or
-  dimmer style, on one line, ellipsized at the end when it does not fit. A
-  session without one shows its name alone, as in v7.
+- Show `detail` whenever a session has one; there is nothing to request.
+  Put it below or beside the name in a smaller or dimmer style, on one
+  line, ellipsized at the end when it does not fit. A session without one
+  shows its name alone.
 - Do not use it to identify a session. Keep keying aliases, favourites,
-  hidden lists and any saved state on the session `id` (or on `name`, as
-  before); a remembered detail would stop matching as soon as the tab moves
-  on.
+  hidden lists and any saved state on the session `id` (or on `name`); a
+  remembered detail would stop matching as soon as the tab moves on.
 - Expect it to change often, appear late and disappear. Update the row in
   place: do not reorder or re-sort rows on a detail change, and do not
   animate or announce it.

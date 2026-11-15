@@ -41,8 +41,7 @@ Mixer.
 - [ ] Master volume and mute match the tray volume flyout.
 - [ ] Sessions match the Volume Mixer apps, without "System Sounds".
 - [ ] Session ids look like
-      `{0.0.0.00000000}.{<device id>}|\Device\HarddiskVolume..\app.exe%b{...}`
-      and contain the default device's id.
+      `{0.0.0.00000000}.{<device id>}|\Device\HarddiskVolume..\app.exe%b{...}`.
 - [ ] Session names are the app's display name or its exe name without
       `.exe` (`chrome`, `Spotify`); nothing shows as `@%SystemRoot%...`.
 
@@ -87,14 +86,14 @@ On connect the server sends one full-state line. Paste each message below as
 one line, replacing the ids with real ones from that state. The server never
 replies directly; a broadcast follows every real change.
 
-- [ ] Master volume: `{"protocolVersion":7,"defaultDevice":{"deviceId":"<default id>","masterVolume":42.0}}`
+- [ ] Master volume: `{"protocolVersion":8,"defaultDevice":{"deviceId":"<default id>","masterVolume":42.0}}`
       sets the Windows volume to 42 and broadcasts `"masterVolume":42.0`.
-- [ ] Master mute: `{"protocolVersion":7,"defaultDevice":{"deviceId":"<default id>","masterMuted":true}}`
+- [ ] Master mute: `{"protocolVersion":8,"defaultDevice":{"deviceId":"<default id>","masterMuted":true}}`
       mutes Windows; send `false` to unmute.
-- [ ] Session: `{"protocolVersion":7,"defaultDevice":{"deviceId":"<default id>","sessions":[{"id":"<session id>","volume":30.0,"muted":true}]}}`
+- [ ] Session: `{"protocolVersion":8,"defaultDevice":{"deviceId":"<default id>","sessions":[{"id":"<session id>","volume":30.0,"muted":true}]}}`
       sets that app to 30 % and muted in the Volume Mixer. Paste the session id
       exactly as received, including its escaped backslashes.
-- [ ] Default device: `{"protocolVersion":7,"defaultDevice":{"deviceId":"<other id>"}}`
+- [ ] Default device: `{"protocolVersion":8,"defaultDevice":{"deviceId":"<other id>"}}`
       makes that device both "Default Device" and "Default Communication
       Device" in the Sound panel, and the broadcast lists its sessions.
 - [ ] An unknown device id changes nothing and re-sends the current state.
@@ -105,10 +104,14 @@ replies directly; a broadcast follows every real change.
 - [ ] Ctrl-C stops the server within a few seconds.
 
 If the old C# server is available, run it with the same devices and compare
-its state line with this one: device ids and session ids must be identical,
-since the phone apps depend on their format.
+its state line with this one: apart from `protocolVersion` (7 there) and
+`applicationVersion`, the devices and sessions, with their ids and names,
+should be the same.
 
 ## 4. Phone apps
+
+These need Android and iOS builds that speak protocol version 8; the
+released apps speak version 7 and do not work with this server.
 
 - [ ] The Android and iOS apps discover the server over mDNS, or connect by IP.
 - [ ] Sliders and mute buttons on the phone change Windows, and changes made

@@ -2,13 +2,16 @@
 
 The PC side of [PcVolumeControl](https://github.com/PcVolumeControl), rewritten
 in Rust. It owns the audio stack, serves the iOS and Android apps over TCP
-(protocol v7, compatible with the existing apps), and advertises itself over
-mDNS. It replaces the C# `PcVolumeControlWindows` server. The server library
-also implements the optional "v8" extensions (app icons and session
-details), which keep the wire version at 7 so the shipped apps are
-unaffected; the desktop app serves real application icons and stream titles
-with them, and the mock server below serves demo icons and titles for client
-development.
+with protocol version 8 ([docs/PROTOCOL.md](docs/PROTOCOL.md)), and
+advertises itself over mDNS. It replaces the C# `PcVolumeControlWindows`
+server. Version 8 adds application icons and session details: the desktop
+app serves real application icons and stream titles, and the mock server
+below serves demo icons and titles for client development.
+
+**The released Android and iOS apps speak protocol version 7 and do not work
+with this server** until their version 8 updates ship. Android shows a
+wrong-version message; iOS shows the state but is disconnected on its first
+change.
 
 Status: the protocol, server, desktop app, the Linux (PulseAudio) backend and
 a Windows (Core Audio) backend are in place. The Windows backend and the
@@ -211,9 +214,8 @@ use the menu's Mixer item or a middle click on the icon there.
 Each row in the Mixer shows the application's icon. The Mixer's lookups run
 in the background and only while the window is open; a row shows an empty
 tile until its lookup finishes, and a tile with the first letter of the
-application's name when nothing was found. Phone clients that speak the
-icon extension get the icons that were found (see below). Nothing is
-fetched from the network.
+application's name when nothing was found. Phone clients get the icons
+that were found (see below). Nothing is fetched from the network.
 
 On Linux the app tries, in order:
 
@@ -248,9 +250,9 @@ letter tile. Sessions whose process cannot be opened get a letter tile.
 
 ### Icons for phone clients
 
-The server offers the same icons to clients that speak the v8 icon
-extension ([docs/PROTOCOL.md](docs/PROTOCOL.md)); the shipped apps ignore
-it. Sessions of an application the server has not looked up yet appear
+The server offers the same icons to phone clients
+([docs/PROTOCOL.md](docs/PROTOCOL.md#application-icons)). Sessions of an
+application the server has not looked up yet appear
 without an `iconId` and gain one in a later state once the lookup finishes,
 whether or not the window is open; sessions with no icon found have no
 `iconId`, and the phone shows its own placeholder. The id is the first 32
@@ -269,8 +271,8 @@ meantime (a new icon theme) reaches phones after a restart.
 
 Sessions of the same application, such as Firefox's one stream per tab, all
 have the same name. The server also sends each session's `detail`, a short
-label that tells them apart ([docs/PROTOCOL.md](docs/PROTOCOL.md#session-details)),
-to clients that show it; the shipped apps ignore it. On Linux it is the
+label that tells them apart ([docs/PROTOCOL.md](docs/PROTOCOL.md#session-details)).
+On Linux it is the
 stream's title (`media.name`, else `media.title`), which for Firefox is the
 tab's title; titles equal to the name and generic ones such as `Playback`
 are left out. Windows sends none: Core Audio has nothing per session beyond
@@ -282,8 +284,8 @@ reach the server's port, with no password; private-browsing windows are not
 treated differently. Turn details off with `serve_details = false` below if
 that matters on your network.
 
-To turn off icons, details or both (plain v7), add these lines near the top
-of `config.toml`, before any `[section]` such as `[window]` (a line below one
+To turn off icons, details or both, add these lines near the top of
+`config.toml`, before any `[section]` such as `[window]` (a line below one
 belongs to that section and is ignored):
 
 ```toml
@@ -292,8 +294,9 @@ serve_details = false
 ```
 
 Then quit from the tray menu and start the app again; the settings are read
-at startup. With `serve_details = false` the app does not read stream titles
-at all. They have no control in the Settings page, and saving settings
+at startup. With `serve_icons = false` sessions carry no `iconId` and every
+icon request is answered with `notFound`. With `serve_details = false` the
+app does not read stream titles at all. They have no control in the Settings page, and saving settings
 there keeps them.
 
 ## Try it with a phone
@@ -305,30 +308,29 @@ cargo run -p pcvc-server --example mock_server
 ```
 
 This listens on `0.0.0.0:3000` with a scripted set of devices and sessions and
-advertises `_pcvolumecontrol._tcp`. Point the iOS or Android app at this
-machine (or let it discover the server). Options: `--port N`, `--no-mdns`,
-`--no-icons`, `--no-detail`; logging follows `RUST_LOG`.
+advertises `_pcvolumecontrol._tcp`. Point an iOS or Android app that speaks
+protocol version 8 at this machine (or let it discover the server); the
+released apps speak version 7 and cannot use it. Options: `--port N`,
+`--no-mdns`, `--no-icons`, `--no-detail`; logging follows `RUST_LOG`.
 
 ### Building a client against session details
 
-The mock server sends the v8 session `detail` by default (`--no-detail`
-turns it off). Details are not a feature, so `features` stays `["icons"]`
-either way. Besides the demo's own Firefox session, which has no detail,
-the speakers have two more sessions named `Firefox` with a tab title as
-their detail; one of them moves on to another title every five seconds.
-With both `--no-detail` and `--no-icons` it is a plain v7 server.
+The mock server sends session `detail`s by default (`--no-detail` turns
+them off). Besides the demo's own Firefox session, which has no detail, the
+speakers have two more sessions named `Firefox` with a tab title as their
+detail; one of them moves on to another title every five seconds.
 
-### Building a client against the icon extension
+### Building a client against application icons
 
-The mock server serves the v8 `icons` feature by default (`--no-icons` turns
-it off). Its demo provider draws a coloured
+The mock server serves icons by default. Its demo provider draws a coloured
 rounded square per app at whatever size is asked for, and resolves icon ids
 in the background like a real one: a session it has not seen before appears
 without an `iconId` and gains it in a state about half a second later.
 Sessions on the default device at startup are resolved before you can
 connect; switch the default device to the headphones or the headset to see
-the delayed path. See
-[docs/PROTOCOL.md](docs/PROTOCOL.md#protocol-v8-extensions) for the format.
+the delayed path. With `--no-icons` it serves none: no session has an
+`iconId` and every requested id is answered with `notFound`. See
+[docs/PROTOCOL.md](docs/PROTOCOL.md#application-icons) for the format.
 
 To poke at it by hand, run it on a spare port and connect with `nc`:
 
@@ -337,12 +339,11 @@ cargo run -p pcvc-server --example mock_server -- --port 3001 --no-mdns
 nc localhost 3001
 ```
 
-The first line is a full state with `"features":["icons"]` and an
-`iconId` on every session. Paste a request using one of them and the reply lines come
-back, one per id:
+The first line is a full state with an `iconId` on every session. Paste a
+request using one of them and the reply lines come back, one per id:
 
 ```json
-{"protocolVersion":7,"iconRequest":{"ids":["<iconId>","nosuchid"],"size":96}}
+{"protocolVersion":8,"iconRequest":{"ids":["<iconId>","nosuchid"],"size":96}}
 ```
 
 A few lines of Python do the whole round trip and save the PNGs:
@@ -353,13 +354,13 @@ import base64, json, socket
 s = socket.create_connection(("localhost", 3001))
 lines = s.makefile("r", encoding="utf-8")
 state = json.loads(lines.readline())
-assert "icons" in state.get("features", [])
+assert state["protocolVersion"] == 8
 while not all("iconId" in x for x in state["defaultDevice"]["sessions"]):
     state = json.loads(lines.readline())
 # Sessions can share an icon; the server answers each distinct id once.
 ids = list(dict.fromkeys(x["iconId"] for x in state["defaultDevice"]["sessions"]))
 
-request = {"protocolVersion": 7, "iconRequest": {"ids": ids, "size": 96}}
+request = {"protocolVersion": 8, "iconRequest": {"ids": ids, "size": 96}}
 s.sendall((json.dumps(request) + "\n").encode())
 answered = 0
 while answered < len(ids):
@@ -435,7 +436,7 @@ is the checklist to verify it.
 
 | Crate | Purpose |
 | --- | --- |
-| `pcvc-protocol` | Wire models (v7 and the v8 icon extension), line framing, and the pure rule that turns a client update into backend commands. Depends only on serde, serde_json and base64. |
+| `pcvc-protocol` | Wire models (protocol version 8), line framing, and the pure rule that turns a client update into backend commands. Depends only on serde, serde_json and base64. |
 | `pcvc-audio` | `AudioBackend` trait, domain types, `AudioEvent`, `MockBackend`, and the platform backends behind `cfg` (`PulseBackend` on Linux, `WindowsBackend` on Windows). |
 | `pcvc-server` | Tokio TCP server, coalescing state broadcaster, mDNS advertiser, and the `ServerHandle` API for front ends. |
 | `pcvc-app` | The `pcvolumecontrol` binary: iced daemon, tray icon, Mixer/Status/Settings window, config, start on login, single instance. See [its README](crates/pcvc-app/README.md). |

@@ -5,19 +5,21 @@
 //! cargo run -p pcvc-server --example mock_server -- [--port N] [--no-mdns] [--no-icons] [--no-detail]
 //! ```
 //!
-//! Icons (the v8 `icons` feature) are on by default and come from a demo
-//! provider: a coloured rounded square per app, rendered at the requested
-//! size. Like a real provider it resolves ids in the background, so a session
-//! the provider has not seen before appears without an `iconId` and gains one
-//! about half a second later. Sessions on the default device at startup are
-//! resolved before anyone can connect; switching the default device to the
-//! headphones or headset shows the delayed path.
+//! Icons are served by default and come from a demo provider: a coloured
+//! rounded square per app, rendered at the requested size. Like a real
+//! provider it resolves ids in the background, so a session the provider has
+//! not seen before appears without an `iconId` and gains one about half a
+//! second later. Sessions on the default device at startup are resolved
+//! before anyone can connect; switching the default device to the headphones
+//! or headset shows the delayed path.
 //!
-//! Session details (the v8 `detail` member) are on by default too. The
-//! speakers have three "Firefox" sessions: the demo's own without a detail,
-//! and two tabs with their title as detail, one of which moves on to another
-//! title every few seconds. `--no-detail` leaves details out; with
-//! `--no-icons` as well the server speaks plain v7.
+//! `--no-icons` serves none: sessions get no `iconId` and every requested id
+//! is answered with `notFound`.
+//!
+//! Session details are on by default too. The speakers have three "Firefox"
+//! sessions: the demo's own without a detail, and two tabs with their title
+//! as detail, one of which moves on to another title every few seconds.
+//! `--no-detail` leaves details out.
 //!
 //! Logging follows `RUST_LOG` (default `info`).
 

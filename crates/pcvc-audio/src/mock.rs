@@ -43,15 +43,12 @@ pub struct MockBackend {
 
 impl MockBackend {
     /// Creates a mock with the given devices. Volumes are clamped. Fails if
-    /// `default_device_id` is not one of them or a session id does not contain
-    /// its device id.
+    /// `default_device_id` is not one of them.
     pub fn new(
         mut devices: Vec<Device>,
         default_device_id: Option<&str>,
     ) -> Result<Self, AudioError> {
-        for device in &mut devices {
-            normalize(device)?;
-        }
+        devices.iter_mut().for_each(normalize);
         if let Some(id) = default_device_id
             && !devices.iter().any(|d| d.id == id)
         {
@@ -91,8 +88,7 @@ impl MockBackend {
         Self::new(devices, Some(SPEAKERS)).expect("demo data is valid")
     }
 
-    /// The session id the mock uses for `app` on `device_id`. It embeds the
-    /// device id, as the protocol requires.
+    /// The session id the mock uses for `app` on `device_id`.
     pub fn session_id(device_id: &str, app: &str) -> String {
         format!("{device_id}|mock/{app}")
     }
@@ -100,7 +96,7 @@ impl MockBackend {
     /// Adds a device, or replaces the device with the same id in place. If
     /// there is no default device it becomes the default.
     pub fn add_device(&self, mut device: Device) -> Result<(), AudioError> {
-        normalize(&mut device)?;
+        normalize(&mut device);
         let default_changed = {
             let mut state = self.lock();
             if state.default_id.is_none() {
@@ -145,7 +141,7 @@ impl MockBackend {
 
     /// Adds a session to a device, or replaces the session with the same id.
     pub fn add_session(&self, device_id: &str, mut session: Session) -> Result<(), AudioError> {
-        normalize_session(device_id, &mut session)?;
+        session.volume = clamp_volume(session.volume);
         let event = {
             let mut state = self.lock();
             let device = state
@@ -227,23 +223,11 @@ impl MockBackend {
     }
 }
 
-fn normalize(device: &mut Device) -> Result<(), AudioError> {
+fn normalize(device: &mut Device) {
     device.volume = clamp_volume(device.volume);
     for session in &mut device.sessions {
-        normalize_session(&device.id, session)?;
+        session.volume = clamp_volume(session.volume);
     }
-    Ok(())
-}
-
-fn normalize_session(device_id: &str, session: &mut Session) -> Result<(), AudioError> {
-    if !session.id.contains(device_id) {
-        return Err(AudioError::InvalidSessionId {
-            session_id: session.id.clone(),
-            device_id: device_id.to_owned(),
-        });
-    }
-    session.volume = clamp_volume(session.volume);
-    Ok(())
 }
 
 impl AudioBackend for MockBackend {
@@ -362,9 +346,6 @@ mod tests {
         let device = state.default_device.unwrap();
         assert_eq!(device.name, "Speakers (Mock Audio)");
         assert_eq!(device.sessions.len(), 4);
-        for session in &device.sessions {
-            assert!(session.id.contains(&device.id));
-        }
     }
 
     #[test]
@@ -372,13 +353,6 @@ mod tests {
         assert!(matches!(
             MockBackend::new(vec![], Some("x")),
             Err(AudioError::UnknownDevice(_))
-        ));
-        assert!(matches!(
-            MockBackend::new(
-                vec![Device::new("a", "A", 1.0).with_session(Session::new("s", "S", 1.0))],
-                None
-            ),
-            Err(AudioError::InvalidSessionId { .. })
         ));
         let empty = MockBackend::new(vec![], None).unwrap();
         assert_eq!(empty.snapshot().unwrap(), AudioState::default());
@@ -494,10 +468,6 @@ mod tests {
             mock.remove_session(&id),
             Err(AudioError::UnknownSession(_))
         ));
-        assert!(matches!(
-            mock.add_session(&device_id, Session::new("vlc", "VLC", 1.0)),
-            Err(AudioError::InvalidSessionId { .. })
-        ));
         assert_eq!(
             drain(&mut rx),
             vec![
@@ -506,6 +476,23 @@ mod tests {
                 AudioEvent::SessionRemoved { id }
             ]
         );
+    }
+
+    #[test]
+    fn session_ids_are_opaque() {
+        let mock = MockBackend::new(
+            vec![Device::new("a", "A", 1.0).with_session(Session::new("s", "S", 1.0))],
+            Some("a"),
+        )
+        .unwrap();
+        mock.add_session("a", Session::new("t", "T", 2.0)).unwrap();
+        mock.set_session("t", 3.0, true).unwrap();
+        let ids: Vec<_> = default_device(&mock)
+            .sessions
+            .into_iter()
+            .map(|s| (s.id, s.volume, s.muted))
+            .collect();
+        assert_eq!(ids, [("s".into(), 1.0, false), ("t".into(), 3.0, true)]);
     }
 
     #[test]

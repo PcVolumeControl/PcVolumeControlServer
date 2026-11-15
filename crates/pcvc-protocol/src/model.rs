@@ -11,26 +11,9 @@ use crate::{IconId, IconRequest};
 pub struct FullState {
     pub protocol_version: u32,
     pub application_version: String,
-    /// Features the server supports, such as [`crate::FEATURE_ICONS`].
-    /// Omitted from the wire when empty, which keeps the line identical to
-    /// plain v7.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "null_as_default"
-    )]
-    pub features: Vec<String>,
     /// Active playback devices, id to friendly name.
     pub device_ids: BTreeMap<String, String>,
     pub default_device: DeviceState,
-}
-
-fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de> + Default,
-{
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,9 +37,9 @@ pub struct SessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_id: Option<IconId>,
     /// Tells apart sessions of the same application, such as a browser tab's
-    /// title; see [`crate::session_detail`]. Optional, with no feature name:
-    /// omitted when there is nothing useful to say or the server is set not
-    /// to send details. Not an identity: it may change at any time.
+    /// title; see [`crate::session_detail`]. Omitted when there is nothing
+    /// useful to say or the server is set not to send details. Not an
+    /// identity: it may change at any time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

@@ -6,8 +6,8 @@
 //! cargo run -p pcvc-server --example pulse_server -- [--port N] [--no-mdns] [--no-detail]
 //! ```
 //!
-//! Sessions carry their stream's title as `detail` (a v8 session member)
-//! unless `--no-detail` is given.
+//! Sessions carry their stream's title as `detail` unless `--no-detail` is
+//! given.
 //!
 //! Logging follows `RUST_LOG` (default `info`).
 

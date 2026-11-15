@@ -69,8 +69,7 @@ impl Device {
 /// A per-application audio stream on a device.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
-    /// Opaque, but must contain the owning device's id as a substring (the iOS
-    /// client derives the device id from it).
+    /// Opaque to clients.
     pub id: String,
     pub name: String,
     /// Percent, 0.0 to 100.0.
@@ -179,11 +178,6 @@ pub enum AudioError {
     UnknownSession(String),
     #[error("no default playback device")]
     NoDefaultDevice,
-    #[error("session id {session_id} does not contain its device id {device_id}")]
-    InvalidSessionId {
-        session_id: String,
-        device_id: String,
-    },
     #[error("audio backend error: {0}")]
     Backend(#[from] Box<dyn std::error::Error + Send + Sync>),
 }

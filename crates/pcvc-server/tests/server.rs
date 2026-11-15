@@ -59,8 +59,9 @@ impl Client {
             .unwrap();
         assert!(n > 0, "connection closed");
         assert!(line.ends_with('\n'));
+        assert!(!line.contains("features"), "{line}");
         let state: FullState = serde_json::from_str(&line).unwrap();
-        assert_eq!(state.protocol_version, 7);
+        assert_eq!(state.protocol_version, 8);
         state
     }
 
@@ -132,7 +133,7 @@ async fn session_update_is_applied_and_broadcast() {
 
     // As the Swift client sends it: with a name, integral volume.
     let update = serde_json::json!({
-        "protocolVersion": 7,
+        "protocolVersion": 8,
         "defaultDevice": {
             "sessions": [{ "name": "Spotify", "id": spotify, "volume": 12, "muted": true }],
             "deviceId": SPEAKERS
@@ -155,7 +156,7 @@ async fn master_update_is_applied_and_broadcast() {
 
     client
         .send(&format!(
-            r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":true,"masterVolume":33.5}}}}"#
+            r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":true,"masterVolume":33.5}}}}"#
         ))
         .await;
     let state = client
@@ -173,7 +174,7 @@ async fn default_device_switch_is_applied_and_broadcast() {
 
     client
         .send(&format!(
-            r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#
+            r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#
         ))
         .await;
     let state = client
@@ -193,7 +194,7 @@ async fn rejected_update_triggers_resync() {
     let before = client.read_state().await;
 
     client
-        .send(r#"{"protocolVersion":7,"defaultDevice":{"deviceId":"no-such-device"}}"#)
+        .send(r#"{"protocolVersion":8,"defaultDevice":{"deviceId":"no-such-device"}}"#)
         .await;
     assert_eq!(client.read_state().await, before);
     assert!(matches!(
@@ -242,6 +243,37 @@ async fn backend_changes_are_broadcast() {
 }
 
 #[tokio::test]
+async fn session_ids_need_not_contain_the_device_id() {
+    let (mock, server) = start().await;
+    let mut client = Client::connect(server.local_addr()).await;
+    client.read_state().await;
+
+    mock.add_session(SPEAKERS, Session::new("opaque-42", "VLC", 20.0))
+        .unwrap();
+    client
+        .read_until(|s| {
+            s.default_device
+                .sessions
+                .iter()
+                .any(|s| s.id == "opaque-42")
+        })
+        .await;
+    let update = serde_json::json!({
+        "protocolVersion": 8,
+        "defaultDevice": {
+            "deviceId": SPEAKERS,
+            "sessions": [{ "id": "opaque-42", "volume": 55.0, "muted": true }]
+        }
+    });
+    client.send(&update.to_string()).await;
+    let state = client
+        .read_until(|s| session(s, "VLC").volume == 55.0)
+        .await;
+    assert!(session(&state, "VLC").muted);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn bursts_are_coalesced() {
     let (mock, server) = start().await;
     let mut client = Client::connect(server.local_addr()).await;
@@ -270,7 +302,7 @@ async fn all_clients_receive_broadcasts() {
     b.read_state().await;
 
     a.send(&format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":5.0}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":5.0}}}}"#
     ))
     .await;
     a.read_until(|s| s.default_device.master_volume == 5.0)
@@ -309,8 +341,10 @@ async fn garbage_closes_the_client() {
 async fn wrong_version_closes_the_client() {
     let (_mock, server) = start().await;
     for line in [
+        format!(r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#),
+        format!(r#"{{"protocolVersion":7.0,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#),
         format!(r#"{{"protocolVersion":6,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#),
-        format!(r#"{{"version":7,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#),
+        format!(r#"{{"version":8,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#),
     ] {
         let mut client = Client::connect(server.local_addr()).await;
         client.read_state().await;
@@ -342,7 +376,7 @@ async fn blank_lines_are_ignored() {
     client.send("\r").await;
     client
         .send(&format!(
-            r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":true}}}}"#
+            r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":true}}}}"#
         ))
         .await;
     client.read_until(|s| s.default_device.master_muted).await;
@@ -437,7 +471,7 @@ async fn client_can_pick_a_default_device_when_there_is_none() {
     let mut client = Client::connect(server.local_addr()).await;
 
     client
-        .send(r#"{"protocolVersion":7,"defaultDevice":{"deviceId":"a"}}"#)
+        .send(r#"{"protocolVersion":8,"defaultDevice":{"deviceId":"a"}}"#)
         .await;
     assert_eq!(client.read_state().await.default_device.device_id, "a");
     server.stop().await;

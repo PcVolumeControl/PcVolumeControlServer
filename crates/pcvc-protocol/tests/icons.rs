@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use pcvc_protocol::{
-    ClientUpdate, Command, DeviceState, FEATURE_ICONS, FullState, ICON_SIZE_DEFAULT, ICON_SIZE_MAX,
-    ICON_SIZE_MIN, IconId, IconMessage, IconReply, MAX_ICON_IDS_PER_REQUEST, MAX_ICON_PNG_BYTES,
-    PROTOCOL_VERSION, ProtocolError, SessionState, encode_full_state, encode_icon_reply,
-    parse_client_line, plan_commands,
+    ClientUpdate, Command, DeviceState, FullState, ICON_SIZE_DEFAULT, ICON_SIZE_MAX, ICON_SIZE_MIN,
+    IconId, IconMessage, IconReply, MAX_ICON_IDS_PER_REQUEST, MAX_ICON_PNG_BYTES, PROTOCOL_VERSION,
+    ProtocolError, SessionState, encode_full_state, encode_icon_reply, parse_client_line,
+    plan_commands,
 };
 use serde_json::{Value, json};
 
@@ -19,23 +19,23 @@ fn parse(line: &str) -> ClientUpdate {
 }
 
 fn icon_request_line(request: Value) -> String {
-    json!({ "protocolVersion": 7, "iconRequest": request }).to_string()
+    json!({ "protocolVersion": 8, "iconRequest": request }).to_string()
 }
 
-/// Messages exactly as the shipped Swift and Kotlin clients write them.
-fn shipped_client_lines() -> Vec<String> {
+/// Updates as the Swift and Kotlin clients write them.
+fn client_update_lines() -> Vec<String> {
     let escaped_eq = format!("{}u003d", '\\');
     vec![
-        format!(r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#),
+        format!(r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{HEADSET}"}}}}"#),
         format!(
-            r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":false,"masterVolume":42.5}}}}"#
+            r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterMuted":false,"masterVolume":42.5}}}}"#
         ),
         format!(
-            r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":42.0,"masterMuted":true}}}}"#
+            r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":42.0,"masterMuted":true}}}}"#
         ),
-        r#"{"protocolVersion":7,"defaultDevice":{"sessions":[{"name":"Google Chrome","id":"a\/b","volume":29,"muted":true}],"deviceId":"x"}}"#.to_owned(),
+        r#"{"protocolVersion":8,"defaultDevice":{"sessions":[{"name":"Google Chrome","id":"a\/b","volume":29,"muted":true}],"deviceId":"x"}}"#.to_owned(),
         format!(
-            r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"x","sessions":[{{"id":"a{escaped_eq}b","volume":29.5,"muted":false}}]}}}}"#
+            r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"x","sessions":[{{"id":"a{escaped_eq}b","volume":29.5,"muted":false}}]}}}}"#
         ),
     ]
 }
@@ -44,7 +44,6 @@ fn current() -> FullState {
     FullState {
         protocol_version: PROTOCOL_VERSION,
         application_version: "test".into(),
-        features: Vec::new(),
         device_ids: BTreeMap::from([(SPEAKERS.into(), "Speakers".into())]),
         default_device: DeviceState {
             device_id: SPEAKERS.into(),
@@ -99,9 +98,8 @@ fn icon_id_serde_validates() {
 // Full state.
 
 #[test]
-fn v7_full_state_has_no_extension_keys() {
+fn icon_id_is_omitted_when_absent() {
     let state: FullState = serde_json::from_str(README_FULL_STATE).unwrap();
-    assert!(state.features.is_empty());
     assert!(
         state
             .default_device
@@ -110,22 +108,17 @@ fn v7_full_state_has_no_extension_keys() {
             .all(|s| s.icon_id.is_none())
     );
     let line = encode_full_state(&state);
-    assert!(!line.contains("features"), "{line}");
     assert!(!line.contains("iconId"), "{line}");
-    let original: Value = serde_json::from_str(README_FULL_STATE).unwrap();
-    assert_eq!(original, serde_json::from_str::<Value>(&line).unwrap());
+    assert!(!line.contains("features"), "{line}");
 }
 
 #[test]
-fn full_state_carries_features_and_icon_ids() {
+fn full_state_carries_icon_ids() {
     let mut state = current();
-    state.features = vec![FEATURE_ICONS.into()];
     state.default_device.sessions[0].icon_id = Some(IconId::new("0a1b").unwrap());
     let line = encode_full_state(&state);
     assert!(
-        line.starts_with(
-            r#"{"protocolVersion":7,"applicationVersion":"test","features":["icons"],"deviceIds""#
-        ),
+        line.starts_with(r#"{"protocolVersion":8,"applicationVersion":"test","deviceIds""#),
         "{line}"
     );
     assert!(
@@ -135,27 +128,11 @@ fn full_state_carries_features_and_icon_ids() {
     assert_eq!(serde_json::from_str::<FullState>(&line).unwrap(), state);
 }
 
-#[test]
-fn unknown_features_are_kept_as_strings() {
-    let mut value: Value = serde_json::from_str(README_FULL_STATE).unwrap();
-    value["features"] = json!(["icons", "somethingNew"]);
-    let state: FullState = serde_json::from_value(value).unwrap();
-    assert_eq!(state.features, ["icons", "somethingNew"]);
-}
-
-#[test]
-fn null_features_are_empty() {
-    let mut value: Value = serde_json::from_str(README_FULL_STATE).unwrap();
-    value["features"] = Value::Null;
-    let state: FullState = serde_json::from_value(value).unwrap();
-    assert!(state.features.is_empty());
-}
-
 // Requests.
 
 #[test]
-fn shipped_client_messages_are_unaffected() {
-    for line in shipped_client_lines() {
+fn icon_requests_do_not_change_updates() {
+    for line in client_update_lines() {
         let update = parse(&line);
         assert_eq!(update.icon_request, None, "{line}");
         let reencoded = serde_json::to_value(&update).unwrap();
@@ -195,7 +172,7 @@ fn parses_icon_request_only() {
 #[test]
 fn parses_icon_request_with_an_update() {
     let line = format!(
-        r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":10}},"iconRequest":{{"ids":["abc"]}}}}"#
+        r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{SPEAKERS}","masterVolume":10}},"iconRequest":{{"ids":["abc"]}}}}"#
     );
     let u = parse(&line);
     assert_eq!(u.icon_request.as_ref().unwrap().ids, ["abc"]);
@@ -214,7 +191,7 @@ fn parses_icon_request_with_an_update() {
 
 #[test]
 fn null_icon_request_is_absent() {
-    let u = parse(r#"{"protocolVersion":7,"iconRequest":null}"#);
+    let u = parse(r#"{"protocolVersion":8,"iconRequest":null}"#);
     assert_eq!(u.icon_request, None);
 }
 
@@ -273,7 +250,7 @@ fn max_ids_is_accepted_and_one_more_is_rejected() {
 #[test]
 fn version_is_checked_before_the_id_limit() {
     let ids: Vec<String> = (0..40).map(|i| i.to_string()).collect();
-    let line = json!({ "protocolVersion": 6, "iconRequest": { "ids": ids } }).to_string();
+    let line = json!({ "protocolVersion": 7, "iconRequest": { "ids": ids } }).to_string();
     assert!(matches!(
         parse_client_line(&line),
         Err(ProtocolError::VersionMismatch { .. })
@@ -344,7 +321,7 @@ fn image_reply_encoding_is_stable() {
     let line = encode_icon_reply(IconReply::image("abc", 64, png));
     assert_eq!(
         line,
-        "{\"protocolVersion\":7,\"icon\":{\"id\":\"abc\",\"size\":64,\"mime\":\"image/png\",\"data\":\"iVBORw0KGgoAAQI=\"}}\n"
+        "{\"protocolVersion\":8,\"icon\":{\"id\":\"abc\",\"size\":64,\"mime\":\"image/png\",\"data\":\"iVBORw0KGgoAAQI=\"}}\n"
     );
     let message: IconMessage = serde_json::from_str(&line).unwrap();
     let IconReply::Image { data, .. } = &message.icon else {
@@ -358,7 +335,7 @@ fn not_found_reply_encoding_is_stable() {
     let line = encode_icon_reply(IconReply::not_found("abc"));
     assert_eq!(
         line,
-        "{\"protocolVersion\":7,\"icon\":{\"id\":\"abc\",\"error\":\"notFound\"}}\n"
+        "{\"protocolVersion\":8,\"icon\":{\"id\":\"abc\",\"error\":\"notFound\"}}\n"
     );
     let message: IconMessage = serde_json::from_str(&line).unwrap();
     assert_eq!(message.icon, IconReply::not_found("abc"));

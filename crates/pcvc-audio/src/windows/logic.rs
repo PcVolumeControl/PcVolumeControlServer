@@ -13,8 +13,7 @@ pub(crate) const UNKNOWN_SESSION_NAME: &str = "Unknown";
 
 /// The protocol id of an endpoint: the GUID of an `IMMDevice` id of the form
 /// `{0.0.0.00000000}.{GUID}`, lowercased and without braces, which is what the
-/// C# host reported. Any other shape is returned verbatim, which still keeps
-/// it a substring of the endpoint's session instance identifiers.
+/// C# host reported. Any other shape is returned verbatim.
 pub(crate) fn device_id_from_endpoint_id(endpoint_id: &str) -> String {
     endpoint_id
         .rsplit_once(".{")
@@ -285,7 +284,6 @@ mod tests {
     use crate::{Device, DeviceInfo};
 
     const GUID: &str = "0f4090a9-dee2-4563-ba29-0ad6b93d9e22";
-    const CHROME: &str = "{0.0.0.00000000}.{0f4090a9-dee2-4563-ba29-0ad6b93d9e22}|\\Device\\HarddiskVolume2\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe%b{00000000-0000-0000-0000-000000000000}";
 
     #[test]
     fn device_id_is_bare_lowercase_guid() {
@@ -302,12 +300,6 @@ mod tests {
             device_id_from_endpoint_id("{0.0.1.00000000}.{c98e4030-926b-4e62-8c83-1c529574cc51}"),
             "c98e4030-926b-4e62-8c83-1c529574cc51"
         );
-    }
-
-    #[test]
-    fn device_id_is_contained_in_session_id() {
-        let id = device_id_from_endpoint_id(&format!("{{0.0.0.00000000}}.{{{GUID}}}"));
-        assert!(CHROME.contains(&id));
     }
 
     #[test]

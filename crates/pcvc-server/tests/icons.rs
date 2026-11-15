@@ -1,4 +1,5 @@
-//! The v8 icon extension, served from a scripted [`IconProvider`].
+//! Application icons, served from a scripted [`IconProvider`] or by a server
+//! without one.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -228,7 +229,7 @@ impl Client {
                 continue;
             }
             let message: IconMessage = serde_json::from_value(value).unwrap();
-            assert_eq!(message.protocol_version, 7);
+            assert_eq!(message.protocol_version, 8);
             return message.icon;
         }
     }
@@ -259,7 +260,7 @@ fn icon_request(ids: &[&str], size: Option<Value>) -> String {
     if let Some(size) = size {
         request["size"] = size;
     }
-    json!({ "protocolVersion": 7, "iconRequest": request }).to_string()
+    json!({ "protocolVersion": 8, "iconRequest": request }).to_string()
 }
 
 /// The id, actual size and decoded PNG of an image reply.
@@ -307,7 +308,7 @@ fn icon_id<'a>(state: &'a FullState, name: &str) -> Option<&'a str> {
 }
 
 #[tokio::test]
-async fn without_a_provider_the_output_is_plain_v7() {
+async fn without_a_provider_there_are_no_icon_ids() {
     let (mock, server) = start(None).await;
     let mut client = Client::connect(server.local_addr()).await;
     let line = client.read_line().await;
@@ -319,28 +320,19 @@ async fn without_a_provider_the_output_is_plain_v7() {
 }
 
 #[tokio::test]
-async fn provider_adds_features_and_icon_ids() {
+async fn provider_adds_icon_ids() {
     let provider = TestProvider::new(&DEMO_NAMES);
-    let (mock, server) = start(Some(provider)).await;
+    let (_mock, server) = start(Some(provider)).await;
     let mut client = Client::connect(server.local_addr()).await;
     let line = client.read_line().await;
+    assert!(!line.contains("features"), "{line}");
     let state: FullState = serde_json::from_str(&line).unwrap();
-    assert_eq!(state.features, ["icons"]);
     for name in DEMO_NAMES {
         assert_eq!(
             icon_id(&state, name),
             Some(TestProvider::id_for(name).as_str())
         );
     }
-
-    // Apart from the extension keys, the line is the v7 one.
-    let mut stripped = state.clone();
-    stripped.features.clear();
-    for session in &mut stripped.default_device.sessions {
-        session.icon_id = None;
-    }
-    let plain = to_full_state(&mock.snapshot().unwrap()).unwrap();
-    assert_eq!(encode_full_state(&stripped), encode_full_state(&plain));
     server.stop().await;
 }
 
@@ -406,20 +398,19 @@ async fn new_sessions_are_tagged() {
 }
 
 #[tokio::test]
-async fn v7_updates_still_apply_with_a_provider() {
+async fn updates_apply_with_a_provider() {
     let provider = TestProvider::new(&DEMO_NAMES);
     let (_mock, server) = start(Some(provider)).await;
     let mut client = Client::connect(server.local_addr()).await;
     let state = client.read_state().await;
     client
         .send(&format!(
-            r#"{{"protocolVersion":7,"defaultDevice":{{"deviceId":"{}","masterVolume":12.0}}}}"#,
+            r#"{{"protocolVersion":8,"defaultDevice":{{"deviceId":"{}","masterVolume":12.0}}}}"#,
             state.default_device.device_id
         ))
         .await;
     let state = client.read_state().await;
     assert_eq!(state.default_device.master_volume, 12.0);
-    assert_eq!(state.features, ["icons"]);
     server.stop().await;
 }
 
@@ -526,7 +517,7 @@ async fn an_update_and_a_request_in_one_message_both_apply() {
     client
         .send(
             &json!({
-                "protocolVersion": 7,
+                "protocolVersion": 8,
                 "defaultDevice": {
                     "deviceId": state.default_device.device_id,
                     "masterVolume": 21.0
@@ -602,9 +593,9 @@ async fn malformed_requests_drop_the_client() {
     let provider = TestProvider::new(&DEMO_NAMES);
     let (_mock, server) = start(Some(provider)).await;
     for line in [
-        r#"{"protocolVersion":7,"iconRequest":"abc"}"#,
-        r#"{"protocolVersion":7,"iconRequest":{"ids":"abc"}}"#,
-        r#"{"protocolVersion":7,"iconRequest":{"ids":["a"],"size":"64"}}"#,
+        r#"{"protocolVersion":8,"iconRequest":"abc"}"#,
+        r#"{"protocolVersion":8,"iconRequest":{"ids":"abc"}}"#,
+        r#"{"protocolVersion":8,"iconRequest":{"ids":["a"],"size":"64"}}"#,
     ] {
         let mut client = Client::connect(server.local_addr()).await;
         client.read_state().await;

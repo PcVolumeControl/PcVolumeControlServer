@@ -1,17 +1,17 @@
 //! PcVolumeControl host server.
 //!
-//! [`ServerHandle::start`] binds a TCP listener and serves protocol v7 clients
+//! [`ServerHandle::start`] binds a TCP listener and serves protocol v8 clients
 //! from an [`AudioBackend`]: every client gets the full state on connect and
 //! again after every backend change, and client updates are turned into
 //! backend commands. The handle exposes the current audio state, the client
 //! list, the mDNS status and an event stream for a GUI or a headless front
 //! end.
 //!
-//! With an [`IconProvider`] in the [`ServerConfig`], the server also speaks
-//! the v8 icon extension: it advertises the `icons` feature, tags sessions
-//! with icon ids and answers icon requests. With [`ServerConfig::details`]
-//! it also sends each session's v8 `detail` member. Without either, its
-//! output is plain v7.
+//! Every server answers icon requests. With an [`IconProvider`] in the
+//! [`ServerConfig`] it tags sessions with icon ids and serves their images;
+//! without one it sends no icon ids and answers every request with
+//! `notFound`. With [`ServerConfig::details`] it also sends each session's
+//! `detail`.
 
 mod broadcaster;
 mod client;
@@ -38,7 +38,7 @@ pub use mdns::SERVICE_TYPE as MDNS_SERVICE_TYPE;
 pub use pcvc_protocol::IconId;
 pub use state::to_full_state;
 
-/// Default TCP port, as used by the shipped clients.
+/// Default TCP port, as used by the phone apps.
 pub const DEFAULT_PORT: u16 = 3000;
 
 /// How long backend events are gathered before the state is rebuilt and
@@ -54,17 +54,17 @@ pub struct ServerConfig {
     /// Advertise the service over mDNS while the listener runs.
     pub mdns: bool,
     pub coalesce: Duration,
-    /// Serves app icons (the v8 `icons` feature) when set.
+    /// Serves app icons when set.
     pub icons: Option<Arc<dyn IconProvider>>,
-    /// Sends each session's detail, if the backend has one (the v8 `detail`
-    /// member). Off keeps stream titles, browser tabs included, private:
-    /// the protocol has no authentication.
+    /// Sends each session's detail, if the backend has one. Off keeps stream
+    /// titles, browser tabs included, private: the protocol has no
+    /// authentication.
     pub details: bool,
 }
 
 impl ServerConfig {
-    /// A config with mDNS enabled, the default coalescing window and no
-    /// extensions.
+    /// A config with mDNS enabled, the default coalescing window, no icon
+    /// provider and details off.
     pub fn new(bind: IpAddr, port: u16) -> Self {
         Self {
             bind,
@@ -208,11 +208,6 @@ impl Shared {
     fn emit(&self, event: ServerEvent) {
         // An error only means nobody is subscribed.
         let _ = self.events.send(event);
-    }
-
-    /// Protocol extensions this server advertises.
-    fn features(&self) -> Vec<&'static str> {
-        state::features(self.icons.is_some())
     }
 }
 

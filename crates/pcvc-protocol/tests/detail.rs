@@ -117,7 +117,6 @@ fn wire_shape() {
         line.contains(r#""volume":77.0,"muted":false,"detail":"Inbox (3) - Gmail"}"#),
         "{line}"
     );
-    assert!(!line.contains("features"), "no feature needed: {line}");
 
     let mut plain = state.clone();
     plain.default_device.sessions[0].detail = None;

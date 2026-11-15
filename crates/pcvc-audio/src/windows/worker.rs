@@ -692,13 +692,6 @@ impl DefaultDevice {
                 return;
             }
         };
-        if !entry.id.contains(&self.device_id) {
-            tracing::warn!(
-                session = %entry.id,
-                device = %self.device_id,
-                "session id does not contain its device id"
-            );
-        }
         self.exited.remove(&entry.id);
         match known {
             Some(i) => self.sessions[i] = entry,

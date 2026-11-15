@@ -1,5 +1,5 @@
-//! Application icons for phone clients (the protocol's v8 `icons` feature),
-//! from the same [`Resolver`] the Mixer uses.
+//! Application icons for phone clients, from the same [`Resolver`] the Mixer
+//! uses.
 //!
 //! [`ResolverIcons::icon_id`] answers from memory. An application seen for
 //! the first time is resolved on a background thread at
@@ -64,7 +64,7 @@ const QUEUE_CAPACITY: usize = 256;
 /// The icon provider for the server, or `None` when icons are not served:
 /// `serve_icons` is off in the config, there is no resolver on this
 /// platform, or the lookup thread cannot start. Without a provider the
-/// server speaks plain v7.
+/// server sends no icon ids and answers every icon request with `notFound`.
 pub fn for_server(
     serve_icons: bool,
     resolver: &Arc<dyn Resolver>,
