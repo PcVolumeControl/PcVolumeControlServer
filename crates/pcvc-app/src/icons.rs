@@ -16,15 +16,7 @@ pub struct Rgba {
 
 /// Renders an SVG into a `size` x `size` RGBA image.
 pub fn rasterize(svg: &[u8], size: u32) -> Result<Rgba, String> {
-    let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).map_err(|e| e.to_string())?;
-    let mut pixmap =
-        tiny_skia::Pixmap::new(size, size).ok_or_else(|| format!("invalid icon size {size}"))?;
-    let natural = tree.size();
-    let transform = tiny_skia::Transform::from_scale(
-        size as f32 / natural.width(),
-        size as f32 / natural.height(),
-    );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let pixmap = render(svg, size)?;
     let pixels = pixmap
         .pixels()
         .iter()
@@ -38,6 +30,19 @@ pub fn rasterize(svg: &[u8], size: u32) -> Result<Rgba, String> {
         width: size,
         height: size,
     })
+}
+
+fn render(svg: &[u8], size: u32) -> Result<tiny_skia::Pixmap, String> {
+    let tree = usvg::Tree::from_data(svg, &usvg::Options::default()).map_err(|e| e.to_string())?;
+    let mut pixmap =
+        tiny_skia::Pixmap::new(size, size).ok_or_else(|| format!("invalid icon size {size}"))?;
+    let natural = tree.size();
+    let transform = tiny_skia::Transform::from_scale(
+        size as f32 / natural.width(),
+        size as f32 / natural.height(),
+    );
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Ok(pixmap)
 }
 
 /// The window icon, or `None` if it cannot be rendered.
@@ -63,5 +68,82 @@ mod tests {
     fn packaged_icon_matches_app_icon() {
         let packaged = include_bytes!("../../../packaging/linux/pcvolumecontrol.svg");
         assert_eq!(packaged.as_slice(), APP);
+    }
+
+    /// Sizes in assets/app.ico, the Windows executable and installer icon.
+    const ICO_SIZES: [u32; 8] = [16, 20, 24, 32, 40, 48, 64, 256];
+
+    /// The (size, PNG data) frames of an ICO whose images are all PNG.
+    fn ico_frames(ico: &[u8]) -> Vec<(u32, &[u8])> {
+        let u16_at = |i: usize| u16::from_le_bytes([ico[i], ico[i + 1]]);
+        let u32_at = |i: usize| u32::from_le_bytes(ico[i..i + 4].try_into().unwrap()) as usize;
+        assert_eq!((u16_at(0), u16_at(2)), (0, 1), "not an ICO file");
+        (0..usize::from(u16_at(4)))
+            .map(|i| {
+                let entry = 6 + 16 * i;
+                // A width byte of 0 means 256.
+                let size = match ico[entry] {
+                    0 => 256,
+                    w => u32::from(w),
+                };
+                let (len, offset) = (u32_at(entry + 8), u32_at(entry + 12));
+                (size, &ico[offset..offset + len])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn windows_icon_matches_app_icon() {
+        let frames = ico_frames(include_bytes!("../assets/app.ico"));
+        let sizes: Vec<u32> = frames.iter().map(|(size, _)| *size).collect();
+        assert_eq!(sizes, ICO_SIZES);
+        for (size, png) in frames {
+            let decoded = tiny_skia::Pixmap::decode_png(png).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (size, size));
+            let expected = render(APP, size).unwrap();
+            let diff: u64 = decoded
+                .data()
+                .iter()
+                .zip(expected.data())
+                .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                .sum();
+            // Small differences come from PNG's straight alpha round trip and
+            // renderer updates; changed artwork differs far more.
+            let mean = diff as f64 / expected.data().len() as f64;
+            assert!(
+                mean < 2.0,
+                "{size}px frame of assets/app.ico differs from assets/app.svg \
+                 (mean {mean:.2}); regenerate it with \
+                 `cargo test -p pcvolumecontrol write_windows_icon -- --ignored`"
+            );
+        }
+    }
+
+    /// Regenerates assets/app.ico from assets/app.svg.
+    #[test]
+    #[ignore = "writes assets/app.ico"]
+    fn write_windows_icon() {
+        let pngs: Vec<Vec<u8>> = ICO_SIZES
+            .iter()
+            .map(|&size| render(APP, size).unwrap().encode_png().unwrap())
+            .collect();
+        let count = u16::try_from(pngs.len()).unwrap();
+        let mut ico = Vec::new();
+        ico.extend_from_slice(&[0, 0, 1, 0]);
+        ico.extend_from_slice(&count.to_le_bytes());
+        let mut offset = 6 + 16 * pngs.len();
+        for (&size, png) in ICO_SIZES.iter().zip(&pngs) {
+            let dim = if size == 256 { 0 } else { size as u8 };
+            // Width, height, palette size, reserved, colour planes, bits per pixel.
+            ico.extend_from_slice(&[dim, dim, 0, 0, 1, 0, 32, 0]);
+            ico.extend_from_slice(&u32::try_from(png.len()).unwrap().to_le_bytes());
+            ico.extend_from_slice(&u32::try_from(offset).unwrap().to_le_bytes());
+            offset += png.len();
+        }
+        for png in &pngs {
+            ico.extend_from_slice(png);
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/app.ico");
+        std::fs::write(path, ico).unwrap();
     }
 }

@@ -2,6 +2,7 @@
 ;
 ;   iscc /DAppVersion=1.2.3 packaging\windows\pcvolumecontrol.iss
 ;
+; AppVersion must match the Cargo package version the exe was built with.
 ; BinDir (default target\release) holds pcvolumecontrol.exe; OutputDir
 ; (default target\installer) receives PcVolumeControl-<version>-setup.exe.
 ; Relative paths resolve against this script's directory.
@@ -16,11 +17,17 @@
   #define OutputDir "..\..\target\installer"
 #endif
 
-; VersionInfoVersion takes only dotted numbers, so drop any pre-release suffix.
-#if Pos("-", AppVersion) > 0
-  #define NumericVersion Copy(AppVersion, 1, Pos("-", AppVersion) - 1)
+; VersionInfoVersion takes only dotted numbers, so drop SemVer build metadata
+; and any pre-release suffix.
+#if Pos("+", AppVersion) > 0
+  #define ReleaseVersion Copy(AppVersion, 1, Pos("+", AppVersion) - 1)
 #else
-  #define NumericVersion AppVersion
+  #define ReleaseVersion AppVersion
+#endif
+#if Pos("-", ReleaseVersion) > 0
+  #define NumericVersion Copy(ReleaseVersion, 1, Pos("-", ReleaseVersion) - 1)
+#else
+  #define NumericVersion ReleaseVersion
 #endif
 
 #define AppName "PcVolumeControl"
@@ -48,7 +55,7 @@ DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-SetupIconFile=pcvolumecontrol.ico
+SetupIconFile=..\..\crates\pcvc-app\assets\app.ico
 UninstallDisplayIcon={app}\{#AppExe}
 UninstallDisplayName={#AppName}
 OutputDir={#OutputDir}
@@ -70,37 +77,71 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; Parameters: "--s
 [Run]
 Filename: "{app}\{#AppExe}"; Parameters: "--show"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
-[UninstallRun]
-; Closing the window only hides it to the tray, so the app is stopped with
-; taskkill rather than a close request.
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#AppExe}"; Flags: runhidden; RunOnceId: "StopApp"
-
 [Code]
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-var
-  ResultCode: Integer;
-begin
-  { Stop a running copy so its executable can be replaced. }
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#AppExe}', '', SW_HIDE,
-    ewWaitUntilTerminated, ResultCode);
-  Result := '';
-end;
-
 const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   ApprovedKey = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';
 
-{ Removes the start-on-login entry, but only when it launches this
-  installation. }
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  WasRunning: Boolean;
+
+{ Stops copies running from this installation and waits for them to exit.
+  Closing the window only hides the app to the tray, so a close request would
+  not stop it. Returns whether any copy was running. }
+function StopInstalledApp(): Boolean;
+var
+  Exe, Script: String;
+  ResultCode: Integer;
+begin
+  Exe := ExpandConstant('{app}\{#AppExe}');
+  StringChangeEx(Exe, '''', '''''', True);
+  Script :=
+    '$p = Get-Process -Name pcvolumecontrol -ErrorAction SilentlyContinue | ' +
+    'Where-Object { $_.Path -eq ''' + Exe + ''' }; ' +
+    'if (-not $p) { exit 1 }; ' +
+    '$p | Stop-Process -Force; ' +
+    '$p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue; exit 0';
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -Command "' + Script + '"', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  WasRunning := StopInstalledApp();
+  Result := '';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  { Interactive installs offer to launch on the last page instead. }
+  if (CurStep = ssPostInstall) and WasRunning and WizardSilent() then
+    ExecAsOriginalUser(ExpandConstant('{app}\{#AppExe}'), '', '', SW_SHOWNORMAL,
+      ewNoWait, ResultCode);
+end;
+
+{ Removes the start-on-login entry when it launches this installation. Only
+  the uninstalling account's HKCU is reachable, so other accounts of an
+  all-users install keep a stale entry. }
+procedure RemoveRunValue();
 var
   Command: String;
 begin
+  if RegQueryStringValue(HKCU, RunKey, '{#RunValue}', Command) then
+    if Pos(Lowercase(ExpandConstant('{app}\{#AppExe}')), Lowercase(Command)) > 0 then
+    begin
+      RegDeleteValue(HKCU, RunKey, '{#RunValue}');
+      RegDeleteValue(HKCU, ApprovedKey, '{#RunValue}');
+    end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
   if CurUninstallStep = usUninstall then
-    if RegQueryStringValue(HKCU, RunKey, '{#RunValue}', Command) then
-      if Pos(Lowercase(ExpandConstant('{app}\{#AppExe}')), Lowercase(Command)) > 0 then
-      begin
-        RegDeleteValue(HKCU, RunKey, '{#RunValue}');
-        RegDeleteValue(HKCU, ApprovedKey, '{#RunValue}');
-      end;
+  begin
+    StopInstalledApp();
+    RemoveRunValue();
+  end;
 end;
