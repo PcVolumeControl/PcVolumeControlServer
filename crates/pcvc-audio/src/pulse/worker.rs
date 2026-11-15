@@ -250,7 +250,7 @@ impl Worker {
             return Ok(());
         };
         conn.take_dirty();
-        let raw = conn.query(&mut self.mainloop, deadline)?;
+        let raw = conn.query(&mut self.mainloop, deadline, &self.raw.clients)?;
         self.retry_refresh_at = None;
         let state = raw.to_audio_state();
         self.raw = raw;

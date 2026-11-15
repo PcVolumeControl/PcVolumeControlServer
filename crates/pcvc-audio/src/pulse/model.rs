@@ -45,22 +45,35 @@ pub(super) struct AppProps {
 }
 
 impl AppProps {
-    /// Reads the properties through `get`, which looks up one key. PipeWire
-    /// spells the icon key with a hyphen, PulseAudio with an underscore.
+    /// Reads the properties through `get`, which looks up one key. Values
+    /// are trimmed. PipeWire spells the icon key with a hyphen, PulseAudio
+    /// with an underscore. `pipewire.sec.pid` is set by the server and is a
+    /// host pid even for sandboxed clients, whose own
+    /// `application.process.id` is in the sandbox's pid namespace.
     pub fn read(mut get: impl FnMut(&CStr) -> Option<String>) -> Self {
         let mut first = |keys: &[&CStr]| {
-            keys.iter()
-                .find_map(|key| get(key).filter(|v| !v.trim().is_empty()))
+            keys.iter().find_map(|key| {
+                get(key)
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            })
         };
         Self {
             name: first(&[c"application.name"]),
             process_binary: first(&[c"application.process.binary"]),
-            process_id: first(&[c"application.process.id"])
-                .and_then(|pid| pid.trim().parse().ok())
+            process_id: first(&[c"pipewire.sec.pid", c"application.process.id"])
+                .and_then(|pid| pid.parse().ok())
                 .filter(|&pid| pid != 0),
             icon_name: first(&[c"application.icon_name", c"application.icon-name"]),
             app_id: first(&[c"application.id", c"pipewire.access.portal.app_id"]),
         }
+    }
+
+    fn is_sound_server(&self) -> bool {
+        const SERVERS: [&str; 3] = ["pipewire", "pipewire-pulse", "pulseaudio"];
+        self.process_binary
+            .as_deref()
+            .is_some_and(|b| SERVERS.contains(&b))
     }
 }
 
@@ -113,8 +126,12 @@ impl RawSinkInput {
     /// `application.process.binary`, then [`UNKNOWN_NAME`]. Blank values are
     /// skipped. Some clients (cpal, for one) set the application properties
     /// only on the client, and `media.name` is then a generic stream label.
+    /// A sound server process's own name is skipped: the streams it creates
+    /// (filter chains, echo cancellers) are told apart by `media.name`.
     pub fn display_name(&self, client: Option<&AppProps>) -> String {
-        let client_name = client.and_then(|c| c.name.as_ref());
+        let client_name = client
+            .filter(|c| !c.is_sound_server())
+            .and_then(|c| c.name.as_ref());
         let client_binary = client.and_then(|c| c.process_binary.as_ref());
         [
             self.app.name.as_ref(),
@@ -481,6 +498,12 @@ mod tests {
         assert_eq!(i.display_name(Some(&client)), "cpal-playback-42");
         client.name = Some("flaxative".into());
         assert_eq!(i.display_name(Some(&client)), "flaxative");
+        let daemon = AppProps {
+            name: Some("pipewire".into()),
+            process_binary: Some("pipewire".into()),
+            ..AppProps::default()
+        };
+        assert_eq!(i.display_name(Some(&daemon)), "cpal-playback-42");
         i.app.name = Some("Firefox".into());
         assert_eq!(i.display_name(Some(&client)), "Firefox");
         i.app.name = Some("Caf\u{e9} \u{fffd}".into());
@@ -525,6 +548,13 @@ mod tests {
         assert_eq!((p.name, p.process_id), (None, None));
         assert_eq!(p.app_id.as_deref(), Some("org.example.App"));
         assert_eq!(props(&[("application.process.id", "0")]).process_id, None);
+        let p = props(&[
+            ("application.process.id", "2"),
+            ("pipewire.sec.pid", "9000"),
+            ("application.process.binary", " steam\n"),
+        ]);
+        assert_eq!(p.process_id, Some(9000));
+        assert_eq!(p.process_binary.as_deref(), Some("steam"));
     }
 
     #[test]
