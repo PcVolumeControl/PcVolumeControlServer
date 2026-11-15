@@ -247,8 +247,6 @@ fn backup_path(path: &Path) -> PathBuf {
 /// `config` does not have ([`FileOnly`] settings, or settings of a newer
 /// version) are kept.
 pub fn save(path: &Path, config: &Config) -> io::Result<()> {
-    use std::io::Write as _;
-
     let mut table = toml::Table::try_from(config).map_err(io::Error::other)?;
     if let Some(old) = std::fs::read_to_string(path)
         .ok()
@@ -257,6 +255,14 @@ pub fn save(path: &Path, config: &Config) -> io::Result<()> {
         keep_missing(&mut table, old);
     }
     let text = toml::to_string_pretty(&table).map_err(io::Error::other)?;
+    write_atomic(path, &text)
+}
+
+/// Writes `text` to `path` through a synced temporary file and a rename,
+/// creating the directory if needed.
+pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write as _;
+
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

@@ -193,10 +193,80 @@ Placement (try each, the scale factors where you can):
 - [ ] An application starting or stopping playback while it is open: it
       grows or shrinks and stays against the taskbar.
 
+## 7. Updates
+
+The update code was type-checked on Linux only; nothing in this section has
+run. It needs two published releases, made by the release workflow (builds
+from source never install), for example `v0.2.0` and `v0.2.1`. Run the
+older one's installer, then publish the newer release. Keep
+`%LOCALAPPDATA%\PcVolumeControl\PcVolumeControl\data\logs\` open: the app
+logs each step.
+
+Detection:
+
+- [ ] Installed per user (the default): the Status page offers **Install and
+      restart** for the newer release.
+- [ ] The portable zip of the older release, run from another folder on the
+      same machine: it offers **View release**, which opens the release page
+      in the default browser.
+- [ ] Installed for all users (Program Files): it offers **Install and
+      restart**.
+- [ ] Settings: **Check for updates automatically** on, quit and start
+      again: within about a minute of starting, the log shows a check, and
+      the tray menu gains "Update available: <version>", which opens the
+      Status page. Starting again within a day does not check again, but
+      the banner and the tray item are back at once.
+- [ ] Check now while offline (Wi-Fi off): "Could not check: ..." under the
+      version, and nothing else changes.
+- [ ] Skip this version: the banner and the tray item go; they stay gone
+      after a restart and come back with Check now.
+
+Installing (per-user install), with a phone connected:
+
+- [ ] Install and restart: the banner shows the download's progress, then
+      "Verifying"; the button cannot be pressed twice.
+- [ ] The window and tray icon disappear, the phone loses the server and
+      its mDNS entry goes (the installer starts once the server has
+      stopped, or after 15 s).
+- [ ] The installer's progress window appears without any question, and no
+      Cancel button.
+- [ ] Afterwards the new version starts by itself in the tray (Status page:
+      new version); the phone reconnects.
+- [ ] `%LOCALAPPDATA%\PcVolumeControl\PcVolumeControl\data\updates\` is empty
+      after the next check or start.
+- [ ] Settings and start on login are unchanged.
+
+Installing (all-users install):
+
+- [ ] Install and restart shows a UAC prompt for the installer. Accepting it
+      upgrades and restarts the app as above, in the user's session.
+- [ ] Declining it: the app comes back (tray icon, server running again if it
+      was running, window on the Status page) with "Could not install: the
+      installer ended without updating (exit code ...)".
+- [ ] With the server stopped from the tray before installing, a declined
+      install leaves it stopped.
+
+Failure handling (before the install test, replace the newer release's
+`SHA256SUMS` asset with a copy that has one wrong digit in the installer's
+line, then put the original back):
+
+- [ ] A wrong checksum for the installer: "Could not install: the download
+      does not match its checksum"; nothing runs, and the updates folder is
+      empty.
+- [ ] While the installer runs, starting PcVolumeControl from the Start menu
+      does not open the old window.
+
 ## Known risk areas
 
 These could not be checked without Windows and are the most likely to need
 fixes:
+
+- **Updates** (section 7): the installed-or-portable check reads Inno
+  Setup's uninstall entry (`InstallLocation` under
+  `...\Uninstall\{63ED99E8-31F1-4FA3-A5B5-DDAAF2F7463A}_is1`, HKCU then
+  HKLM); the installer is started while the app holds it open denying
+  writes, which Windows should allow; and the installer must find the app
+  still running to restart it.
 
 - **`IPolicyConfig`** (default device switching) is undocumented and declared
   by hand in `crates/pcvc-audio/src/windows/policy_config.rs`. A wrong vtable

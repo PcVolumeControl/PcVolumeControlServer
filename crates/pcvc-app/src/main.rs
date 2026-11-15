@@ -23,6 +23,9 @@ mod placement;
 mod server_ctl;
 mod style;
 mod tray;
+mod update;
+#[cfg(target_os = "windows")]
+mod win;
 
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -113,6 +116,11 @@ fn main() -> ExitCode {
         inbox,
         inbox_rx,
         logs,
+        update_context: Some(update::Context::github(
+            update::detect_install_kind(),
+            paths::updates_dir(),
+        )),
+        update_state: paths::update_state_file(),
     }));
     let result = iced::daemon(
         move || {

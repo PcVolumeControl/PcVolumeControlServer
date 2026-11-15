@@ -108,6 +108,29 @@ scale and is moved again if its own differs. Debug logs
 (`RUST_LOG=pcvolumecontrol=debug`) record tray clicks, opening, creation,
 placement, focus, unfocus and each close with its reason.
 
+## Updates
+
+`update::Worker` runs checks and installs on its own thread and posts
+`Inbound::Update` events; `update::Updater` is the state the Status page and
+tray show, and `app/updates.rs` connects the two and schedules automatic
+checks (`update::schedule`, polled every minute while they are on).
+`update::http` allows only HTTPS to GitHub's hosts, follows redirects by
+hand, and caps sizes and times; tests swap in a loopback policy and
+endpoints.
+
+Installing (Windows, installed copies of official builds) goes: download
+into a new directory under the local data dir, verify against `SHA256SUMS`
+(and its minisign signature when `assets/update-key.pub` has a key) through
+a handle that denies writes, `Event::Verified`, the app steps aside (stops
+the server, saves the config, closes its windows and drops the tray icon)
+and answers `Worker::proceed` once the server has stopped (the worker
+starts anyway after 15 s), the worker starts the installer and waits for
+it. The installer stops this process and
+restarts the new version because it found it running; if the installer
+ends instead, `Event::InstallFailed` brings the app back.
+`build.rs` sets `cfg(pcvc_official_build)` when the release workflow sets
+`PCVC_OFFICIAL_BUILD=1`.
+
 ## Where things live
 
 | Module | Purpose |
@@ -123,3 +146,4 @@ placement, focus, unfocus and each close with its reason.
 | `icons.rs` | Embedded SVG icons, rasterised with resvg |
 | `app_icons/` | Application icons for the Mixer: lookup per platform, rasterising, the result cache and the fallback tile |
 | `icon_provider/` | The same icons for phone clients: the server's `IconProvider`, content-derived ids, rendering per requested size |
+| `update/` | Release checks, verified downloads, the installer, install kind, schedule and update state |

@@ -26,6 +26,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICO
 
 use super::{Found, IconKey, Resolver, raster, win_pixels};
 use crate::icons::Rgba;
+use crate::win::wide;
 
 /// Larger bitmaps are not icons.
 const MAX_EDGE: i32 = 1024;
@@ -203,10 +204,6 @@ impl Drop for OwnedDc {
         // SAFETY: created by CreateCompatibleDC and deleted once.
         unsafe { DeleteDC(self.0) };
     }
-}
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// The icon's pixels as straight RGBA.

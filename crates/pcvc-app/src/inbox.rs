@@ -26,6 +26,8 @@ pub enum Inbound {
     ShowRequested,
     /// The process was asked to terminate (Ctrl-C, SIGTERM).
     QuitRequested,
+    /// The update worker finished or advanced a job.
+    Update(crate::update::Event),
 }
 
 /// Sending half; cheap to clone and usable from any thread.
