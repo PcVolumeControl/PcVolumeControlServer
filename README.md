@@ -5,9 +5,9 @@ in Rust. It owns the audio stack, serves the iOS and Android apps over TCP
 (protocol v7, compatible with the existing apps), and advertises itself over
 mDNS. It replaces the C# `PcVolumeControlWindows` server.
 
-Status: the protocol, server, a mock audio backend and the Linux
-(PulseAudio) backend are in place. The Windows (Core Audio) backend and the
-desktop GUI come next.
+Status: the protocol, server, a mock audio backend, the Linux (PulseAudio)
+backend and a Windows (Core Audio) backend are in place. The Windows backend
+has not been run on Windows yet.
 
 ## Build and test
 
@@ -69,6 +69,20 @@ real default sink there and back (see
 ```sh
 cargo test -p pcvc-audio --test pulse_live -- --ignored --test-threads=1
 ```
+
+## Windows audio backend
+
+`pcvc_audio::WindowsBackend` drives Windows Core Audio: active playback
+devices, the default device's master volume and sessions, default-device
+switching, and change notifications. On Windows:
+
+```powershell
+cargo run -p pcvc-audio --example windows_dump      # print the state, then every change
+cargo run -p pcvc-server --example windows_server   # serve the phones from the real mixer
+```
+
+It has not been run on Windows yet; [docs/WINDOWS-TESTING.md](docs/WINDOWS-TESTING.md)
+is the checklist to verify it.
 
 ## Crates
 
