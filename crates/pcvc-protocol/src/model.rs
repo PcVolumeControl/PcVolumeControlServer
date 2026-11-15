@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Number;
 
 /// Full audio state sent by the server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,7 +41,7 @@ pub struct SessionState {
 #[serde(rename_all = "camelCase")]
 pub struct ClientUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol_version: Option<i64>,
+    pub protocol_version: Option<Number>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

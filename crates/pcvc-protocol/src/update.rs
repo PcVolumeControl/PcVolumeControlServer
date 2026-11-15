@@ -30,7 +30,8 @@ pub fn clamp_volume(volume: f32) -> f32 {
 /// state. The kinds are mutually exclusive and checked in order:
 ///
 /// 1. `defaultDevice.deviceId` differs from the current default: switch the
-///    default device (only if the id is a known active device) and nothing else.
+///    default device and nothing else. The id is not checked against
+///    `deviceIds`; the backend rejects unknown ids, so the failure is visible.
 /// 2. `masterVolume` or `masterMuted` present: apply those and nothing else.
 /// 3. Otherwise, for each live session on the default device, apply volume and
 ///    mute from the first `sessions[]` entry with a matching `id`.
@@ -47,12 +48,9 @@ pub fn plan_commands(current: &FullState, update: &ClientUpdate) -> Vec<Command>
     let current_device = &current.default_device;
 
     if device_id != current_device.device_id {
-        if current.device_ids.contains_key(device_id) {
-            return vec![Command::SetDefaultDevice {
-                device_id: device_id.to_owned(),
-            }];
-        }
-        return Vec::new();
+        return vec![Command::SetDefaultDevice {
+            device_id: device_id.to_owned(),
+        }];
     }
 
     if device.master_volume.is_some() || device.master_muted.is_some() {
