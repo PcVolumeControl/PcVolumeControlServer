@@ -310,9 +310,10 @@ forward compatibility.
 
 Each session object may carry a `detail`, an ordinary optional member of
 v8 sessions with no feature name: a short, human-readable label that tells
-it apart from other sessions of the same application, such as a browser tab's title or the title of what a player is
-playing. Firefox on Linux, for example, opens one stream per tab, and every
-one of them is named `Firefox`:
+it apart from other sessions of the same application, such as a browser
+tab's title or the title of what a player is playing. Firefox on Linux, for
+example, opens one stream per tab, and every one of them is named
+`Firefox`:
 
 ```json
 "sessions": [
@@ -377,9 +378,9 @@ What the host sends:
   `AudioCallbackDriver`, `ALSA Playback`, `Simple DirectMedia Layer` (all
   ignoring case and extra whitespace) and `cpal-playback-` followed by
   digits.
-- **Windows**: none. Core Audio
-  gives a session nothing beyond its display name, which is already the
-  `name`, and a browser plays all its tabs through one session.
+- **Windows**: none. Core Audio gives a session nothing beyond its display
+  name, which is already the `name`, and a browser plays all its tabs
+  through one session.
 
 ### Limits
 

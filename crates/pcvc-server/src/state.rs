@@ -184,6 +184,12 @@ mod tests {
     }
 
     #[test]
+    fn only_icons_are_a_feature() {
+        assert!(features(false).is_empty());
+        assert_eq!(features(true), [FEATURE_ICONS]);
+    }
+
+    #[test]
     fn app_hints_stay_local() {
         let state = |app: AppHint| AudioState {
             devices: vec![],

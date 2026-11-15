@@ -136,8 +136,10 @@ async fn features_list_icons_whether_or_not_details_are_sent() {
         let mut client = Client::connect(server.local_addr()).await;
         let state = client.read_state().await;
         assert_eq!(state.features, ["icons"]);
+        let id = MockBackend::session_id(SPEAKERS, "tab");
+        let tab = state.default_device.sessions.iter().find(|s| s.id == id);
         let detail = details_on.then_some("Inbox");
-        assert_eq!(details(&state).last(), Some(&("Firefox", detail)));
+        assert_eq!(tab.unwrap().detail.as_deref(), detail);
         server.stop().await;
     }
 }
