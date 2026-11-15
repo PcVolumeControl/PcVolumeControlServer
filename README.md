@@ -118,11 +118,17 @@ Logging follows `RUST_LOG` (default `info`). Files:
 | Settings | `~/.config/pcvolumecontrol/config.toml` | `%APPDATA%\PcVolumeControl\PcVolumeControl\config\config.toml` |
 | Logs (daily, 7 kept) | `~/.local/share/pcvolumecontrol/logs/` | `%LOCALAPPDATA%\PcVolumeControl\PcVolumeControl\data\logs\` |
 | Start on login | `~/.config/autostart/PcVolumeControl.desktop` | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `PcVolumeControl` |
-| Update state (last check, skipped version) | `~/.config/pcvolumecontrol/update-state.toml` | `%APPDATA%\PcVolumeControl\PcVolumeControl\config\update-state.toml` |
-| Update downloads (Windows, removed after use) | | `%LOCALAPPDATA%\PcVolumeControl\PcVolumeControl\data\updates\` |
+| Update state (last check, release found, skipped version) | `~/.config/pcvolumecontrol/update-state.toml` | `%APPDATA%\PcVolumeControl\PcVolumeControl\config\update-state.toml` |
+| Update downloads (Windows; emptied at the next start or check) | | `%LOCALAPPDATA%\PcVolumeControl\PcVolumeControl\data\updates\` |
 
 An unreadable config file is renamed to `config.toml.corrupt-<time>` and the
 defaults are used.
+
+On Linux the tray icon is a StatusNotifierItem (via `ksni`, no GTK). KDE,
+Ubuntu's GNOME and most other desktops show it; stock GNOME needs the
+[AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/)
+extension. Without a tray the window opens at launch and closing it quits.
+`packaging/linux/` has the desktop entry and icon for packages.
 
 ### Updates
 
@@ -133,9 +139,9 @@ gains an item that opens the Status page:
 
 - **Install and restart** (Windows, installed with the installer): downloads
   the release's installer, checks it against the release's `SHA256SUMS`
-  (and its signature, once releases are signed; see
-  [docs/RELEASING.md](docs/RELEASING.md#signing-updates-optional)), stops
-  the server and hides the app, and runs the installer silently. The
+  (and against a signature too when the app was built with the signing
+  key; see [docs/RELEASING.md](docs/RELEASING.md#signing-updates-optional)),
+  stops the server and hides the app, and runs the installer silently. The
   installer replaces the app and starts the new version. An installation
   for all users asks for administrator permission first. Nothing is
   installed without the click.
@@ -149,22 +155,20 @@ hidden until a newer one comes out or you press Check now.
 
 **Network and privacy.** Update checks are off by default. With **Check for
 updates automatically** on (Settings), the app asks GitHub for the latest
-release shortly after it starts and then once a day, keeping to once a day
-across restarts; Check now asks whenever you press it. These requests, and
-the downloads for an install, are the app's only connections beyond the
-local network. They go to `api.github.com`, `github.com` and GitHub's
+release about a minute after it starts and then once a day, counting from
+the last successful check across restarts; after a failed attempt it tries
+again an hour later. Check now asks whenever you press it. These requests,
+and the downloads for an install, are the app's only connections beyond
+the local network. They go to `api.github.com`, `github.com` and GitHub's
 download hosts (`release-assets.githubusercontent.com`,
-`objects.githubusercontent.com`) over HTTPS only, send a `User-Agent` of
-`pcvolumecontrol/<version>` and nothing that identifies you or the
-computer, and go through a proxy set in `ALL_PROXY`, `HTTPS_PROXY` or
-`HTTP_PROXY` (on Windows also the system proxy). Automatic checks and installing are for release builds;
-builds from source show "development build" and only check when asked.
-
-On Linux the tray icon is a StatusNotifierItem (via `ksni`, no GTK). KDE,
-Ubuntu's GNOME and most other desktops show it; stock GNOME needs the
-[AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/)
-extension. Without a tray the window opens at launch and closing it quits.
-`packaging/linux/` has the desktop entry and icon for packages.
+`objects.githubusercontent.com`) over HTTPS only, and send a `User-Agent`
+of `pcvolumecontrol/<version>` and nothing that identifies you or the
+computer. They use a proxy set in `ALL_PROXY`, `HTTPS_PROXY` or
+`HTTP_PROXY` (honouring `NO_PROXY`); on Windows, without those, a single
+proxy server set in the system's proxy settings (not a setup script or
+automatic detection). Automatic checks and installing are for release
+builds; builds from source show "development build" and only check when
+asked.
 
 ### Mini mixer
 

@@ -123,8 +123,9 @@ into a new directory under the local data dir, verify against `SHA256SUMS`
 (and its minisign signature when `assets/update-key.pub` has a key) through
 a handle that denies writes, `Event::Verified`, the app steps aside (stops
 the server, saves the config, closes its windows and drops the tray icon)
-and answers `Worker::proceed` once the server has stopped, the worker
-starts the installer and waits for it. The installer stops this process and
+and answers `Worker::proceed` once the server has stopped (the worker
+starts anyway after 15 s), the worker starts the installer and waits for
+it. The installer stops this process and
 restarts the new version because it found it running; if the installer
 ends instead, `Event::InstallFailed` brings the app back.
 `build.rs` sets `cfg(pcvc_official_build)` when the release workflow sets

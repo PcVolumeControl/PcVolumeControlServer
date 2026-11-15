@@ -97,6 +97,55 @@ pub struct Release {
     pub signature: Option<Asset>,
 }
 
+/// What is kept of a found release between runs: its version and the sizes
+/// of its assets, from which [`SavedRelease::restore`] rebuilds the URLs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+pub struct SavedRelease {
+    pub version: String,
+    pub asset_size: Option<u64>,
+    pub checksums_size: Option<u64>,
+    pub signature_size: Option<u64>,
+}
+
+impl SavedRelease {
+    pub fn new(release: &Release) -> Self {
+        Self {
+            version: release.version.text.clone(),
+            asset_size: release.asset.as_ref().map(|a| a.size),
+            checksums_size: release.checksums.as_ref().map(|a| a.size),
+            signature_size: release.signature.as_ref().map(|a| a.size),
+        }
+    }
+
+    /// The release again, if it is still newer than `current`.
+    pub fn restore(
+        &self,
+        endpoints: &Endpoints,
+        current: &ReleaseVersion,
+        kind: InstallKind,
+    ) -> Option<Release> {
+        let version = ReleaseVersion::parse(&self.version)?;
+        if !version::is_update(&version, current) {
+            return None;
+        }
+        let tag = version.tag();
+        let asset = |name: String, size: Option<u64>| {
+            size.filter(|&s| s > 0).map(|size| Asset {
+                url: format!("{}/{tag}/{name}", endpoints.download),
+                size,
+                name,
+            })
+        };
+        Some(Release {
+            page_url: format!("{}/{tag}", endpoints.page),
+            asset: asset(kind.asset_name(&version), self.asset_size),
+            checksums: asset(CHECKSUMS.to_owned(), self.checksums_size),
+            signature: asset(SIGNATURE.to_owned(), self.signature_size),
+            version,
+        })
+    }
+}
+
 impl Release {
     /// Whether everything an install needs is attached: the asset, its
     /// checksums and, when installs must be signed, their signature.
@@ -334,6 +383,29 @@ pub mod tests {
             parse(&json, "1.2.3-rc.1", kind),
             Ok(CheckOutcome::Available(_))
         ));
+    }
+
+    #[test]
+    fn saved_releases_restore_while_still_newer() {
+        let names = all_assets("1.2.3");
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let json = release_json("v1.2.3", &names);
+        let kind = InstallKind::WindowsInstaller { all_users: false };
+        let Ok(CheckOutcome::Available(release)) = parse(&json, "1.2.2", kind) else {
+            panic!()
+        };
+        let saved = SavedRelease::new(&release);
+        let endpoints = Endpoints::github();
+        assert_eq!(
+            saved.restore(&endpoints, &v("1.2.2"), kind).as_ref(),
+            Some(&*release)
+        );
+        assert_eq!(saved.restore(&endpoints, &v("1.2.3"), kind), None);
+        let bad = SavedRelease {
+            version: "../1.2.3".into(),
+            ..saved
+        };
+        assert_eq!(bad.restore(&endpoints, &v("1.0.0"), kind), None);
     }
 
     #[test]

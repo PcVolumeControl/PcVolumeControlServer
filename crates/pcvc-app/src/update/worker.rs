@@ -196,8 +196,7 @@ fn install(
     match go.recv_timeout(HAND_OVER_TIMEOUT) {
         Ok(true) => {}
         Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-            tracing::info!("install abandoned");
-            return;
+            return fail("the install was cancelled".into());
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             tracing::warn!("the app did not step aside in time; starting the installer anyway");

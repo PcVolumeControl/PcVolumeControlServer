@@ -212,9 +212,10 @@ Detection:
 - [ ] Installed for all users (Program Files): it offers **Install and
       restart**.
 - [ ] Settings: **Check for updates automatically** on, quit and start
-      again: about 20 s after starting, the log shows a check, and the tray
-      menu gains "Update available: <version>", which opens the Status page.
-      Starting again within a day does not check again.
+      again: within about a minute of starting, the log shows a check, and
+      the tray menu gains "Update available: <version>", which opens the
+      Status page. Starting again within a day does not check again, but
+      the banner and the tray item are back at once.
 - [ ] Check now while offline (Wi-Fi off): "Could not check: ..." under the
       version, and nothing else changes.
 - [ ] Skip this version: the banner and the tray item go; they stay gone
@@ -225,7 +226,8 @@ Installing (per-user install), with a phone connected:
 - [ ] Install and restart: the banner shows the download's progress, then
       "Verifying"; the button cannot be pressed twice.
 - [ ] The window and tray icon disappear, the phone loses the server and
-      its mDNS entry goes (the server stops before the installer starts).
+      its mDNS entry goes (the installer starts once the server has
+      stopped, or after 15 s).
 - [ ] The installer's progress window appears without any question, and no
       Cancel button.
 - [ ] Afterwards the new version starts by itself in the tray (Status page:

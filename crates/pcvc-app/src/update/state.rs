@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use super::download::Progress;
-use super::release::{CheckError, CheckOutcome, Release};
+use super::release::{CheckError, CheckOutcome, Release, SavedRelease};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
@@ -48,18 +48,21 @@ pub struct Updater {
     /// The newer release last found.
     release: Option<Release>,
     pub saved: Saved,
-    /// The last automatic attempt, successful or not.
-    pub last_attempt: Option<SystemTime>,
 }
 
 impl Updater {
-    pub fn new(saved: Saved) -> Self {
+    /// `restored` is the release a previous run found, if still newer.
+    pub fn new(saved: Saved, restored: Option<Release>) -> Self {
+        let phase = if restored.is_some() {
+            Phase::Available
+        } else {
+            Phase::Idle
+        };
         Self {
-            phase: Phase::Idle,
-            before_check: Phase::Idle,
-            release: None,
+            before_check: phase.clone(),
+            phase,
+            release: restored,
             saved,
-            last_attempt: None,
         }
     }
 
@@ -91,13 +94,14 @@ impl Updater {
         )
     }
 
-    /// Starts a check unless one is running or an install is under way.
+    /// Starts a check unless one is running or an install is under way. An
+    /// automatic check records the attempt in [`Saved`].
     pub fn start_check(&mut self, manual: bool, now: SystemTime) -> bool {
         if self.busy() {
             return false;
         }
         if !manual {
-            self.last_attempt = Some(now);
+            self.saved.last_attempt = Some(unix_seconds(now));
         }
         self.before_check = std::mem::replace(&mut self.phase, Phase::Checking { manual });
         true
@@ -149,6 +153,7 @@ impl Updater {
                 self.phase = Phase::Available;
             }
         }
+        self.saved.found = self.release.as_ref().map(SavedRelease::new);
         true
     }
 
@@ -161,10 +166,7 @@ impl Updater {
             return false;
         };
         self.saved.skipped_version = Some(version);
-        if matches!(
-            self.phase,
-            Phase::Available | Phase::Failed(Failure::Install(_))
-        ) {
+        if matches!(self.phase, Phase::Available | Phase::Failed(_)) {
             self.phase = Phase::Idle;
         }
         true
@@ -173,10 +175,7 @@ impl Updater {
     /// Starts installing the offered release, if it is offered and nothing
     /// else runs.
     pub fn start_install(&mut self) -> Option<Release> {
-        if !matches!(
-            self.phase,
-            Phase::Available | Phase::Failed(Failure::Install(_))
-        ) {
+        if self.busy() {
             return None;
         }
         let release = self.offered()?.clone();
@@ -210,10 +209,17 @@ impl Updater {
 
     /// When the last successful check ran.
     pub fn last_checked(&self) -> Option<SystemTime> {
-        self.saved.last_checked.and_then(|s| {
-            SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s.try_into().ok()?))
-        })
+        from_unix_seconds(self.saved.last_checked)
     }
+
+    /// When the last automatic check started, successful or not.
+    pub fn last_attempt(&self) -> Option<SystemTime> {
+        from_unix_seconds(self.saved.last_attempt)
+    }
+}
+
+fn from_unix_seconds(seconds: Option<i64>) -> Option<SystemTime> {
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds?.try_into().ok()?))
 }
 
 fn unix_seconds(time: SystemTime) -> i64 {
@@ -227,7 +233,11 @@ fn unix_seconds(time: SystemTime) -> i64 {
 pub struct Saved {
     /// Unix time of the last successful check.
     pub last_checked: Option<i64>,
+    /// Unix time of the last automatic check, successful or not.
+    pub last_attempt: Option<i64>,
     pub skipped_version: Option<String>,
+    /// The newer release the last successful check found.
+    pub found: Option<SavedRelease>,
 }
 
 impl Saved {
@@ -249,7 +259,7 @@ impl Saved {
     /// Writes atomically, keeping keys this version does not know. Fields
     /// that are `None` are left out, which removes them from the file.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        const KEYS: [&str; 2] = ["last_checked", "skipped_version"];
+        const KEYS: [&str; 4] = ["last_checked", "last_attempt", "skipped_version", "found"];
         let mut table = toml::Table::try_from(self).map_err(io::Error::other)?;
         if let Some(old) = std::fs::read_to_string(path)
             .ok()
@@ -302,7 +312,7 @@ mod tests {
 
     #[test]
     fn check_outcomes() {
-        let mut u = Updater::new(Saved::default());
+        let mut u = Updater::new(Saved::default(), None);
         assert_eq!(u.phase(), &Phase::Idle);
         assert!(u.start_check(false, now()));
         assert_eq!(u.phase(), &Phase::Checking { manual: false });
@@ -310,7 +320,7 @@ mod tests {
         assert!(u.check_finished(false, Ok(CheckOutcome::NoReleases), now()));
         assert_eq!(u.phase(), &Phase::NoReleases);
         assert_eq!(u.last_checked(), Some(now()));
-        assert_eq!(u.last_attempt, Some(now()));
+        assert_eq!(u.last_attempt(), Some(now()));
 
         assert!(u.start_check(true, now()));
         let latest = ReleaseVersion::parse("1.0.0").unwrap();
@@ -328,7 +338,7 @@ mod tests {
 
     #[test]
     fn failures_are_quiet_unless_asked_for() {
-        let mut u = Updater::new(Saved::default());
+        let mut u = Updater::new(Saved::default(), None);
         available(&mut u, "2.0.0", false);
         let error = || Err(CheckError::Malformed("x".into()));
         assert!(u.start_check(false, now()));
@@ -346,7 +356,7 @@ mod tests {
 
     #[test]
     fn install_runs_once_through_its_phases() {
-        let mut u = Updater::new(Saved::default());
+        let mut u = Updater::new(Saved::default(), None);
         assert!(u.start_install().is_none(), "nothing offered");
         available(&mut u, "2.0.0", false);
         assert!(u.start_install().is_some());
@@ -389,7 +399,7 @@ mod tests {
 
     #[test]
     fn progress_outside_an_install_is_ignored() {
-        let mut u = Updater::new(Saved::default());
+        let mut u = Updater::new(Saved::default(), None);
         u.progress(Progress::Verifying);
         u.launched();
         u.install_failed("x".into());
@@ -398,7 +408,7 @@ mod tests {
 
     #[test]
     fn skipping() {
-        let mut u = Updater::new(Saved::default());
+        let mut u = Updater::new(Saved::default(), None);
         assert!(!u.skip(), "nothing to skip");
         available(&mut u, "2.0.0", false);
         assert!(u.skip());
@@ -419,6 +429,35 @@ mod tests {
     }
 
     #[test]
+    fn found_release_is_kept_and_restored() {
+        let mut u = Updater::new(Saved::default(), None);
+        available(&mut u, "2.0.0", false);
+        assert_eq!(
+            u.saved.found.as_ref().map(|f| f.version.as_str()),
+            Some("2.0.0")
+        );
+        let restored = Updater::new(u.saved.clone(), Some(release("2.0.0")));
+        assert_eq!(restored.phase(), &Phase::Available);
+        assert!(restored.offered().is_some());
+        assert!(u.start_check(true, now()));
+        u.check_finished(true, Ok(CheckOutcome::NoReleases), now());
+        assert_eq!(u.saved.found, None);
+    }
+
+    #[test]
+    fn install_after_a_failed_check() {
+        let mut u = Updater::new(Saved::default(), None);
+        available(&mut u, "2.0.0", false);
+        assert!(u.start_check(true, now()));
+        u.check_finished(true, Err(CheckError::Malformed("x".into())), now());
+        assert!(matches!(u.phase(), Phase::Failed(Failure::Check(_))));
+        assert!(
+            u.start_install().is_some(),
+            "still offered, still installable"
+        );
+    }
+
+    #[test]
     fn saved_state_round_trips_and_keeps_other_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("update-state.toml");
@@ -427,15 +466,18 @@ mod tests {
         assert_eq!(Saved::load(&path).last_checked, Some(5));
         let saved = Saved {
             last_checked: Some(1_800_000_000),
+            last_attempt: Some(1_800_000_100),
             skipped_version: Some("1.2.3".into()),
+            found: Some(SavedRelease::new(&release("2.0.0"))),
         };
         saved.save(&path).unwrap();
         assert_eq!(Saved::load(&path), saved);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("future = 1"), "{text}");
-        // Clearing the skip removes the key.
+        // Clearing removes the keys.
         let cleared = Saved {
             skipped_version: None,
+            found: None,
             ..saved
         };
         cleared.save(&path).unwrap();

@@ -57,6 +57,14 @@ pub fn signature_required() -> bool {
     !matches!(verify::signing_key(), Ok(None))
 }
 
+/// The release a previous run found, if it is still newer than this one.
+pub fn restore_found(saved: &Saved, kind: InstallKind) -> Option<Release> {
+    saved
+        .found
+        .as_ref()?
+        .restore(&release::Endpoints::github(), &version::current(), kind)
+}
+
 /// The running version, as shown in the UI.
 pub fn current_version() -> String {
     version::current().text

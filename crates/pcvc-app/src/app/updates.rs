@@ -60,8 +60,9 @@ impl Updates {
         signed: bool,
     ) -> Self {
         let saved = state_path.as_deref().map(Saved::load).unwrap_or_default();
+        let restored = update::restore_found(&saved, kind);
         Self {
-            updater: Updater::new(saved),
+            updater: Updater::new(saved, restored),
             worker,
             kind,
             state_path,
@@ -126,10 +127,13 @@ impl App {
                     SystemTime::now(),
                     updates.started.elapsed(),
                     updates.updater.last_checked(),
-                    updates.updater.last_attempt,
+                    updates.updater.last_attempt(),
                 );
                 if automatic && due {
                     updates.check(false);
+                    // Keeps a failing check to one try an hour across
+                    // restarts.
+                    updates.persist();
                 }
             }
             UpdateMessage::Install => {
