@@ -388,9 +388,10 @@ fn full_queues_drop_lookups_without_recording_misses() {
     let icons = provider(&resolver);
     let changed = icons.subscribe();
     resolver.set_gate(false);
-    // Misses, which notify nobody, then one app with an icon.
+    // Misses, which notify nobody, then one app with an icon. Each miss has
+    // its own icon name: the session name is not part of the key on Windows.
     let mut sessions: Vec<Session> = (0..QUEUE_CAPACITY + 1)
-        .map(|i| session(&format!("App{i}"), "unknown"))
+        .map(|i| session(&format!("App{i}"), &format!("unknown{i}")))
         .collect();
     sessions.push(session("Last", "red"));
     for s in &sessions {
