@@ -88,9 +88,9 @@ impl MockBackend {
         Self::new(devices, Some(SPEAKERS)).expect("demo data is valid")
     }
 
-    /// The session id the mock uses for `app` on `device_id`. It does not
-    /// contain the device id, so clients developed against the mock cannot
-    /// come to rely on that.
+    /// The session id the mock uses for `app` on `device_id`. It is built
+    /// from a hash of the device id rather than the id itself, so clients
+    /// developed against the mock cannot come to rely on finding it there.
     pub fn session_id(device_id: &str, app: &str) -> String {
         // FNV-1a: stable across runs, unlike `DefaultHasher`.
         let hash = device_id.bytes().fold(0x811c_9dc5_u32, |h, b| {
@@ -520,10 +520,13 @@ mod tests {
             Some("b"),
         )
         .unwrap();
+        let mut rx = mock.subscribe();
         mock.set_session_detail("s", Some("x")).unwrap();
         for device in mock.lock().devices.iter() {
             assert_eq!(device.sessions[0].detail.as_deref(), Some("x"));
         }
+        let id = "s".to_owned();
+        assert_eq!(drain(&mut rx), [AudioEvent::SessionDetailChanged { id }]);
     }
 
     #[test]
