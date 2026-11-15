@@ -17,7 +17,7 @@ pub use framing::{MAX_LINE_LEN, ProtocolError, encode_full_state, parse_client_l
 pub use icon::{
     FEATURE_ICONS, ICON_ERROR_NOT_FOUND, ICON_ID_MAX_LEN, ICON_MIME_PNG, ICON_SIZE_DEFAULT,
     ICON_SIZE_MAX, ICON_SIZE_MIN, IconId, IconMessage, IconReply, IconRequest, InvalidIconId,
-    MAX_ICON_IDS_PER_REQUEST, MAX_ICON_PNG_BYTES, encode_icon_reply,
+    MAX_ICON_IDS_PER_REQUEST, MAX_ICON_PNG_BYTES, MAX_OUTSTANDING_ICON_IDS, encode_icon_reply,
 };
 pub use model::{ClientUpdate, DeviceState, DeviceUpdate, FullState, SessionState, SessionUpdate};
 pub use update::{Command, clamp_volume, plan_commands};

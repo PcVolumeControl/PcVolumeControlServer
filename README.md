@@ -178,7 +178,7 @@ is the checklist to verify it.
 
 | Crate | Purpose |
 | --- | --- |
-| `pcvc-protocol` | Wire models (v7 and the v8 icon extension), line framing, and the pure rule that turns a client update into backend commands. Depends only on serde and base64. |
+| `pcvc-protocol` | Wire models (v7 and the v8 icon extension), line framing, and the pure rule that turns a client update into backend commands. Depends only on serde, serde_json and base64. |
 | `pcvc-audio` | `AudioBackend` trait, domain types, `AudioEvent`, `MockBackend`, and the platform backends behind `cfg` (`PulseBackend` on Linux, `WindowsBackend` on Windows). |
 | `pcvc-server` | Tokio TCP server, coalescing state broadcaster, mDNS advertiser, and the `ServerHandle` API for front ends. |
 | `pcvc-app` | The `pcvolumecontrol` binary: iced daemon, tray icon, Mixer/Status/Settings window, config, start on login, single instance. See [its README](crates/pcvc-app/README.md). |

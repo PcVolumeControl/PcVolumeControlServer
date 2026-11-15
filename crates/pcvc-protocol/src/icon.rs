@@ -7,7 +7,6 @@ use std::str::FromStr;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
-use serde_json::Number;
 
 use crate::PROTOCOL_VERSION;
 
@@ -20,6 +19,11 @@ pub const ICON_ID_MAX_LEN: usize = 64;
 
 /// Most ids one `iconRequest` may carry; more is a protocol error.
 pub const MAX_ICON_IDS_PER_REQUEST: usize = 32;
+
+/// Most icon ids a connection may have outstanding: read by the server but
+/// with no reply written yet. A request that would exceed it is a protocol
+/// error.
+pub const MAX_OUTSTANDING_ICON_IDS: usize = 64;
 
 /// Edge length, in pixels, used when a request has no `size`.
 pub const ICON_SIZE_DEFAULT: u32 = 64;
@@ -122,14 +126,14 @@ pub struct IconRequest {
     pub ids: Vec<String>,
     /// Desired edge length in pixels; see [`IconRequest::size_px`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<Number>,
+    pub size: Option<f64>,
 }
 
 impl IconRequest {
     /// The requested edge length: [`ICON_SIZE_DEFAULT`] when absent, otherwise
     /// rounded and clamped to `ICON_SIZE_MIN..=ICON_SIZE_MAX`.
     pub fn size_px(&self) -> u32 {
-        let Some(size) = self.size.as_ref().and_then(Number::as_f64) else {
+        let Some(size) = self.size else {
             return ICON_SIZE_DEFAULT;
         };
         size.round()
@@ -178,7 +182,12 @@ pub enum IconReply {
 }
 
 impl IconReply {
+    /// An image reply, or a not-found reply if `png` is larger than
+    /// [`MAX_ICON_PNG_BYTES`].
     pub fn image(id: impl Into<String>, size: u32, png: &[u8]) -> Self {
+        if png.len() > MAX_ICON_PNG_BYTES {
+            return Self::not_found(id);
+        }
         Self::Image {
             id: id.into(),
             size,

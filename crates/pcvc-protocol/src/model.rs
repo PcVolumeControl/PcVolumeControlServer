@@ -14,11 +14,23 @@ pub struct FullState {
     /// Extensions the server supports, such as [`crate::FEATURE_ICONS`].
     /// Omitted from the wire when empty, which keeps the line identical to
     /// plain v7.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "null_as_default"
+    )]
     pub features: Vec<String>,
     /// Active playback devices, id to friendly name.
     pub device_ids: BTreeMap<String, String>,
     pub default_device: DeviceState,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

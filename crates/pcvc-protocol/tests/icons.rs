@@ -4,9 +4,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use pcvc_protocol::{
     ClientUpdate, Command, DeviceState, FEATURE_ICONS, FullState, ICON_SIZE_DEFAULT, ICON_SIZE_MAX,
-    ICON_SIZE_MIN, IconId, IconMessage, IconReply, MAX_ICON_IDS_PER_REQUEST, PROTOCOL_VERSION,
-    ProtocolError, SessionState, encode_full_state, encode_icon_reply, parse_client_line,
-    plan_commands,
+    ICON_SIZE_MIN, IconId, IconMessage, IconReply, MAX_ICON_IDS_PER_REQUEST, MAX_ICON_PNG_BYTES,
+    PROTOCOL_VERSION, ProtocolError, SessionState, encode_full_state, encode_icon_reply,
+    parse_client_line, plan_commands,
 };
 use serde_json::{Value, json};
 
@@ -140,6 +140,14 @@ fn unknown_features_are_kept_as_strings() {
     value["features"] = json!(["icons", "somethingNew"]);
     let state: FullState = serde_json::from_value(value).unwrap();
     assert_eq!(state.features, ["icons", "somethingNew"]);
+}
+
+#[test]
+fn null_features_are_empty() {
+    let mut value: Value = serde_json::from_str(README_FULL_STATE).unwrap();
+    value["features"] = Value::Null;
+    let state: FullState = serde_json::from_value(value).unwrap();
+    assert!(state.features.is_empty());
 }
 
 // Requests.
@@ -297,6 +305,17 @@ fn rejects_malformed_icon_requests() {
 }
 
 // Replies.
+
+#[test]
+fn oversized_image_is_not_found() {
+    let png = vec![0u8; MAX_ICON_PNG_BYTES];
+    assert!(matches!(
+        IconReply::image("a", 256, &png),
+        IconReply::Image { .. }
+    ));
+    let png = vec![0u8; MAX_ICON_PNG_BYTES + 1];
+    assert_eq!(IconReply::image("a", 256, &png), IconReply::not_found("a"));
+}
 
 #[test]
 fn base64_matches_rfc_4648_vectors() {
