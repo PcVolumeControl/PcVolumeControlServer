@@ -186,8 +186,8 @@ pub struct App {
     /// What the mini mixer was placed against, where the platform lets it
     /// be placed.
     mini_anchoring: Option<Anchoring>,
-    /// The tray click area of a mini mixer that is hidden until placed.
-    mini_unplaced: Option<Option<placement::ScreenRect>>,
+    /// The scale factor the mini mixer's position was converted at.
+    mini_position_scale: f32,
     /// Looks up where to place the mini mixer; `None` leaves it to the
     /// platform from the start.
     mini_locator: Option<mini::Locator>,
@@ -254,7 +254,7 @@ impl App {
             mini_height: 0.0,
             mini_picker_open: false,
             mini_anchoring: None,
-            mini_unplaced: None,
+            mini_position_scale: 1.0,
             mini_locator: Some(placement::anchoring),
             settings: SettingsForm::from(&config),
             notice: None,
@@ -392,11 +392,11 @@ impl App {
         match action {
             TrayAction::Click(button, area) => {
                 tracing::debug!("tray: {button:?} click at {area:?}");
-                self.mini_toggle(area)
+                self.mini_toggle(MiniEvent::Toggle, area)
             }
             TrayAction::Mixer => {
                 tracing::debug!("tray: Mixer menu item");
-                self.mini_toggle(None)
+                self.mini_toggle(MiniEvent::MenuToggle, None)
             }
             TrayAction::DoubleClick => {
                 tracing::debug!("tray: double click");

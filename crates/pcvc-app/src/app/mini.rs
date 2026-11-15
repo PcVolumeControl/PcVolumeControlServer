@@ -21,16 +21,14 @@ static OPEN_WINDOW: LazyLock<svg::Handle> =
     LazyLock::new(|| svg::Handle::from_memory(icons::OPEN_WINDOW));
 static CLOSE: LazyLock<svg::Handle> = LazyLock::new(|| svg::Handle::from_memory(icons::CLOSE));
 
-/// Looks up what to place the mini mixer against; may block on the display
-/// server.
+/// Looks up what to place the mini mixer against, or `None` to leave it to
+/// the platform. Queries the display server.
 pub type Locator = fn(Option<ScreenRect>) -> Option<Anchoring>;
 
 #[derive(Debug, Clone)]
 pub enum MiniMessage {
     /// The window exists, at this scale factor.
     Created(window::Id, f32),
-    /// What to place it against was looked up.
-    Located(window::Id, Option<Anchoring>),
     /// Its button that opens the full window.
     OpenFull,
     /// Its close button.
@@ -47,9 +45,10 @@ impl App {
         self.mini_action(action, None)
     }
 
-    /// A tray click at `area`, or the tray menu's Mixer item without one.
-    pub(super) fn mini_toggle(&mut self, area: Option<ScreenRect>) -> Task<Message> {
-        let action = self.mini.handle(Event::Toggle, Instant::now());
+    /// A click on the tray icon at `area`, or with `Event::MenuToggle` the
+    /// tray menu's Mixer item.
+    pub(super) fn mini_toggle(&mut self, event: Event, area: Option<ScreenRect>) -> Task<Message> {
+        let action = self.mini.handle(event, Instant::now());
         self.mini_action(action, area)
     }
 
@@ -68,7 +67,6 @@ impl App {
     pub(super) fn mini_update(&mut self, message: MiniMessage) -> Task<Message> {
         match message {
             MiniMessage::Created(id, scale) => self.mini_created(id, scale),
-            MiniMessage::Located(id, anchoring) => self.show_mini(id, anchoring),
             MiniMessage::OpenFull => {
                 let close = self.mini_event(Event::Close(CloseReason::OpenFull));
                 Task::batch([close, self.open_window()])
@@ -92,16 +90,26 @@ impl App {
         self.mini_event(Event::Escape(id))
     }
 
-    /// Opens the window. With a locator it starts hidden and is shown once
-    /// placed: positions are converted at the scale of the window, which is
-    /// only known once it exists.
+    /// Opens the window beside the tray icon where the platform allows.
+    /// Positions handed to iced are logical and converted at the window's
+    /// scale, known only once it exists: on Windows it is created hidden
+    /// and moved before it shows; on X11, where window managers place a
+    /// window as it maps, it is created at the position for the last known
+    /// scale and moved again if its own differs.
     fn open_mini(&mut self, area: Option<ScreenRect>) -> Task<Message> {
         let height = mini::height(self.mini_body());
         let size = Size::new(style::MINI_WIDTH, height);
-        let hidden = self.mini_locator.is_some();
+        let anchoring = self.mini_locator.and_then(|locate| locate(area));
+        let guess = self.scale_factor.unwrap_or(1.0);
+        let (visible, position) = match &anchoring {
+            Some(_) if placement::MOVES_HIDDEN_WINDOWS => (false, window::Position::Default),
+            Some(a) => (true, window::Position::Specific(a.position(size, guess))),
+            None => (true, window::Position::Default),
+        };
         let (id, opened) = window::open(window::Settings {
             size,
-            visible: !hidden,
+            position,
+            visible,
             resizable: false,
             decorations: false,
             minimizable: false,
@@ -121,12 +129,14 @@ impl App {
             },
             ..Default::default()
         });
-        tracing::debug!("mini mixer: opening, {size:?}, click at {area:?}");
+        tracing::debug!(
+            "mini mixer: opening, {size:?}, click at {area:?}, {position:?}, visible: {visible}"
+        );
         self.mini.handle(Event::Opened(id), Instant::now());
         self.mini_height = height;
         self.mini_picker_open = false;
-        self.mini_anchoring = None;
-        self.mini_unplaced = hidden.then_some(area);
+        self.mini_anchoring = anchoring;
+        self.mini_position_scale = guess;
         self.request_icons();
         opened.then(|id| {
             window::scale_factor(id).map(move |f| Message::Mini(MiniMessage::Created(id, f)))
@@ -143,46 +153,28 @@ impl App {
             self.window_scales.insert(id, scale);
             self.update_scale_factor();
         }
-        let place = match (self.mini_unplaced.take(), self.mini_locator) {
-            (Some(area), Some(locate)) => {
-                window::run(id, placement::can_position).then(move |positionable| {
-                    if !positionable {
-                        tracing::debug!("mini mixer: the platform places it (Wayland)");
-                        return Task::done(Message::Mini(MiniMessage::Located(id, None)));
-                    }
-                    Task::perform(
-                        tokio::task::spawn_blocking(move || locate(area)),
-                        move |found| Message::Mini(MiniMessage::Located(id, found.ok().flatten())),
-                    )
-                })
-            }
-            _ => window::gain_focus(id),
-        };
-        Task::batch([created, place, self.fit_mini()])
-    }
-
-    /// Moves the hidden window into place and shows it.
-    fn show_mini(&mut self, id: window::Id, anchoring: Option<Anchoring>) -> Task<Message> {
-        if !self.mini.is(id) {
-            return Task::none();
-        }
-        self.mini_anchoring = anchoring;
-        let show = window::set_mode(id, window::Mode::Windowed).chain(window::gain_focus(id));
-        match anchoring {
-            Some(anchoring) => {
-                let position = anchoring.position(self.mini_size(), self.window_scale(id));
+        let scale = self.window_scale(id);
+        let place = match &self.mini_anchoring {
+            Some(anchoring) if placement::MOVES_HIDDEN_WINDOWS => {
+                let position = anchoring.position(self.mini_size(), scale);
                 tracing::debug!("mini mixer: shown at {position:?}");
-                let place = window::move_to(id, position);
-                // X11 window managers place a window as it maps and ignore
-                // earlier moves; Win32 moves a hidden window as asked.
-                if cfg!(target_os = "windows") {
-                    place.chain(show)
-                } else {
-                    show.chain(place)
-                }
+                window::move_to(id, position).chain(window::set_mode(id, window::Mode::Windowed))
             }
-            None => show,
-        }
+            Some(anchoring) if (scale - self.mini_position_scale).abs() > 0.01 => {
+                let position = anchoring.position(self.mini_size(), scale);
+                tracing::debug!(
+                    "mini mixer: placed for scale {}, moved to {position:?}",
+                    self.mini_position_scale
+                );
+                window::move_to(id, position)
+            }
+            _ => Task::none(),
+        };
+        Task::batch([
+            created,
+            place.chain(window::gain_focus(id)),
+            self.fit_mini(),
+        ])
     }
 
     fn mini_size(&self) -> Size {

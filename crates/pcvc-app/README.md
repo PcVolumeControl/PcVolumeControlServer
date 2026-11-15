@@ -88,21 +88,24 @@ Escape, close, closed), so the rules are tested with a fake clock:
 
 - an unfocus is ignored until the window has had focus, and within
   `OPEN_GRACE` of opening (it asks for focus again once instead);
-- a tray toggle within `TOGGLE_DEBOUNCE` of a close on losing focus is the
-  click that took the focus, so it leaves the window closed;
+- a click on the tray icon within `TOGGLE_DEBOUNCE` of a close on losing
+  focus is the click that took the focus, so it leaves the window closed
+  (the menu's Mixer item is exempt: opening the menu took the focus);
 - clicks within `DOUBLE_CLICK_QUIET` of a double click belong to it;
 - a close before iced has created the window waits until it exists, since
   iced drops window actions for unknown windows.
 
-Where the platform lets the app position windows, the window opens hidden;
-once created, the app checks its handle (not Wayland), looks up the
-anchoring on a blocking task (`placement::anchoring`: Win32 monitor info on
-Windows, RandR and the pointer on X11), moves it beside the tray icon and
-shows it. `placement::place` is the pure geometry, in physical pixels; the
-logical position handed to iced is divided by the window's own scale, which
-is how the platform converts it back. Debug logs (`RUST_LOG=pcvolumecontrol=debug`)
-record tray clicks, opening, creation, placement, focus, unfocus and each
-close with its reason.
+`placement::anchoring` finds what to place it against: the icon's rectangle
+and Win32 monitor info on Windows; the click or pointer and RandR monitors
+on X11; nothing on Wayland. `placement::place` is the pure geometry, in
+physical pixels. iced takes logical positions and the platform converts
+them at the window's scale, known only once the window exists, so on
+Windows the window opens hidden and is moved and shown once created; on X11,
+where window managers place a window as it maps and only honour the
+position it was created with, it opens at the position for the last known
+scale and is moved again if its own differs. Debug logs
+(`RUST_LOG=pcvolumecontrol=debug`) record tray clicks, opening, creation,
+placement, focus, unfocus and each close with its reason.
 
 ## Where things live
 

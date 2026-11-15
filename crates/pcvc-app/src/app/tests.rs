@@ -684,28 +684,31 @@ fn fake_locator(click: Option<placement::ScreenRect>) -> Option<Anchoring> {
 }
 
 #[test]
-fn mini_is_placed_before_it_shows() {
+fn mini_is_anchored_to_the_tray_click() {
     let mut h = Harness::new();
     h.app.mini_locator = Some(fake_locator);
+    // The full window has reported 1.25: positions are first converted at
+    // that scale.
+    let main = h.open_window();
+    h.run(vec![Message::ScaleFactor(main, 1.25)]);
     let icon = iced::Rectangle::new(iced::Point::new(1500.0, 1040.0), Size::new(32.0, 40.0));
     let click = TrayAction::Click(tray_icon::MouseButton::Left, Some(icon));
     h.run(vec![Message::Inbound(Inbound::Tray(click))]);
     let mini = h.app.mini.id().unwrap();
-    // Hidden until created and located.
-    assert_eq!(h.app.mini_unplaced, Some(Some(icon)));
-    h.run(vec![Message::Mini(MiniMessage::Created(mini, 1.0))]);
-    assert_eq!(h.app.mini_unplaced, None);
-    assert_eq!(h.app.window_scale(mini), 1.0);
     let anchoring = fake_locator(Some(icon));
-    h.run(vec![Message::Mini(MiniMessage::Located(mini, anchoring))]);
     assert_eq!(h.app.mini_anchoring, anchoring);
+    assert_eq!(h.app.mini_position_scale, 1.25);
+    // Created at its own scale, which moves it (or, on Windows, places it
+    // while hidden).
+    h.run(vec![Message::Mini(MiniMessage::Created(mini, 1.0))]);
+    assert_eq!(h.app.window_scale(mini), 1.0);
     // Moving to the 150 % monitor makes its scale the window's own.
     h.run(vec![Message::ScaleFactor(mini, 1.5)]);
     assert_eq!(h.app.mini_anchoring.unwrap().monitor.scale, None);
-    // A stale lookup for a closed window changes nothing.
+    // The menu has no click to anchor to.
     h.run(vec![Message::Escape(mini)]);
-    h.run(vec![Message::Mini(MiniMessage::Located(mini, None))]);
-    assert_eq!(h.app.mini.id(), None);
+    h.run(vec![Message::Inbound(Inbound::Tray(TrayAction::Mixer))]);
+    assert_eq!(h.app.mini_anchoring, None);
 }
 
 #[test]

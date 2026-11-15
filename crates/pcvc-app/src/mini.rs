@@ -14,8 +14,8 @@ use iced::window;
 
 use crate::style;
 
-/// Losing focus this soon after opening is not taken as a click outside:
-/// some platforms report it while the window maps.
+/// Losing focus this soon after the window is created is not taken as a
+/// click outside: some platforms report it while the window maps.
 pub const OPEN_GRACE: Duration = Duration::from_millis(300);
 
 /// A tray click this soon after the window closed on losing focus is the
@@ -43,8 +43,11 @@ pub enum CloseReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    /// A click on the tray icon or its Mixer item.
+    /// A click on the tray icon.
     Toggle,
+    /// The tray menu's Mixer item. Opening the menu took the focus, so a
+    /// close on losing focus just before does not make it a close.
+    MenuToggle,
     /// A double click on the tray icon, which opens the full window.
     DoubleClick,
     /// The app asked for a window with this id.
@@ -81,6 +84,7 @@ pub struct MiniWindow {
 #[derive(Debug)]
 struct Open {
     id: window::Id,
+    /// When the window was created, or asked for until then.
     opened_at: Instant,
     /// Until the window exists, closing it is held back: iced drops a close
     /// for a window it has not created yet.
@@ -106,8 +110,9 @@ impl MiniWindow {
 
     pub fn handle(&mut self, event: Event, now: Instant) -> Action {
         match event {
-            Event::Toggle => {
-                if self.quiet_until.is_some_and(|until| now < until) {
+            Event::Toggle | Event::MenuToggle => {
+                let click = event == Event::Toggle;
+                if click && self.quiet_until.is_some_and(|until| now < until) {
                     tracing::debug!("mini mixer: tray click ignored, part of a double click");
                     return Action::None;
                 }
@@ -119,6 +124,7 @@ impl MiniWindow {
                     return self.close(CloseReason::Toggle);
                 }
                 if let Some(closed) = self.focus_closed_at.take()
+                    && click
                     && now.saturating_duration_since(closed) < TOGGLE_DEBOUNCE
                 {
                     tracing::debug!(
@@ -151,6 +157,7 @@ impl MiniWindow {
                     return Action::None;
                 };
                 open.created = true;
+                open.opened_at = now;
                 match open.close_pending.take() {
                     Some(reason) => self.close(reason),
                     None => Action::None,
@@ -160,7 +167,7 @@ impl MiniWindow {
                 if let Some(open) = self.open.as_mut().filter(|o| o.id == id) {
                     open.focused = true;
                     tracing::debug!(
-                        "mini mixer: focused {:?} after opening",
+                        "mini mixer: focused {:?} after creation",
                         now.saturating_duration_since(open.opened_at)
                     );
                 }
@@ -173,19 +180,19 @@ impl MiniWindow {
                 let age = now.saturating_duration_since(open.opened_at);
                 if !open.focused {
                     tracing::debug!(
-                        "mini mixer: unfocus {age:?} after opening, before any focus; ignored"
+                        "mini mixer: unfocus {age:?} after creation, before any focus; ignored"
                     );
                     return Action::None;
                 }
                 if age < OPEN_GRACE {
-                    tracing::debug!("mini mixer: unfocus {age:?} after opening; ignored");
+                    tracing::debug!("mini mixer: unfocus {age:?} after creation; ignored");
                     if open.refocused {
                         return Action::None;
                     }
                     open.refocused = true;
                     return Action::Refocus(id);
                 }
-                tracing::debug!("mini mixer: unfocused {age:?} after opening");
+                tracing::debug!("mini mixer: unfocused {age:?} after creation");
                 self.focus_closed_at = Some(now);
                 self.close(CloseReason::FocusLost)
             }
@@ -353,12 +360,47 @@ mod tests {
         c.at(160, Event::Focused(id));
         assert_eq!(c.at(200, Event::Unfocused(id)), Action::None);
         assert!(c.mini.is(id));
-        // After the grace, losing focus closes it.
+        // After the grace, counted from its creation at 5, losing focus
+        // closes it.
         c.at(250, Event::Focused(id));
-        let after = OPEN_GRACE.as_millis() as u64 + 1;
+        let after = 5 + OPEN_GRACE.as_millis() as u64;
         assert_eq!(
             c.at(after, Event::Unfocused(id)),
             Action::Close(id, CloseReason::FocusLost)
+        );
+    }
+
+    #[test]
+    fn grace_counts_from_creation() {
+        let mut c = Clock::new();
+        assert_eq!(c.at(0, Event::Toggle), Action::Open);
+        let id = window::Id::unique();
+        c.at(0, Event::Opened(id));
+        // Created late: an unfocus soon after is still in the grace.
+        c.at(1000, Event::Created(id));
+        c.at(1050, Event::Focused(id));
+        assert_eq!(c.at(1100, Event::Unfocused(id)), Action::Refocus(id));
+        assert!(c.mini.is(id));
+    }
+
+    #[test]
+    fn menu_item_opens_after_the_menu_took_the_focus() {
+        let mut c = Clock::new();
+        let id = c.open(0);
+        c.at(20, Event::Focused(id));
+        // Opening the tray menu takes the focus; choosing Mixer at once
+        // opens it again, unlike a click on the icon.
+        c.at(1000, Event::Unfocused(id));
+        assert_eq!(c.at(1100, Event::MenuToggle), Action::Open);
+        // Nor does a double click just before swallow it.
+        let mut c = Clock::new();
+        c.at(0, Event::DoubleClick);
+        assert_eq!(c.at(100, Event::MenuToggle), Action::Open);
+        // With the window open it closes it.
+        let id = c.open(1000);
+        assert_eq!(
+            c.at(1100, Event::MenuToggle),
+            Action::Close(id, CloseReason::Toggle)
         );
     }
 

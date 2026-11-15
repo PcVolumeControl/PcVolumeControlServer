@@ -4,9 +4,8 @@
 //! The geometry is in physical pixels, as the platforms report it. On
 //! Windows the tray click gives the icon's rectangle and the monitor comes
 //! from Win32; on X11 the click (or the pointer) gives a point and RandR the
-//! monitors. Wayland does not let an application position its own windows;
-//! the app finds out from the window's handle and leaves it to the
-//! compositor.
+//! monitors. Wayland does not let an application position its own windows,
+//! so there the compositor places it.
 
 use iced::{Point, Rectangle, Size};
 
@@ -156,10 +155,15 @@ impl Anchoring {
     }
 }
 
+/// Whether the platform moves a hidden window as asked (Win32). X11 window
+/// managers instead place a window as it maps, honouring only the position
+/// it was created with.
+pub const MOVES_HIDDEN_WINDOWS: bool = cfg!(target_os = "windows");
+
 /// Where to anchor the mini mixer opened by a tray click at `click` (`None`
-/// from the menu), or `None` when the platform does not say. Called only
-/// for windows the platform lets the app position; it may block on the
-/// display server.
+/// from the menu), or `None` where the app cannot position windows or the
+/// platform does not say. Queries the display server: a few round trips to
+/// the X server the app's windows already depend on.
 pub fn anchoring(click: Option<ScreenRect>) -> Option<Anchoring> {
     let anchoring = platform::anchoring(click);
     match &anchoring {
@@ -173,15 +177,6 @@ pub fn anchoring(click: Option<ScreenRect>) -> Option<Anchoring> {
         None => tracing::debug!("mini mixer: nothing to anchor to; the platform places it"),
     }
     anchoring
-}
-
-/// Whether the platform lets the app position a window with this handle:
-/// not on Wayland.
-pub fn can_position(window: &dyn iced::window::Window) -> bool {
-    use iced::window::raw_window_handle::RawWindowHandle;
-    window
-        .window_handle()
-        .is_ok_and(|h| !matches!(h.as_raw(), RawWindowHandle::Wayland(_)))
 }
 
 #[cfg(target_os = "windows")]
@@ -268,6 +263,9 @@ mod platform {
     /// On X11, beside the click, or the pointer when the tray host gave no
     /// position (the menu, or hosts that send 0, 0).
     pub fn anchoring(click: Option<ScreenRect>) -> Option<Anchoring> {
+        if is_wayland() {
+            return None;
+        }
         match x11(click) {
             Ok(anchoring) => anchoring,
             Err(e) => {
@@ -275,6 +273,14 @@ mod platform {
                 None
             }
         }
+    }
+
+    /// Whether winit runs on Wayland, which it picks when a Wayland display
+    /// is named (falling back to X11 only if connecting fails).
+    fn is_wayland() -> bool {
+        ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
     }
 
     type Error = Box<dyn std::error::Error>;
