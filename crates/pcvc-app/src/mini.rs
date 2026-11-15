@@ -47,8 +47,10 @@ pub enum Event {
     Toggle,
     /// A double click on the tray icon, which opens the full window.
     DoubleClick,
-    /// The app opened the window with this id.
+    /// The app asked for a window with this id.
     Opened(window::Id),
+    /// The window exists: window actions for it now take effect.
+    Created(window::Id),
     Focused(window::Id),
     Unfocused(window::Id),
     Escape(window::Id),
@@ -80,6 +82,10 @@ pub struct MiniWindow {
 struct Open {
     id: window::Id,
     opened_at: Instant,
+    /// Until the window exists, closing it is held back: iced drops a close
+    /// for a window it has not created yet.
+    created: bool,
+    close_pending: Option<CloseReason>,
     focused: bool,
     refocused: bool,
 }
@@ -93,9 +99,9 @@ impl MiniWindow {
         self.id() == Some(id)
     }
 
-    /// Whether the open window has had focus.
-    pub fn has_had_focus(&self) -> bool {
-        self.open.as_ref().is_some_and(|o| o.focused)
+    /// Whether the window exists, so it can be resized.
+    pub fn is_created(&self) -> bool {
+        self.open.as_ref().is_some_and(|o| o.created)
     }
 
     pub fn handle(&mut self, event: Event, now: Instant) -> Action {
@@ -105,7 +111,11 @@ impl MiniWindow {
                     tracing::debug!("mini mixer: tray click ignored, part of a double click");
                     return Action::None;
                 }
-                if self.open.is_some() {
+                if let Some(open) = &mut self.open {
+                    if open.close_pending.take().is_some() {
+                        tracing::debug!("mini mixer: stays open, toggled again while opening");
+                        return Action::None;
+                    }
                     return self.close(CloseReason::Toggle);
                 }
                 if let Some(closed) = self.focus_closed_at.take()
@@ -128,11 +138,23 @@ impl MiniWindow {
                 self.open = Some(Open {
                     id,
                     opened_at: now,
+                    created: false,
+                    close_pending: None,
                     focused: false,
                     refocused: false,
                 });
                 self.focus_closed_at = None;
                 Action::None
+            }
+            Event::Created(id) => {
+                let Some(open) = self.open.as_mut().filter(|o| o.id == id) else {
+                    return Action::None;
+                };
+                open.created = true;
+                match open.close_pending.take() {
+                    Some(reason) => self.close(reason),
+                    None => Action::None,
+                }
             }
             Event::Focused(id) => {
                 if let Some(open) = self.open.as_mut().filter(|o| o.id == id) {
@@ -181,32 +203,55 @@ impl MiniWindow {
     }
 
     fn close(&mut self, reason: CloseReason) -> Action {
-        match self.open.take() {
-            Some(open) => Action::Close(open.id, reason),
-            None => Action::None,
+        let Some(open) = self.open.as_mut() else {
+            return Action::None;
+        };
+        if !open.created {
+            tracing::debug!("mini mixer: will close ({reason:?}) once created");
+            open.close_pending.get_or_insert(reason);
+            return Action::None;
         }
+        tracing::debug!(
+            "mini mixer: closing ({reason:?}), had focus: {}",
+            open.focused
+        );
+        let id = open.id;
+        self.open = None;
+        Action::Close(id, reason)
     }
 }
 
-/// Height of the mini mixer with `rows` application rows, up to
-/// `MINI_MAX_HEIGHT`; beyond that the rows scroll. Mirrors the layout in
+/// What the mini mixer shows below its header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Body {
+    /// A note while the first audio state is read.
+    Loading,
+    /// The device picker and a note that there is no default device.
+    NoDevice,
+    /// Picker, master row, divider and this many application rows (or a
+    /// note when there are none).
+    Rows(usize),
+}
+
+/// Height of the mini mixer showing `body`, up to `MINI_MAX_HEIGHT`;
+/// beyond that the application rows scroll. Mirrors the layout in
 /// `app::mini`, whose rows all have the compact density's fixed height.
-pub fn height(rows: usize) -> f32 {
+pub fn height(body: Body) -> f32 {
     let row = style::MINI_ROW;
-    let list = match rows {
-        // The note that no application is playing.
-        0 => row,
-        n => n as f32 * row + (n - 1) as f32 * style::COMPACT.row_spacing,
+    let gap = style::MINI_GAP;
+    let content = match body {
+        Body::Loading => row,
+        Body::NoDevice => row + gap + row,
+        Body::Rows(rows) => {
+            let list = match rows {
+                0 => row,
+                n => n as f32 * row + (n - 1) as f32 * style::COMPACT.row_spacing,
+            };
+            row + gap + row + gap + style::MINI_DIVIDER + gap + list
+        }
     };
-    // Header, device picker, master row and divider, then the list, with a
-    // gap after each of the first four.
-    let fixed = style::MINI_PADDING.top
-        + style::MINI_PADDING.bottom
-        + style::MINI_HEADER
-        + 2.0 * row
-        + style::MINI_DIVIDER
-        + 4.0 * style::MINI_GAP;
-    (fixed + list).min(style::MINI_MAX_HEIGHT)
+    let padding = style::MINI_PADDING.top + style::MINI_PADDING.bottom;
+    (padding + style::MINI_HEADER + gap + content).min(style::MINI_MAX_HEIGHT)
 }
 
 #[cfg(test)]
@@ -238,8 +283,44 @@ mod tests {
             assert_eq!(self.at(ms, Event::Toggle), Action::Open);
             let id = window::Id::unique();
             assert_eq!(self.at(ms, Event::Opened(id)), Action::None);
+            assert!(!self.mini.is_created());
+            assert_eq!(self.at(ms + 5, Event::Created(id)), Action::None);
+            assert!(self.mini.is_created());
             id
         }
+    }
+
+    #[test]
+    fn closes_held_back_until_the_window_exists() {
+        let mut c = Clock::new();
+        assert_eq!(c.at(0, Event::Toggle), Action::Open);
+        let id = window::Id::unique();
+        c.at(0, Event::Opened(id));
+        // Closed before it exists: held back, still the mini window.
+        assert_eq!(c.at(1, Event::Close(CloseReason::OpenFull)), Action::None);
+        assert!(c.mini.is(id));
+        assert_eq!(
+            c.at(2, Event::Created(id)),
+            Action::Close(id, CloseReason::OpenFull)
+        );
+        assert_eq!(c.mini.id(), None);
+        // Toggled closed and open again before it exists: stays open.
+        assert_eq!(c.at(1000, Event::Toggle), Action::Open);
+        let id = window::Id::unique();
+        c.at(1000, Event::Opened(id));
+        assert_eq!(c.at(1001, Event::Toggle), Action::None);
+        assert_eq!(c.at(1002, Event::Toggle), Action::None);
+        assert_eq!(c.at(1003, Event::Created(id)), Action::None);
+        assert!(c.mini.is(id));
+        // A stale creation changes nothing.
+        assert_eq!(
+            c.at(1004, Event::Created(window::Id::unique())),
+            Action::None
+        );
+        assert_eq!(
+            c.at(1005, Event::Toggle),
+            Action::Close(id, CloseReason::Toggle)
+        );
     }
 
     #[test]
@@ -266,10 +347,8 @@ mod tests {
         // Unfocused before it was ever focused: not a click outside.
         assert_eq!(c.at(50, Event::Unfocused(id)), Action::None);
         assert!(c.mini.is(id));
-        assert!(!c.mini.has_had_focus());
         // Focused, then unfocused within the grace: asks for focus once.
         c.at(100, Event::Focused(id));
-        assert!(c.mini.has_had_focus());
         assert_eq!(c.at(150, Event::Unfocused(id)), Action::Refocus(id));
         c.at(160, Event::Focused(id));
         assert_eq!(c.at(200, Event::Unfocused(id)), Action::None);
@@ -378,16 +457,24 @@ mod tests {
 
     #[test]
     fn height_follows_rows_up_to_the_cap() {
+        let rows = |n| height(Body::Rows(n));
         let row = style::MINI_ROW + style::COMPACT.row_spacing;
-        assert_eq!(height(1), height(0));
-        assert_eq!(height(2) - height(1), row);
-        assert_eq!(height(5) - height(2), 3.0 * row);
+        assert_eq!(rows(1), rows(0));
+        assert_eq!(rows(2) - rows(1), row);
+        assert_eq!(rows(5) - rows(2), 3.0 * row);
         let fits = (1..100)
-            .take_while(|&n| height(n) < style::MINI_MAX_HEIGHT)
+            .take_while(|&n| rows(n) < style::MINI_MAX_HEIGHT)
             .last();
         let fits = fits.unwrap();
         assert!(fits >= 6, "at least six rows fit without scrolling");
-        assert_eq!(height(fits + 1), style::MINI_MAX_HEIGHT);
-        assert_eq!(height(500), style::MINI_MAX_HEIGHT);
+        assert_eq!(rows(fits + 1), style::MINI_MAX_HEIGHT);
+        assert_eq!(rows(500), style::MINI_MAX_HEIGHT);
+        // Each note takes a row where the rest would be.
+        let step = style::MINI_ROW + style::MINI_GAP;
+        assert_eq!(height(Body::NoDevice) - height(Body::Loading), step);
+        assert_eq!(
+            rows(0) - height(Body::NoDevice),
+            step + style::MINI_DIVIDER + style::MINI_GAP
+        );
     }
 }

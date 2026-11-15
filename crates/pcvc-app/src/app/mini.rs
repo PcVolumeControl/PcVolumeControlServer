@@ -3,7 +3,8 @@
 //! density. It closes on Escape, on losing focus, from the tray and from
 //! its own buttons; `crate::mini` decides when.
 
-use std::time::{Duration, Instant};
+use std::sync::LazyLock;
+use std::time::Instant;
 
 use iced::widget::{Space, button, column, container, responsive, row, rule, svg, text};
 use iced::{Center, Element, Fill, Size, Task, window};
@@ -12,21 +13,23 @@ use pcvc_audio::AudioState;
 use super::mixer::{MixerColumns, device_picker, fixed_height, with_tooltip};
 use super::{App, Message};
 use crate::icons;
-use crate::mini::{self, Action, CloseReason, Event};
+use crate::mini::{self, Action, Body, CloseReason, Event};
 use crate::style::{self, Button};
 
-/// How long after opening a window that has not had focus is logged as
-/// such.
-const FOCUS_CHECK: Duration = Duration::from_secs(1);
+static OPEN_WINDOW: LazyLock<svg::Handle> =
+    LazyLock::new(|| svg::Handle::from_memory(icons::OPEN_WINDOW));
+static CLOSE: LazyLock<svg::Handle> = LazyLock::new(|| svg::Handle::from_memory(icons::CLOSE));
 
 #[derive(Debug, Clone)]
 pub enum MiniMessage {
+    /// The window exists.
+    Created(window::Id),
     /// Its button that opens the full window.
     OpenFull,
     /// Its close button.
     Close,
-    /// Logs whether the window has had focus by now.
-    FocusCheck(window::Id),
+    /// The device picker's list opened (`true`) or closed.
+    PickerMenu(bool),
 }
 
 impl App {
@@ -36,8 +39,7 @@ impl App {
         match self.mini.handle(event, Instant::now()) {
             Action::None => Task::none(),
             Action::Open => self.open_mini(),
-            Action::Close(id, reason) => {
-                tracing::debug!("mini mixer: closing ({reason:?})");
+            Action::Close(id, _) => {
                 self.forget_window(id);
                 window::close(id)
             }
@@ -47,25 +49,35 @@ impl App {
 
     pub(super) fn mini_update(&mut self, message: MiniMessage) -> Task<Message> {
         match message {
+            MiniMessage::Created(id) => {
+                let task = self.mini_event(Event::Created(id));
+                Task::batch([task, self.fit_mini()])
+            }
             MiniMessage::OpenFull => {
                 let close = self.mini_event(Event::Close(CloseReason::OpenFull));
                 Task::batch([close, self.open_window()])
             }
             MiniMessage::Close => self.mini_event(Event::Close(CloseReason::CloseButton)),
-            MiniMessage::FocusCheck(id) => {
-                if self.mini.is(id) && !self.mini.has_had_focus() {
-                    tracing::debug!(
-                        "mini mixer: no focus {FOCUS_CHECK:?} after opening; close it with \
-                         Escape after clicking into it, the tray, or its close button"
-                    );
-                }
+            MiniMessage::PickerMenu(open) => {
+                self.mini_picker_open = open;
                 Task::none()
             }
         }
     }
 
+    /// Escape closes the mini mixer, unless it closes the device list.
+    pub(super) fn mini_escape(&mut self, id: window::Id) -> Task<Message> {
+        if self.mini.is(id) && self.mini_picker_open {
+            // The list does not close on Escape itself; leaving both open
+            // beats closing the window under it.
+            tracing::debug!("mini mixer: Escape ignored while the device list is open");
+            return Task::none();
+        }
+        self.mini_event(Event::Escape(id))
+    }
+
     fn open_mini(&mut self) -> Task<Message> {
-        let height = mini::height(self.mini_rows());
+        let height = mini::height(self.mini_body());
         let size = Size::new(style::MINI_WIDTH, height);
         let (id, opened) = window::open(window::Settings {
             size,
@@ -91,33 +103,33 @@ impl App {
         tracing::debug!("mini mixer: opening, {size:?}");
         self.mini.handle(Event::Opened(id), Instant::now());
         self.mini_height = height;
+        self.mini_picker_open = false;
         self.request_icons();
-        let check = Task::perform(tokio::time::sleep(FOCUS_CHECK), move |()| {
-            Message::Mini(MiniMessage::FocusCheck(id))
-        });
-        let opened = opened.then(|id| {
+        opened.then(|id| {
             Task::batch([
+                Task::done(Message::Mini(MiniMessage::Created(id))),
                 window::gain_focus(id),
                 window::scale_factor(id).map(move |f| Message::ScaleFactor(id, f)),
             ])
-        });
-        Task::batch([opened, check])
+        })
     }
 
-    /// Application rows the mini mixer shows.
-    fn mini_rows(&self) -> usize {
-        self.audio
-            .as_ref()
-            .and_then(|a| a.default_device.as_ref())
-            .map_or(0, |d| d.sessions.len())
+    fn mini_body(&self) -> Body {
+        match &self.audio {
+            None => Body::Loading,
+            Some(audio) => match &audio.default_device {
+                None => Body::NoDevice,
+                Some(device) => Body::Rows(device.sessions.len()),
+            },
+        }
     }
 
-    /// Fits the open mini mixer to its rows after they changed.
+    /// Fits the mini mixer to what it shows, once its window exists.
     pub(super) fn fit_mini(&mut self) -> Task<Message> {
-        let Some(id) = self.mini.id() else {
+        let Some(id) = self.mini.id().filter(|_| self.mini.is_created()) else {
             return Task::none();
         };
-        let height = mini::height(self.mini_rows());
+        let height = mini::height(self.mini_body());
         if height == self.mini_height {
             return Task::none();
         }
@@ -139,12 +151,8 @@ impl App {
                 .size(style::TEXT_SMALL)
                 .style(style::muted_text),
             Space::new().width(Fill),
-            header_button(
-                icons::OPEN_WINDOW,
-                "Open the full window",
-                MiniMessage::OpenFull
-            ),
-            header_button(icons::CLOSE, "Close", MiniMessage::Close),
+            header_button(&OPEN_WINDOW, "Open the full window", MiniMessage::OpenFull),
+            header_button(&CLOSE, "Close", MiniMessage::Close),
         ]
         .spacing(style::SPACE_XS)
         .height(style::MINI_HEADER)
@@ -173,7 +181,12 @@ impl App {
     fn mini_layout<'a>(&'a self, audio: &'a AudioState, width: f32) -> Element<'a, Message> {
         let density = &style::COMPACT;
         let cols = MixerColumns::new(width, density);
-        let picker = style::beside_gutter(device_picker(audio, &cols, density));
+        let picker = style::beside_gutter(device_picker(
+            audio,
+            &cols,
+            density,
+            Some(|open| Message::Mini(MiniMessage::PickerMenu(open))),
+        ));
         let Some(device) = &audio.default_device else {
             return column![
                 picker,
@@ -200,11 +213,11 @@ impl App {
 
 /// A small icon button in the header, named by its tooltip.
 fn header_button<'a>(
-    icon: &'static [u8],
+    icon: &svg::Handle,
     label: &'static str,
     message: MiniMessage,
 ) -> Element<'a, Message> {
-    let glyph = svg(svg::Handle::from_memory(icon))
+    let glyph = svg(icon.clone())
         .width(style::MINI_HEADER_ICON)
         .height(style::MINI_HEADER_ICON)
         .style(style::header_icon);

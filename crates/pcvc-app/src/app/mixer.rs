@@ -187,7 +187,7 @@ impl App {
     fn mixer_layout<'a>(&'a self, audio: &'a AudioState, width: f32) -> Element<'a, Message> {
         let density = &style::REGULAR;
         let cols = MixerColumns::new(width, density);
-        let picker = device_picker(audio, &cols, density);
+        let picker = device_picker(audio, &cols, density, None);
         let Some(device) = &audio.default_device else {
             return column![
                 style::beside_gutter(container(picker).padding(density.inset).style(style::card)),
@@ -363,11 +363,12 @@ impl App {
 }
 
 /// The output device label and picker, with the selected device's name
-/// shortened to fit.
+/// shortened to fit. `on_menu` hears when its list opens and closes.
 pub(super) fn device_picker<'a>(
     audio: &'a AudioState,
     cols: &MixerColumns,
     density: &Density,
+    on_menu: Option<fn(bool) -> Message>,
 ) -> Element<'a, Message> {
     let selected = audio.default_device.as_ref().and_then(|device| {
         let info = audio.devices.iter().find(|d| d.id == device.id)?;
@@ -386,6 +387,10 @@ pub(super) fn device_picker<'a>(
     .text_size(density.text)
     .padding(density.picker_padding)
     .width(Fill);
+    let list = match on_menu {
+        Some(on_menu) => list.on_open(on_menu(true)).on_close(on_menu(false)),
+        None => list,
+    };
     fixed_height(
         row![
             container(text("Output device").size(density.text))

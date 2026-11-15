@@ -15,6 +15,7 @@ use super::*;
 use crate::app_icons::{IconKey, Resolved};
 use crate::config::ThemeChoice;
 use crate::inbox;
+use crate::mini::{Body, height};
 use crate::mixer::Target;
 
 struct Harness {
@@ -75,14 +76,21 @@ impl Harness {
         id
     }
 
-    /// Opens the mini mixer with a tray click, at scale 1.
-    fn open_mini(&mut self) -> window::Id {
-        self.run(vec![Message::Inbound(Inbound::Tray(TrayAction::Click(
-            tray_icon::MouseButton::Left,
-        )))]);
-        let id = self.app.mini.id().expect("the click opens the mini mixer");
-        self.run(vec![Message::ScaleFactor(id, 1.0)]);
+    /// Opens the mini mixer with `action`, as the platform creates it at
+    /// scale 1.
+    fn open_mini_with(&mut self, action: TrayAction) -> window::Id {
+        self.run(vec![Message::Inbound(Inbound::Tray(action))]);
+        let id = self.app.mini.id().expect("the action opens the mini mixer");
+        self.run(vec![
+            Message::Mini(MiniMessage::Created(id)),
+            Message::ScaleFactor(id, 1.0),
+        ]);
         id
+    }
+
+    /// Opens the mini mixer with a left click on the tray icon.
+    fn open_mini(&mut self) -> window::Id {
+        self.open_mini_with(TrayAction::Click(tray_icon::MouseButton::Left))
     }
 
     /// The mini mixer's view at its window size.
@@ -537,7 +545,7 @@ fn mini_opens_beside_the_full_window_and_fits_its_rows() {
     let mini = h.open_mini();
     assert_ne!(main, mini);
     assert_eq!(h.app.window, Some(main));
-    assert_eq!(h.app.mini_height, crate::mini::height(4));
+    assert_eq!(h.app.mini_height, height(Body::Rows(4)));
     assert_eq!(h.app.title(mini), "PcVolumeControl Mixer");
     // Each window shows its own view.
     simulator(h.app.view(main)).find("Status").unwrap();
@@ -548,14 +556,14 @@ fn mini_opens_beside_the_full_window_and_fits_its_rows() {
 
     // Both follow the audio state; the mini mixer grows and shrinks.
     add_session(&mut h, "vlc", "VLC", 30.0);
-    assert_eq!(h.app.mini_height, crate::mini::height(5));
+    assert_eq!(h.app.mini_height, height(Body::Rows(5)));
     simulator(h.app.view(main)).find("VLC").unwrap();
     simulator(h.app.view(mini)).find("VLC").unwrap();
     for session in h.sessions() {
         h.backend.remove_session(&session.id).unwrap();
     }
     h.refresh_audio();
-    assert_eq!(h.app.mini_height, crate::mini::height(0));
+    assert_eq!(h.app.mini_height, height(Body::Rows(0)));
 
     // Icons are rendered for the sharpest open window.
     h.run(vec![Message::ScaleFactor(mini, 2.0)]);
@@ -571,12 +579,23 @@ fn mini_closes_and_opens_the_full_window() {
     let mut h = Harness::new();
     let tray = |action| Message::Inbound(Inbound::Tray(action));
 
-    // The menu item toggles it; Escape elsewhere does nothing.
-    h.run(vec![tray(TrayAction::Mixer)]);
-    let mini = h.app.mini.id().unwrap();
+    // The menu item toggles it; Escape elsewhere, or while its device list
+    // is open, does nothing.
+    let mini = h.open_mini_with(TrayAction::Mixer);
     h.run(vec![Message::Escape(window::Id::unique())]);
     assert!(h.app.mini.is(mini));
+    h.run(vec![
+        Message::Mini(MiniMessage::PickerMenu(true)),
+        Message::Escape(mini),
+    ]);
+    assert!(h.app.mini.is(mini));
     h.run(vec![tray(TrayAction::Mixer)]);
+    assert_eq!(h.app.mini.id(), None);
+
+    // Middle clicks toggle it too.
+    let middle = TrayAction::Click(tray_icon::MouseButton::Middle);
+    h.open_mini_with(middle);
+    h.run(vec![tray(middle)]);
     assert_eq!(h.app.mini.id(), None);
 
     // Its button opens the full window and closes it.
@@ -584,6 +603,15 @@ fn mini_closes_and_opens_the_full_window() {
     h.run(vec![Message::Mini(MiniMessage::OpenFull)]);
     assert_eq!(h.app.mini.id(), None);
     let main = h.app.window.unwrap();
+
+    // Focus changes of the full window leave it alone.
+    let mini = h.open_mini();
+    h.run(vec![
+        Message::WindowFocus(mini, true),
+        Message::WindowFocus(main, false),
+    ]);
+    assert!(h.app.mini.is(mini));
+    h.run(vec![tray(TrayAction::Mixer)]);
 
     // Closing it never quits, even without a tray; the close button too.
     let mini = h.open_mini();
@@ -604,15 +632,41 @@ fn mini_closes_and_opens_the_full_window() {
     h.run(vec![tray(TrayAction::DoubleClick)]);
     assert_eq!(h.app.mini.id(), None);
     assert_eq!(h.app.window, Some(main));
+}
 
-    // Focus changes of the full window leave it alone.
-    std::thread::sleep(crate::mini::DOUBLE_CLICK_QUIET);
-    let mini = h.open_mini();
-    h.run(vec![
-        Message::WindowFocus(mini, true),
-        Message::WindowFocus(main, false),
-    ]);
-    assert!(h.app.mini.is(mini));
+#[test]
+fn mini_fits_while_loading_and_without_a_device() {
+    let mut h = Harness::new();
+    h.app.audio = None;
+    h.open_mini();
+    assert_eq!(h.app.mini_height, height(Body::Loading));
+    let mut ui = h.mini_ui();
+    let note = middle(&mut ui, "Reading audio devices...");
+    let bottom = note + style::MINI_ROW / 2.0 + style::MINI_PADDING.bottom;
+    assert!((bottom - h.app.mini_height).abs() < 0.5, "{bottom}");
+    drop(ui);
+
+    let mut state = h.backend.snapshot().unwrap();
+    state.default_device = None;
+    h.run(vec![Message::Inbound(Inbound::Audio(state))]);
+    assert_eq!(h.app.mini_height, height(Body::NoDevice));
+    let mut ui = h.mini_ui();
+    ui.find("Output device").unwrap();
+    let note = middle(&mut ui, "No default playback device");
+    let bottom = note + style::MINI_ROW / 2.0 + style::MINI_PADDING.bottom;
+    assert!((bottom - h.app.mini_height).abs() < 0.5, "{bottom}");
+}
+
+#[test]
+fn mini_resizes_only_once_created() {
+    let mut h = Harness::new();
+    h.run(vec![Message::Inbound(Inbound::Tray(TrayAction::Mixer))]);
+    let mini = h.app.mini.id().unwrap();
+    // A new application before the window exists: sized when it does.
+    add_session(&mut h, "vlc", "VLC", 30.0);
+    assert_eq!(h.app.mini_height, height(Body::Rows(4)));
+    h.run(vec![Message::Mini(MiniMessage::Created(mini))]);
+    assert_eq!(h.app.mini_height, height(Body::Rows(5)));
 }
 
 #[test]
@@ -623,7 +677,7 @@ fn mini_shows_the_mixer_rows() {
     let red = image::Handle::from_rgba(1, 1, vec![255, 0, 0, 255]);
     h.resolve_icon(&sessions[0], Some(red));
     h.resolve_icon(&sessions[1], None);
-    assert_eq!(h.app.mini_height, crate::mini::height(5));
+    assert_eq!(h.app.mini_height, height(Body::Rows(5)));
 
     let mut ui = h.mini_ui();
     for name in ["Output device", "Master", "Firefox", "Spotify", "Discord"] {
@@ -672,7 +726,7 @@ fn mini_without_applications() {
     }
     h.refresh_audio();
     h.open_mini();
-    assert_eq!(h.app.mini_height, crate::mini::height(0));
+    assert_eq!(h.app.mini_height, height(Body::Rows(0)));
     let mut ui = h.mini_ui();
     ui.find("Master").unwrap();
     let note = middle(&mut ui, "No applications are playing audio");

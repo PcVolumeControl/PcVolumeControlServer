@@ -180,6 +180,8 @@ pub struct App {
     mini: MiniWindow,
     /// The height last given to the mini mixer.
     mini_height: f32,
+    /// Whether the mini mixer's device list is open.
+    mini_picker_open: bool,
     config: Config,
     config_path: Option<PathBuf>,
     settings: SettingsForm,
@@ -241,6 +243,7 @@ impl App {
             window: None,
             mini: MiniWindow::default(),
             mini_height: 0.0,
+            mini_picker_open: false,
             settings: SettingsForm::from(&config),
             notice: None,
             config,
@@ -343,7 +346,7 @@ impl App {
                     MiniEvent::Unfocused(id)
                 })
             }
-            Message::Escape(id) => self.mini_event(MiniEvent::Escape(id)),
+            Message::Escape(id) => self.mini_escape(id),
             Message::Mini(message) => self.mini_update(message),
             Message::ShowPage(page) => {
                 self.page = page;
